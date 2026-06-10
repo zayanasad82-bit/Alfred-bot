@@ -71,8 +71,8 @@ async def on_message(message):
     # =========================
     if isinstance(message.channel, discord.DMChannel):
 
-    print("OWNER_ID:", OWNER_ID)
-    print("SENDER:", message.author.id)
+        print("OWNER_ID:", OWNER_ID)
+        print("SENDER:", message.author.id)
 
         if message.author.id != OWNER_ID:
             await message.channel.send("👋 Only my owner can use AI chat. DM @_spidey_gg for any issue")
