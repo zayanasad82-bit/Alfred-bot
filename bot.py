@@ -66,24 +66,51 @@ async def on_message(message):
     if message.author.bot:
         return
 
-if isinstance(message.channel, discord.DMChannel):
+    # =========================
+    # 🟢 DM HANDLING (AI)
+    # =========================
+    if isinstance(message.channel, discord.DMChannel):
 
-    if message.author.id != OWNER_ID:
-        await message.channel.send("👋 Only my owner can use AI chat.")
+        if message.author.id != OWNER_ID:
+            await message.channel.send("👋 Only my owner can use AI chat.")
+            return
+
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=message.content
+            )
+
+            await message.channel.send(response.text)
+
+        except Exception as e:
+            await message.channel.send(f"⚠️ AI error: {e}")
+
         return
 
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=message.content
-        )
+    # =========================
+    # 🌐 SERVER MODERATION
+    # =========================
+    content = message.content.lower()
 
-        await message.channel.send(response.text)
+    if any(word in content for word in BAD_WORDS):
+        await message.delete()
+        await message.channel.send(f"⚠️ {message.author.mention} no bad words!")
 
-    except Exception as e:
-        await message.channel.send(f"⚠️ AI error: {e}")
+        try:
+            await message.author.timeout(
+                discord.utils.utcnow() + timedelta(minutes=5),
+                reason="Bad language"
+            )
+        except:
+            pass
 
-    return
+    if re.search(INVITE_REGEX, content):
+        await message.delete()
+        await message.channel.send(f"🚫 {message.author.mention} no invites!")
+
+    # IMPORTANT LINE (DO NOT REMOVE)
+    await bot.process_commands(message)
     
 # =========================
 # READY EVENT
