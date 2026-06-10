@@ -6,8 +6,15 @@ import sqlite3
 import re
 import random
 import os
+from google import genai
 
 TOKEN = os.getenv("TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+MODEL_NAME = "gemini-3.5-flash"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -52,20 +59,67 @@ async def log(guild, text):
 BAD_WORDS = ["badword1", "badword2"]
 INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
 
+# =========================
+# 🧠 MEMORY STORE
+# =========================
+dm_memory = {}
+
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
 
     # =========================
-    # 🟢 DM HANDLING
+    # 🟢 DM HANDLING + AI (OWNER ONLY)
     # =========================
     if isinstance(message.channel, discord.DMChannel):
+
+        # ONLY OWNER GETS AI
+        if message.author.id == OWNER_ID:
+
+            user_id = str(message.author.id)
+
+            if user_id not in dm_memory:
+                dm_memory[user_id] = []
+
+            # add user message
+            dm_memory[user_id].append({
+                "role": "user",
+                "parts": [message.content]
+            })
+
+            # keep last 10 messages (memory limit)
+            dm_memory[user_id] = dm_memory[user_id][-10:]
+
+            try:
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=dm_memory[user_id]
+                )
+
+                reply = response.text
+
+            except Exception as e:
+                reply = f"⚠️ AI error: {str(e)}"
+
+            # store AI response
+            dm_memory[user_id].append({
+                "role": "model",
+                "parts": [reply]
+            })
+
+            await message.channel.send(reply)
+            return
+
+        # NON-OWNER DM RESPONSE
         await message.channel.send(
-            "👋 Hi! I received your DM, but I only work fully inside servers. For any problem, send friend request to my developer @_spidey_gg."
+            "👋 Hi! I only provide AI chat to my owner."
         )
         return
 
+    # =========================
+    # 🛡️ YOUR OLD MODERATION SYSTEM (REBUILT)
+    # =========================
     content = message.content.lower()
 
     if any(word in content for word in BAD_WORDS):
