@@ -12,6 +12,7 @@ TOKEN = os.getenv("TOKEN")
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.guilds = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -210,6 +211,52 @@ async def nick(interaction: discord.Interaction, member: discord.Member, nicknam
     except discord.Forbidden:
         await interaction.response.send_message(
             "❌ I don't have permission to change this user's nickname.",
+            ephemeral=True
+        )
+
+# =========================
+# 🏷️ GIVE ROLE
+# =========================
+@bot.tree.command(name="giverole", description="Give a role to a member")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def giverole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+
+    try:
+        await member.add_roles(role)
+
+        await interaction.response.send_message(
+            f"✅ Gave **{role.name}** to {member.mention}"
+        )
+
+        await log(interaction.guild, f"GIVEROLE | {member} → {role.name} | {interaction.user}")
+
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to give this role.",
+            ephemeral=True
+        )
+
+# =========================
+# 🗑️ REMOVE ROLE
+# =========================
+@bot.tree.command(name="removerole", description="Remove a role from a member")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def removerole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+
+    try:
+        await member.remove_roles(role)
+
+        await interaction.response.send_message(
+            f"🗑️ Removed **{role.name}** from {member.mention}"
+        )
+
+        await log(interaction.guild, f"REMOVEROLE | {member} - {role.name} | {interaction.user}")
+
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "❌ I don't have permission to remove this role.",
             ephemeral=True
         )
 
