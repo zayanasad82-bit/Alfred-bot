@@ -66,7 +66,7 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    if isinstance(message.channel, discord.DMChannel):
+if isinstance(message.channel, discord.DMChannel):
 
     if message.author.id != OWNER_ID:
         await message.channel.send("👋 Only my owner can use AI chat.")
@@ -84,8 +84,6 @@ async def on_message(message):
         await message.channel.send(f"⚠️ AI error: {e}")
 
     return
-
-await bot.process_commands(message)
     
 # =========================
 # READY EVENT
