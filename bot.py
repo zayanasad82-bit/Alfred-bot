@@ -94,7 +94,7 @@ async def on_message(message):
         try:
             response = client.models.generate_content(
                 model=MODEL_NAME,
-                contents=dm_memory[user_id]
+                contents=message.content
             )
 
             reply = response.text
