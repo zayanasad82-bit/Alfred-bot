@@ -76,7 +76,7 @@ async def on_message(message):
 
             response = client.models.generate_content(
                 model=MODEL_NAME,
-                contents="Say hello"
+                contents=message.content
             )
 
             await message.channel.send(response.text)
