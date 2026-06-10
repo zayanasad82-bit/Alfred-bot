@@ -68,25 +68,24 @@ async def on_message(message):
 
     if isinstance(message.channel, discord.DMChannel):
 
-        await message.channel.send("DM RECEIVED")
-
-        try:
-            await message.channel.send(f"Your ID: {message.author.id}")
-            await message.channel.send(f"OWNER ID: {OWNER_ID}")
-
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=message.content
-            )
-
-            await message.channel.send(response.text)
-
-        except Exception as e:
-            await message.channel.send(f"ERROR: {e}")
-
+    if message.author.id != OWNER_ID:
+        await message.channel.send("👋 Only my owner can use AI chat.")
         return
 
-    await bot.process_commands(message)
+    try:
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=message.content
+        )
+
+        await message.channel.send(response.text)
+
+    except Exception as e:
+        await message.channel.send(f"⚠️ AI error: {e}")
+
+    return
+
+await bot.process_commands(message)
     
 # =========================
 # READY EVENT
