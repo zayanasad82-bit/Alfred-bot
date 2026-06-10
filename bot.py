@@ -66,49 +66,25 @@ async def on_message(message):
     if message.author.bot:
         return
 
-    # =========================
-    # 🟢 DM HANDLING (AI)
-    # =========================
-if isinstance(message.channel, discord.DMChannel):
+    if isinstance(message.channel, discord.DMChannel):
 
-    await message.channel.send("DM RECEIVED")
-
-    try:
-        await message.channel.send(f"Your ID: {message.author.id}")
-        await message.channel.send(f"OWNER ID: {OWNER_ID}")
-
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents="Say hello"
-        )
-
-        await message.channel.send(response.text)
-
-    except Exception as e:
-        await message.channel.send(f"ERROR: {e}")
-
-    return
-
-    # =========================
-    # 🌐 SERVER MESSAGE HANDLING
-    # =========================
-    content = message.content.lower()
-
-    if any(word in content for word in BAD_WORDS):
-        await message.delete()
-        await message.channel.send(f"⚠️ {message.author.mention} no bad words!")
+        await message.channel.send("DM RECEIVED")
 
         try:
-            await message.author.timeout(
-                discord.utils.utcnow() + timedelta(minutes=5),
-                reason="Bad language"
-            )
-        except:
-            pass
+            await message.channel.send(f"Your ID: {message.author.id}")
+            await message.channel.send(f"OWNER ID: {OWNER_ID}")
 
-    if re.search(INVITE_REGEX, content):
-        await message.delete()
-        await message.channel.send(f"🚫 {message.author.mention} no invites!")
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents="Say hello"
+            )
+
+            await message.channel.send(response.text)
+
+        except Exception as e:
+            await message.channel.send(f"ERROR: {e}")
+
+        return
 
     await bot.process_commands(message)
     
