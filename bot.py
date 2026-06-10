@@ -47,7 +47,7 @@ async def log(guild, text):
         await channel.send(f"📜 {text}")
 
 # =========================
-# AUTO MODERATION
+# AUTO MODERATION + DM HANDLING
 # =========================
 BAD_WORDS = ["badword1", "badword2"]
 INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
@@ -55,6 +55,15 @@ INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
 @bot.event
 async def on_message(message):
     if message.author.bot:
+        return
+
+    # =========================
+    # 🟢 DM HANDLING
+    # =========================
+    if isinstance(message.channel, discord.DMChannel):
+        await message.channel.send(
+            "👋 Hi! I received your DM, but I only work fully inside servers. For any problem, send friend request to my developer @beyondbatman_gg."
+        )
         return
 
     content = message.content.lower()
