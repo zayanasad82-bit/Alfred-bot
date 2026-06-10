@@ -62,7 +62,7 @@ async def on_message(message):
     # =========================
     if isinstance(message.channel, discord.DMChannel):
         await message.channel.send(
-            "👋 Hi! I received your DM, but I only work fully inside servers. For any problem, send friend request to my developer @beyondbatman_gg."
+            "👋 Hi! I received your DM, but I only work fully inside servers. For any problem, send friend request to my developer @_spidey_gg."
         )
         return
 
