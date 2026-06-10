@@ -6,8 +6,15 @@ import sqlite3
 import re
 import random
 import os
+from google import genai
 
 TOKEN = os.getenv("TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+MODEL_NAME = "gemini-3.5-flash"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -46,6 +53,8 @@ async def log(guild, text):
     if channel:
         await channel.send(f"📜 {text}")
 
+dm_memory = {}
+
 # =========================
 # AUTO MODERATION + DM HANDLING
 # =========================
@@ -61,9 +70,40 @@ async def on_message(message):
     # 🟢 DM HANDLING
     # =========================
     if isinstance(message.channel, discord.DMChannel):
-        await message.channel.send(
-            "👋 Hi! I received your DM, but I only work fully inside servers. For any problem, send friend request to my developer @_spidey_gg."
-        )
+
+        if message.author.id != OWNER_ID:
+            await message.channel.send("👋 Only my owner can use AI chat. DM @_spidey_gg for any issue")
+            return
+
+        user_id = str(message.author.id)
+
+        if user_id not in dm_memory:
+            dm_memory[user_id] = []
+
+        dm_memory[user_id].append({
+            "role": "user",
+            "parts": [message.content]
+        })
+
+        dm_memory[user_id] = dm_memory[user_id][-10:]
+
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=dm_memory[user_id]
+            )
+
+            reply = response.text
+
+        except Exception as e:
+            reply = f"⚠️ AI error: {e}"
+
+        dm_memory[user_id].append({
+            "role": "model",
+            "parts": [reply]
+        })
+
+        await message.channel.send(reply)
         return
 
     content = message.content.lower()
