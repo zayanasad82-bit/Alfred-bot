@@ -67,27 +67,31 @@ async def on_message(message):
         return
 
     # =========================
-    # 🟢 DM HANDLING
+    # 🟢 DM HANDLING (AI)
     # =========================
     if isinstance(message.channel, discord.DMChannel):
 
         print("OWNER_ID:", OWNER_ID)
         print("SENDER:", message.author.id)
 
+        # only owner can use AI
         if message.author.id != OWNER_ID:
             await message.channel.send("👋 Only my owner can use AI chat. DM @_spidey_gg for any issue")
             return
 
         user_id = str(message.author.id)
 
+        # init memory
         if user_id not in dm_memory:
             dm_memory[user_id] = []
 
+        # store user message
         dm_memory[user_id].append({
             "role": "user",
             "parts": [message.content]
         })
 
+        # keep last 10 messages
         dm_memory[user_id] = dm_memory[user_id][-10:]
 
         try:
@@ -101,6 +105,7 @@ async def on_message(message):
         except Exception as e:
             reply = f"⚠️ AI error: {e}"
 
+        # store bot reply
         dm_memory[user_id].append({
             "role": "model",
             "parts": [reply]
@@ -109,6 +114,9 @@ async def on_message(message):
         await message.channel.send(reply)
         return
 
+    # =========================
+    # 🌐 SERVER MESSAGE HANDLING
+    # =========================
     content = message.content.lower()
 
     if any(word in content for word in BAD_WORDS):
@@ -128,7 +136,7 @@ async def on_message(message):
         await message.channel.send(f"🚫 {message.author.mention} no invites!")
 
     await bot.process_commands(message)
-
+    
 # =========================
 # READY EVENT
 # =========================
