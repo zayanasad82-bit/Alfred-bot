@@ -69,50 +69,25 @@ async def on_message(message):
     # =========================
     # 🟢 DM HANDLING (AI)
     # =========================
-    if isinstance(message.channel, discord.DMChannel):
+if isinstance(message.channel, discord.DMChannel):
 
-        print("OWNER_ID:", OWNER_ID)
-        print("SENDER:", message.author.id)
+    await message.channel.send("DM RECEIVED")
 
-        # only owner can use AI
-        if message.author.id != OWNER_ID:
-            await message.channel.send("👋 Only my owner can use AI chat. DM @_spidey_gg for any issue")
-            return
+    try:
+        await message.channel.send(f"Your ID: {message.author.id}")
+        await message.channel.send(f"OWNER ID: {OWNER_ID}")
 
-        user_id = str(message.author.id)
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents="Say hello"
+        )
 
-        # init memory
-        if user_id not in dm_memory:
-            dm_memory[user_id] = []
+        await message.channel.send(response.text)
 
-        # store user message
-        dm_memory[user_id].append({
-            "role": "user",
-            "parts": [message.content]
-        })
+    except Exception as e:
+        await message.channel.send(f"ERROR: {e}")
 
-        # keep last 10 messages
-        dm_memory[user_id] = dm_memory[user_id][-10:]
-
-        try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=dm_memory[user_id]
-            )
-
-            reply = response.text
-
-        except Exception as e:
-            reply = f"⚠️ AI error: {e}"
-
-        # store bot reply
-        dm_memory[user_id].append({
-            "role": "model",
-            "parts": [reply]
-        })
-
-        await message.channel.send(reply)
-        return
+    return
 
     # =========================
     # 🌐 SERVER MESSAGE HANDLING
