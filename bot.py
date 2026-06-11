@@ -73,28 +73,24 @@ async def on_message(message):
     if isinstance(message.channel, discord.DMChannel):
 
         if message.author.id != OWNER_ID:
-            await message.channel.send("👋 Only my owner(Spidey) can use AI chat. DM @_spidey_gg if you got any issues! ")
+            await message.channel.send(
+                "👋 Only my owner (Spidey) can use AI chat. DM @_spidey_gg if you got any issues!"
+            )
             return
 
         user_id = str(message.author.id)
 
-        # create memory if not exists
+        # Create memory if it doesn't exist
         if user_id not in dm_memory:
-            dm_memory[user_id] = []
+            dm_memory[user_id] = ""
 
-        # store user message
-        dm_memory[user_id].append({
-            "role": "user",
-            "parts": [message.content]
-        })
-
-        # keep last 10 messages only
-        dm_memory[user_id] = dm_memory[user_id][-10:]
+        # Add the user's message to memory
+        dm_memory[user_id] += f"User: {message.content}\n"
 
         try:
             response = client.models.generate_content(
                 model=MODEL_NAME,
-                contents=message.content
+                contents=dm_memory[user_id]
             )
 
             reply = response.text
@@ -102,14 +98,16 @@ async def on_message(message):
         except Exception as e:
             reply = f"⚠️ AI error: {e}"
 
-        # store bot reply
-        dm_memory[user_id].append({
-            "role": "model",
-            "parts": [reply]
-        })
+        # Add the bot's reply to memory
+        dm_memory[user_id] += f"Bot: {reply}\n"
+
+        # Keep only the last 4000 characters
+        dm_memory[user_id] = dm_memory[user_id][-4000:]
 
         await message.channel.send(reply)
         return
+
+    await bot.process_commands(message)
 
     # =========================
     # 🌐 SERVER COMMAND PROCESSING
