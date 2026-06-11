@@ -6,7 +6,11 @@ import sqlite3
 import re
 import random
 import os
+import io
+
 from google import genai
+from pypdf import PdfReader
+from docx import Document
 
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -84,21 +88,99 @@ async def on_message(message):
         if user_id not in dm_memory:
             dm_memory[user_id] = ""
 
-        # Add the user's message to memory
+        # Add user's message to memory
         dm_memory[user_id] += f"User: {message.content}\n"
 
         try:
-            # Try your main model first
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=dm_memory[user_id]
-            )
+
+            # =========================
+            # ATTACHMENT HANDLING
+            # =========================
+            if message.attachments:
+
+                attachment = message.attachments[0]
+
+                # ---------- IMAGE ----------
+                if attachment.content_type and attachment.content_type.startswith("image/"):
+
+                    image_data = await attachment.read()
+
+                    response = client.models.generate_content(
+                        model=MODEL_NAME,
+                        contents=[
+                            dm_memory[user_id],
+                            {
+                                "mime_type": attachment.content_type,
+                                "data": image_data
+                            }
+                        ]
+                    )
+
+                # ---------- PDF ----------
+                elif attachment.filename.lower().endswith(".pdf"):
+
+                    pdf_data = await attachment.read()
+
+                    pdf = PdfReader(io.BytesIO(pdf_data))
+
+                    text = ""
+
+                    for page in pdf.pages:
+                        page_text = page.extract_text()
+                        if page_text:
+                            text += page_text + "\n"
+
+                    response = client.models.generate_content(
+                        model=MODEL_NAME,
+                        contents=f"{dm_memory[user_id]}\n\nPDF contents:\n{text}"
+                    )
+
+                # ---------- DOCX ----------
+                elif attachment.filename.lower().endswith(".docx"):
+
+                    doc_data = await attachment.read()
+
+                    doc = Document(io.BytesIO(doc_data))
+
+                    text = "\n".join(
+                        para.text for para in doc.paragraphs
+                    )
+
+                    response = client.models.generate_content(
+                        model=MODEL_NAME,
+                        contents=f"{dm_memory[user_id]}\n\nDocument contents:\n{text}"
+                    )
+
+                # ---------- TXT ----------
+                elif attachment.filename.lower().endswith(".txt"):
+
+                    txt_data = await attachment.read()
+
+                    text = txt_data.decode("utf-8", errors="ignore")
+
+                    response = client.models.generate_content(
+                        model=MODEL_NAME,
+                        contents=f"{dm_memory[user_id]}\n\nText file contents:\n{text}"
+                    )
+
+                else:
+
+                    response = client.models.generate_content(
+                        model=MODEL_NAME,
+                        contents=dm_memory[user_id]
+                    )
+
+            else:
+
+                response = client.models.generate_content(
+                    model=MODEL_NAME,
+                    contents=dm_memory[user_id]
+                )
 
             reply = response.text
 
         except Exception as e:
 
-            # If model is overloaded, switch to Gemini 2.5 Flash
             if "503" in str(e):
                 try:
                     response = client.models.generate_content(
@@ -114,10 +196,10 @@ async def on_message(message):
             else:
                 reply = f"⚠️ AI error: {e}"
 
-        # Add the bot's reply to memory
+        # Store bot reply in memory
         dm_memory[user_id] += f"Bot: {reply}\n"
 
-        # Keep only the last 4000 characters
+        # Limit memory size
         dm_memory[user_id] = dm_memory[user_id][-4000:]
 
         await message.channel.send(reply)
