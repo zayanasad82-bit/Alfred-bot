@@ -14,7 +14,7 @@ OWNER_ID = int(os.getenv("OWNER_ID"))
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.5-flash"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -88,6 +88,7 @@ async def on_message(message):
         dm_memory[user_id] += f"User: {message.content}\n"
 
         try:
+            # Try your main model first
             response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=dm_memory[user_id]
@@ -96,8 +97,20 @@ async def on_message(message):
             reply = response.text
 
         except Exception as e:
+
+            # If model is overloaded, switch to Gemini 2.5 Flash
             if "503" in str(e):
-                reply = "⚠️ Gemini is currently busy. Please try again in a few seconds."
+                try:
+                    response = client.models.generate_content(
+                        model="gemini-2.5-flash",
+                        contents=dm_memory[user_id]
+                    )
+
+                    reply = response.text
+
+                except Exception as e2:
+                    reply = f"⚠️ Backup AI error: {e2}"
+
             else:
                 reply = f"⚠️ AI error: {e}"
 
