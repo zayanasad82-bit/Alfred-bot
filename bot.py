@@ -14,7 +14,7 @@ OWNER_ID = int(os.getenv("OWNER_ID"))
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MODEL_NAME = "gemini-3.5-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -96,7 +96,10 @@ async def on_message(message):
             reply = response.text
 
         except Exception as e:
-            reply = f"⚠️ AI error: {e}"
+            if "503" in str(e):
+                reply = "⚠️ Gemini is currently busy. Please try again in a few seconds."
+            else:
+                reply = f"⚠️ AI error: {e}"
 
         # Add the bot's reply to memory
         dm_memory[user_id] += f"Bot: {reply}\n"
