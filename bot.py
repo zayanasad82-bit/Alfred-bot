@@ -123,12 +123,10 @@ def get_warnings(user_id, guild_id):
 
 
 def remove_warning(warning_id):
-
     c.execute("""
     DELETE FROM warnings
-    WHERE rowid=?
+    WHERE id=?
     """, (warning_id,))
-
     conn.commit()
 
 # =========================
@@ -567,6 +565,80 @@ async def slowmode(
     await interaction.response.send_message(
         f"🐌 Slowmode set to {seconds} seconds."
     )
+
+# 🧹 Remove ALL warnings from a specific user in this server
+@bot.tree.command(name="clearwarns", description="Remove all warnings from a user")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(moderate_members=True)
+async def clearwarns(
+    interaction: discord.Interaction,
+    member: discord.Member
+):
+
+    # Delete all warnings for that user in this guild
+    c.execute("""
+    DELETE FROM warnings
+    WHERE user_id=? AND guild_id=?
+    """, (member.id, interaction.guild.id))
+
+    conn.commit()
+
+    await interaction.response.send_message(
+        f"🧹 Removed all warnings for {member.mention}"
+    )
+
+    # Log action in mod-log channel (if exists)
+    await log(interaction.guild, f"CLEARWARNS | {member}")
+
+# 🖼️ Show a user's Discord profile picture (avatar)
+@bot.tree.command(name="avatar", description="Show user avatar")
+async def avatar(
+    interaction: discord.Interaction,
+    member: discord.Member = None
+):
+
+    # If no member is mentioned, show command user avatar
+    member = member or interaction.user
+
+    # Create embed for better display
+    embed = discord.Embed(
+        title=f"{member.name}'s Avatar",
+        color=discord.Color.blue()
+    )
+
+    # Set image to user's avatar
+    embed.set_image(url=member.display_avatar.url)
+
+    await interaction.response.send_message(embed=embed)
+
+# 🌄 Show a user's Discord profile banner (if available)
+@bot.tree.command(name="banner", description="Show user banner")
+async def banner(
+    interaction: discord.Interaction,
+    member: discord.Member = None
+):
+
+    # Default to command user if no member is given
+    member = member or interaction.user
+
+    # Fetch full user data (required for banner)
+    user = await bot.fetch_user(member.id)
+
+    # Check if user has a banner set
+    if not user.banner:
+        await interaction.response.send_message("❌ No banner found.")
+        return
+
+    # Create embed for banner display
+    embed = discord.Embed(
+        title=f"{member.name}'s Banner",
+        color=discord.Color.purple()
+    )
+
+    # Set banner image
+    embed.set_image(url=user.banner.url)
+
+    await interaction.response.send_message(embed=embed)
 
 # =========================
 # ERROR HANDLER
