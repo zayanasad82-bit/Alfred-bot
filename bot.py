@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 import sqlite3
 import re
 import random
@@ -11,6 +11,7 @@ import io
 from google import genai
 from pypdf import PdfReader
 from docx import Document
+from discord.utils import utcnow
 
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -34,12 +35,25 @@ c = conn.cursor()
 
 c.execute("""
 CREATE TABLE IF NOT EXISTS warnings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER,
     guild_id INTEGER,
     reason TEXT,
     timestamp TEXT
 )
 """)
+
+# =========================
+# WARNING DB FUNCTION
+# =========================
+def remove_warning(warning_id):
+
+    c.execute("""
+    DELETE FROM warnings
+    WHERE id=?
+    """, (warning_id,))
+
+    conn.commit()
 
 # 🧠 MEMORY TABLE (NEW)
 c.execute("""
@@ -76,6 +90,44 @@ def save_memory(user_id, user_name=None, bot_name=None):
         INSERT INTO memory (user_id, user_name, bot_name)
         VALUES (?, ?, ?)
         """, (user_id, user_name, bot_name))
+
+    conn.commit()
+
+# =========================
+# WARNING FUNCTIONS
+# =========================
+def add_warning(user_id, guild_id, reason, moderator):
+
+    c.execute("""
+    INSERT INTO warnings (user_id, guild_id, reason, timestamp)
+    VALUES (?, ?, ?, ?)
+    """, (
+        user_id,
+        guild_id,
+        reason,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+
+    conn.commit()
+
+
+def get_warnings(user_id, guild_id):
+
+    c.execute("""
+    SELECT id, reason, timestamp
+    FROM warnings
+    WHERE user_id=? AND guild_id=?
+    """, (user_id, guild_id))
+
+    return c.fetchall()
+
+
+def remove_warning(warning_id):
+
+    c.execute("""
+    DELETE FROM warnings
+    WHERE rowid=?
+    """, (warning_id,))
 
     conn.commit()
 
@@ -321,7 +373,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member, reason: 
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(moderate_members=True)
 async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str):
-    await member.timeout(discord.utils.utcnow() + timedelta(minutes=minutes), reason=reason)
+    await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
     await interaction.response.send_message("Muted")
 
 # -------------------------
@@ -355,6 +407,166 @@ async def giverole(interaction: discord.Interaction, member: discord.Member, rol
 async def removerole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
     await member.remove_roles(role)
     await interaction.response.send_message("Role removed")
+
+# -------------------------
+@bot.tree.command(name="warn", description="Warn member")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(moderate_members=True)
+async def warn(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    reason: str
+):
+
+    # save warning ONCE
+    add_warning(
+        member.id,
+        interaction.guild.id,
+        reason,
+        str(interaction.user)
+    )
+
+    # DM embed
+    try:
+        embed = discord.Embed(
+            title="⚠️ You have been warned",
+            color=discord.Color.orange(),
+            timestamp=datetime.now(timezone.utc)
+        )
+        embed.add_field(name="Server", value=interaction.guild.name, inline=False)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"Moderator: {interaction.user}")
+
+        await member.send(embed=embed)
+
+    except discord.Forbidden:
+        pass
+
+    # public response (embed = cleaner UI)
+    embed = discord.Embed(
+        title="⚠️ Warning Issued",
+        color=discord.Color.red()
+    )
+    embed.add_field(name="User", value=member.mention, inline=True)
+    embed.add_field(name="Reason", value=reason, inline=True)
+    embed.set_footer(text=f"By {interaction.user}")
+
+    await interaction.response.send_message(embed=embed)
+
+    # log
+    await log(
+        interaction.guild,
+        f"WARN | {member} | {reason}"
+    )
+
+# -------------------------
+@bot.tree.command(name="warnings", description="Show warnings")
+async def warnings(
+    interaction: discord.Interaction,
+    member: discord.Member
+):
+
+    warns = get_warnings(
+        member.id,
+        interaction.guild.id
+    )
+
+    if not warns:
+        await interaction.response.send_message(
+            "✅ No warnings."
+        )
+        return
+
+    text = ""
+
+    for warn_id, reason, timestamp in warns:
+
+        text += (
+            f"ID: {warn_id}\n"
+            f"Reason: {reason}\n"
+            f"Time: {timestamp}\n\n"
+        )
+
+    await interaction.response.send_message(
+        f"⚠️ Warnings for {member}:\n\n{text}"
+    )
+
+
+# -------------------------
+@bot.tree.command(name="unwarn", description="Remove warning")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(moderate_members=True)
+async def unwarn(
+    interaction: discord.Interaction,
+    warning_id: int
+):
+
+    remove_warning(warning_id)
+
+    await interaction.response.send_message(
+        f"✅ Removed warning #{warning_id}"
+    )
+
+# -------------------------
+@bot.tree.command(name="lock", description="Lock channel")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def lock(interaction: discord.Interaction):
+
+    overwrite = interaction.channel.overwrites_for(
+        interaction.guild.default_role
+    )
+
+    overwrite.send_messages = False
+
+    await interaction.channel.set_permissions(
+        interaction.guild.default_role,
+        overwrite=overwrite
+    )
+
+    await interaction.response.send_message(
+        "🔒 Channel locked."
+    )
+
+
+# -------------------------
+@bot.tree.command(name="unlock", description="Unlock channel")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def unlock(interaction: discord.Interaction):
+
+    overwrite = interaction.channel.overwrites_for(
+        interaction.guild.default_role
+    )
+
+    overwrite.send_messages = None
+
+    await interaction.channel.set_permissions(
+        interaction.guild.default_role,
+        overwrite=overwrite
+    )
+
+    await interaction.response.send_message(
+        "🔓 Channel unlocked."
+    )
+
+
+# -------------------------
+@bot.tree.command(name="slowmode", description="Set slowmode")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_channels=True)
+async def slowmode(
+    interaction: discord.Interaction,
+    seconds: int
+):
+
+    await interaction.channel.edit(
+        slowmode_delay=seconds
+    )
+
+    await interaction.response.send_message(
+        f"🐌 Slowmode set to {seconds} seconds."
+    )
 
 # =========================
 # ERROR HANDLER
