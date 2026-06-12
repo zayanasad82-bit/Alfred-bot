@@ -227,10 +227,6 @@ async def on_message(message):
     # =========================
     await bot.process_commands(message)
 
-    # =========================
-    # 🌐 SERVER COMMAND PROCESSING
-    # =========================
-    await bot.process_commands(message)
   
 # =========================
 # READY EVENT
