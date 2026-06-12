@@ -101,7 +101,7 @@ async def on_message(message):
                 attachment = message.attachments[0]
 
                 print("IMAGE DETECTED:", attachment.filename)
-                
+
                 # ---------- IMAGE ----------
                 if attachment.content_type and attachment.content_type.startswith("image/"):
 
@@ -203,6 +203,10 @@ async def on_message(message):
 
         # Limit memory size
         dm_memory[user_id] = dm_memory[user_id][-4000:]
+
+        # Prevent Discord message length errors
+        if len(reply) > 3900:
+            reply = reply[:3900] + "\n\n...(response truncated)"
 
         await message.channel.send(reply)
         return
