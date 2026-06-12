@@ -103,7 +103,10 @@ async def on_message(message):
                 print("IMAGE DETECTED:", attachment.filename)
 
                 # ---------- IMAGE ----------
-                if attachment.content_type and attachment.content_type.startswith("image/"):
+                if (
+                    attachment.content_type
+                    and attachment.content_type.startswith("image/")
+                ):
 
                     image_data = await attachment.read()
 
@@ -122,7 +125,6 @@ async def on_message(message):
                 elif attachment.filename.lower().endswith(".pdf"):
 
                     pdf_data = await attachment.read()
-
                     pdf = PdfReader(io.BytesIO(pdf_data))
 
                     text = ""
@@ -141,7 +143,6 @@ async def on_message(message):
                 elif attachment.filename.lower().endswith(".docx"):
 
                     doc_data = await attachment.read()
-
                     doc = Document(io.BytesIO(doc_data))
 
                     text = "\n".join(
@@ -158,7 +159,10 @@ async def on_message(message):
 
                     txt_data = await attachment.read()
 
-                    text = txt_data.decode("utf-8", errors="ignore")
+                    text = txt_data.decode(
+                        "utf-8",
+                        errors="ignore"
+                    )
 
                     response = client.models.generate_content(
                         model=MODEL_NAME,
@@ -184,6 +188,7 @@ async def on_message(message):
         except Exception as e:
 
             if "503" in str(e):
+
                 try:
                     response = client.models.generate_content(
                         model="gemini-2.5-flash",
@@ -204,20 +209,19 @@ async def on_message(message):
         # Limit memory size
         dm_memory[user_id] = dm_memory[user_id][-4000:]
 
-        # Prevent Discord message length errors
-        if len(reply) > 3900:
-            reply = reply[:3900] + "\n\n...(response truncated)"
+        # Send long replies in chunks
+        while len(reply) > 1900:
+            await message.channel.send(reply[:1900])
+            reply = reply[1900:]
 
         await message.channel.send(reply)
         return
-
-    await bot.process_commands(message)
 
     # =========================
     # 🌐 SERVER COMMAND PROCESSING
     # =========================
     await bot.process_commands(message)
-    
+  
 # =========================
 # READY EVENT
 # =========================
