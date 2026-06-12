@@ -100,6 +100,8 @@ async def on_message(message):
 
                 attachment = message.attachments[0]
 
+                print("IMAGE DETECTED:", attachment.filename)
+                
                 # ---------- IMAGE ----------
                 if attachment.content_type and attachment.content_type.startswith("image/"):
 
