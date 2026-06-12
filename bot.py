@@ -100,7 +100,7 @@ async def on_message(message):
 
                 attachment = message.attachments[0]
 
-                print("IMAGE DETECTED:", attachment.filename)
+                print("FILE DETECTED:", attachment.filename)
 
                 # ---------- IMAGE ----------
                 if (
@@ -110,14 +110,18 @@ async def on_message(message):
 
                     image_data = await attachment.read()
 
+                    uploaded_file = client.files.upload(
+                        file=image_data,
+                        config={
+                            "mime_type": attachment.content_type
+                        }
+                    )
+
                     response = client.models.generate_content(
                         model=MODEL_NAME,
                         contents=[
                             dm_memory[user_id],
-                            {
-                                "mime_type": attachment.content_type,
-                                "data": image_data
-                            }
+                            uploaded_file
                         ]
                     )
 
@@ -187,6 +191,7 @@ async def on_message(message):
 
         except Exception as e:
 
+            # Fallback to Gemini 2.5 Flash when main model is busy
             if "503" in str(e):
 
                 try:
@@ -216,6 +221,11 @@ async def on_message(message):
 
         await message.channel.send(reply)
         return
+
+    # =========================
+    # 🌐 SERVER COMMAND PROCESSING
+    # =========================
+    await bot.process_commands(message)
 
     # =========================
     # 🌐 SERVER COMMAND PROCESSING
