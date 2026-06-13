@@ -1174,7 +1174,9 @@ class MusicPlayer:
             self.voice_client = await channel.connect(cls=discord.VoiceClient, timeout=20.0)
             return True
         except Exception as e:
-            print(f"Voice connect error: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"Voice connect error: {repr(e)}")
             return False
     
     async def disconnect_voice(self):
