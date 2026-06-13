@@ -44,7 +44,6 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Fix 5: Uptime constant at module level
 START_TIME = datetime.now()
 
 # =========================
@@ -168,9 +167,6 @@ CREATE TABLE IF NOT EXISTS polls (
 )
 """)
 
-# =========================
-# 🕰️ HISTORY SYSTEM
-# =========================
 c.execute("""
 CREATE TABLE IF NOT EXISTS history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -662,10 +658,9 @@ Summary:"""
     try:
         response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
         return response.text[:500]
-    except:
+    except Exception as e:
         return conversation_text[-500:]
 
-# Fix 3: Updated add_warning to include moderator
 def add_warning(user_id, guild_id, reason, moderator=None):
     c.execute("INSERT INTO warnings (user_id, guild_id, reason, moderator, timestamp) VALUES (?, ?, ?, ?, ?)",
               (user_id, guild_id, reason, moderator, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
@@ -675,7 +670,6 @@ def get_warnings(user_id, guild_id):
     c.execute("SELECT id, reason, timestamp FROM warnings WHERE user_id=? AND guild_id=?", (user_id, guild_id))
     return c.fetchall()
 
-# Fix 2: Single remove_warning function using id
 def remove_warning(warning_id):
     c.execute("DELETE FROM warnings WHERE id=?", (warning_id,))
     conn.commit()
@@ -683,7 +677,6 @@ def remove_warning(warning_id):
 # =========================
 # LEVELING SYSTEM
 # =========================
-# Fix 4: Removed static XP_PER_MESSAGE - now random inside add_xp
 XP_COOLDOWN = {}
 
 async def add_xp(user_id, guild_id):
@@ -696,7 +689,6 @@ async def add_xp(user_id, guild_id):
             return
     XP_COOLDOWN[key] = now
     
-    # Fix 4: Random XP per message
     xp_gain = random.randint(15, 25)
     
     c.execute("SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?", (user_id, guild_id))
@@ -733,7 +725,7 @@ def get_balance(user_id, guild_id):
     return {'wallet': 0, 'bank': 0}
 
 def update_balance(user_id, guild_id, amount, account='wallet'):
-    c.execute(f"UPDATE economy SET {account} = {account} + ? WHERE user_id=? AND guild_id=?", (amount, user_id, guild_id))
+    c.execute("UPDATE economy SET " + account + " = " + account + " + ? WHERE user_id=? AND guild_id=?", (amount, user_id, guild_id))
     conn.commit()
 
 # =========================
@@ -758,10 +750,9 @@ BAD_WORDS = ["badword1", "badword2"]
 INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
 
 # =========================
-# OWNER CHECK - Fix 6
+# OWNER CHECK
 # =========================
 async def owner_check(interaction: discord.Interaction):
-    # Safer: check by ID first, then fall back to role name
     return interaction.user.id == OWNER_ID
 
 def is_owner():
@@ -926,11 +917,11 @@ async def check_giveaways():
                             try:
                                 await winner.send(f"🎉 You won **{prize}** in {channel.guild.name}!")
                                 add_history(guild_id, winner.id, str(winner), "GIVEAWAY_WIN", f"Won {prize}")
-                            except:
+                            except Exception as e:
                                 pass
                     else:
                         await channel.send(f"❌ Giveaway ended but no one entered for **{prize}**")
-            except:
+            except Exception as e:
                 pass
         
         c.execute("DELETE FROM giveaways WHERE id=?", (g_id,))
@@ -1012,7 +1003,6 @@ async def consolidate_memories():
 # =========================
 @tasks.loop(minutes=5)
 async def clean_inactive_players():
-    """Disconnect music players that have been idle for too long."""
     for guild_id, player in list(music_players.items()):
         if player.voice_client and player.voice_client.is_connected():
             channel = player.voice_client.channel
@@ -1054,8 +1044,6 @@ URL_REGEX = re.compile(r'https?://')
 
 
 class YTDLSource(PCMVolumeTransformer):
-    """Represents an audio source from yt-dlp for discord.py voice."""
-    
     def __init__(self, source: discord.FFmpegPCMAudio, *, data: dict, volume: float = 0.5):
         super().__init__(source, volume)
         self.data = data
@@ -1071,7 +1059,6 @@ class YTDLSource(PCMVolumeTransformer):
     
     @classmethod
     async def from_url(cls, url: str, *, loop: asyncio.AbstractEventLoop = None, stream: bool = True):
-        """Create a YTDLSource from a URL or search query."""
         loop = loop or asyncio.get_event_loop()
         
         if not URL_REGEX.match(url):
@@ -1093,7 +1080,6 @@ class YTDLSource(PCMVolumeTransformer):
     
     @classmethod
     async def from_playlist(cls, url: str, *, loop: asyncio.AbstractEventLoop = None):
-        """Extract all tracks from a playlist URL."""
         loop = loop or asyncio.get_event_loop()
         
         opts = YTDLP_OPTIONS.copy()
@@ -1125,7 +1111,6 @@ class YTDLSource(PCMVolumeTransformer):
     
     @staticmethod
     def _extract_info(url: str, stream: bool, custom_opts: dict = None):
-        """Synchronous extraction of media info."""
         opts = YTDLP_OPTIONS.copy()
         if custom_opts:
             opts.update(custom_opts)
@@ -1139,7 +1124,6 @@ class YTDLSource(PCMVolumeTransformer):
 
     @classmethod
     async def search_results(cls, query: str, *, loop: asyncio.AbstractEventLoop = None, max_results: int = 5):
-        """Search YouTube and return list of results."""
         loop = loop or asyncio.get_event_loop()
         
         search_url = f'ytsearch{max_results}:{query}'
@@ -1166,8 +1150,6 @@ class YTDLSource(PCMVolumeTransformer):
 
 
 class MusicPlayer:
-    """Manages music playback for a single guild."""
-    
     def __init__(self, bot: commands.Bot, guild_id: int):
         self.bot = bot
         self.guild_id = guild_id
@@ -1183,7 +1165,6 @@ class MusicPlayer:
         self._task = None
     
     async def connect_voice(self, channel: discord.VoiceChannel) -> bool:
-        """Connect to a voice channel."""
         try:
             if self.voice_client and self.voice_client.is_connected():
                 if self.voice_client.channel.id != channel.id:
@@ -1197,7 +1178,6 @@ class MusicPlayer:
             return False
     
     async def disconnect_voice(self):
-        """Disconnect from voice channel."""
         if self.voice_client and self.voice_client.is_connected():
             self.queue = asyncio.Queue()
             self.queue_history.clear()
@@ -1211,7 +1191,6 @@ class MusicPlayer:
             self.voice_client = None
     
     async def add_to_queue(self, track_data: dict, at_front: bool = False):
-        """Add a track to the queue."""
         if at_front:
             old_queue = []
             while not self.queue.empty():
@@ -1223,14 +1202,15 @@ class MusicPlayer:
             await self.queue.put(track_data)
         
         if not self.is_playing() and not self.is_paused:
-            await self.start_playback()
+            if self._task is None or self._task.done():
+                await self.start_playback()
     
     async def start_playback(self):
-        """Start the playback loop."""
+        if self._task is not None and not self._task.done():
+            return
         self._task = asyncio.create_task(self._playback_loop())
     
     async def _playback_loop(self):
-        """Main playback loop - pulls from queue and plays."""
         try:
             while True:
                 if self.loop_mode == 'none':
@@ -1264,7 +1244,6 @@ class MusicPlayer:
             print(f"Playback loop error: {e}")
     
     async def _play_track(self, track_data: dict):
-        """Actually play a track."""
         if not self.voice_client or not self.voice_client.is_connected():
             return
         
@@ -1283,18 +1262,16 @@ class MusicPlayer:
             print(f"Play error: {e}")
     
     async def _update_now_playing(self):
-        """Update the now playing embed/message."""
         if not self.current or not self.now_playing_message:
             return
         
         try:
             embed = self._create_now_playing_embed()
             await self.now_playing_message.edit(embed=embed)
-        except:
+        except Exception as e:
             pass
     
     def _create_now_playing_embed(self) -> discord.Embed:
-        """Create the now playing embed."""
         if not self.current:
             return discord.Embed(title="🎵 No track playing", color=discord.Color.blue())
         
@@ -1322,30 +1299,26 @@ class MusicPlayer:
         return embed
     
     def is_playing(self) -> bool:
-        """Check if audio is currently playing."""
-        return self.voice_client and self.voice_client.is_playing()
+        return self.voice_client is not None and self.voice_client.is_playing()
     
     def pause(self):
-        """Pause playback."""
         if self.voice_client and self.voice_client.is_playing():
             self.voice_client.pause()
             self.is_paused = True
     
     def resume(self):
-        """Resume playback."""
         if self.voice_client and self.voice_client.is_paused():
             self.voice_client.resume()
             self.is_paused = False
     
     def stop(self):
-        """Stop playback and clear queue."""
         if self.voice_client:
             self.voice_client.stop()
         
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
-            except:
+            except Exception as e:
                 break
         
         self.queue = asyncio.Queue()
@@ -1354,14 +1327,12 @@ class MusicPlayer:
         self.is_paused = False
     
     def skip(self) -> bool:
-        """Skip the current track."""
         if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
             self.voice_client.stop()
             return True
         return False
     
     def previous(self) -> bool:
-        """Go back to the previous track."""
         if len(self.queue_history) >= 2:
             self.queue_history.pop()
             prev = self.queue_history.pop()
@@ -1378,12 +1349,11 @@ class MusicPlayer:
         return False
     
     def shuffle(self):
-        """Shuffle the queue."""
         items = []
         while not self.queue.empty():
             try:
                 items.append(self.queue.get_nowait())
-            except:
+            except Exception as e:
                 break
         
         random.shuffle(items)
@@ -1393,21 +1363,19 @@ class MusicPlayer:
             self.queue.put_nowait(item)
     
     def clear_queue(self):
-        """Clear the entire queue except current."""
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
-            except:
+            except Exception as e:
                 break
         self.queue = asyncio.Queue()
     
     def remove_from_queue(self, index: int) -> Optional[dict]:
-        """Remove a track from the queue by index (1-based)."""
         items = []
         while not self.queue.empty():
             try:
                 items.append(self.queue.get_nowait())
-            except:
+            except Exception as e:
                 break
         
         if index < 1 or index > len(items):
@@ -1422,12 +1390,11 @@ class MusicPlayer:
         return removed
     
     def get_queue_list(self) -> list:
-        """Get a list of all tracks in the queue."""
         items = []
         while not self.queue.empty():
             try:
                 items.append(self.queue.get_nowait())
-            except:
+            except Exception as e:
                 break
         
         self.queue = asyncio.Queue()
@@ -1437,7 +1404,6 @@ class MusicPlayer:
         return items
     
     def set_volume(self, vol: float):
-        """Set volume (0.0 to 1.0)."""
         self.volume = max(0.0, min(1.0, vol))
         if self.voice_client and self.voice_client.source:
             if hasattr(self.voice_client.source, 'volume'):
@@ -1445,7 +1411,6 @@ class MusicPlayer:
     
     @staticmethod
     def _format_duration(seconds: int) -> str:
-        """Format duration in seconds to HH:MM:SS or MM:SS."""
         if not seconds:
             return "Live"
         h, remainder = divmod(seconds, 3600)
@@ -1455,12 +1420,10 @@ class MusicPlayer:
         return f"{m}:{s:02d}"
 
 
-# Guild music players cache
 music_players: dict[int, MusicPlayer] = {}
 
 
 def get_music_player(guild_id: int) -> MusicPlayer:
-    """Get or create a MusicPlayer for a guild."""
     if guild_id not in music_players:
         music_players[guild_id] = MusicPlayer(bot, guild_id)
     return music_players[guild_id]
@@ -1722,14 +1685,23 @@ Respond naturally and conversationally. If the user mentions something new about
     
     await bot.process_commands(message)
 
+# =========================
+# on_ready with duplicate task prevention
+# =========================
+_tasks_started = False
+
 @bot.event
 async def on_ready():
+    global _tasks_started
+    if not _tasks_started:
+        _tasks_started = True
+        check_giveaways.start()
+        check_birthdays.start()
+        generate_daily_summary.start()
+        consolidate_memories.start()
+        clean_inactive_players.start()
+    
     await bot.tree.sync()
-    check_giveaways.start()
-    check_birthdays.start()
-    generate_daily_summary.start()
-    consolidate_memories.start()
-    clean_inactive_players.start()
     print(f"✅ ULTIMATE BOT ONLINE: {bot.user}")
     print(f"   Servers: {len(bot.guilds)}")
     print(f"   Commands: {len(bot.tree.get_commands())}")
@@ -1740,115 +1712,91 @@ async def on_ready():
 welcome_configs = {}
 
 # =========================
-# 🎮 COMMAND GROUPS
+# 🎮 MODERATION COMMANDS
 # =========================
 
-# ===== MODERATION =====
-@bot.tree.command(name="guess", description="Guess a number between 1 and 10")
-async def guess(interaction: discord.Interaction, number: int):
-    secret = random.randint(1, 10)
-    if number == secret:
-        await interaction.response.send_message(f"🎉 You won! I picked {secret}")
-    else:
-        await interaction.response.send_message(f"❌ Wrong! I picked {secret}")
+# Create a moderation command group
+mod_group = app_commands.Group(name="mod", description="Moderation commands")
 
-@bot.tree.command(name="clear", description="Delete messages")
+@mod_group.command(name="clear", description="Delete messages")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(manage_messages=True)
-async def clear(interaction: discord.Interaction, amount: int):
+async def mod_clear(interaction: discord.Interaction, amount: int):
+    await interaction.response.defer(ephemeral=True)
     deleted = await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages", ephemeral=True)
+    await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages", ephemeral=True)
     await log(interaction.guild, f"CLEAR | {len(deleted)}")
 
-@bot.tree.command(name="clearall", description="Wipe channel")
+@mod_group.command(name="clearall", description="Wipe channel")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(manage_messages=True)
-async def clearall(interaction: discord.Interaction):
-    await interaction.response.send_message("Clearing...", ephemeral=True)
+async def mod_clearall(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
     total = 0
     while True:
         deleted = await interaction.channel.purge(limit=100)
         total += len(deleted)
         if not deleted:
             break
-    await interaction.followup.send(f"Cleared {total}")
+    await interaction.followup.send(f"Cleared {total}", ephemeral=True)
     await log(interaction.guild, f"CLEARALL | {total}")
 
-@bot.tree.command(name="kick", description="Kick member")
+@mod_group.command(name="kick", description="Kick member")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(kick_members=True)
-async def kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+async def mod_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+    await interaction.response.defer()
     await member.kick(reason=reason)
     add_history(interaction.guild.id, member.id, str(member), "KICK", f"Kicked by {interaction.user}: {reason}")
-    await interaction.response.send_message(f"👢 Kicked {member}")
+    await interaction.followup.send(f"👢 Kicked {member}")
     await log(interaction.guild, f"KICK | {member} | {reason}")
 
-@bot.tree.command(name="ban", description="Ban member")
+@mod_group.command(name="ban", description="Ban member")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(ban_members=True)
-async def ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+async def mod_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+    await interaction.response.defer()
     await member.ban(reason=reason)
     add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
-    await interaction.response.send_message(f"🔨 Banned {member}")
+    await interaction.followup.send(f"🔨 Banned {member}")
     await log(interaction.guild, f"BAN | {member} | {reason}")
 
-@bot.tree.command(name="softban", description="Ban and immediately unban to clear messages")
+@mod_group.command(name="softban", description="Ban and immediately unban to clear messages")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(ban_members=True)
-async def softban(interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
+async def mod_softban(interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
+    await interaction.response.defer()
     await member.ban(reason=reason)
     await member.unban(reason="Softban complete")
     add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
-    await interaction.response.send_message(f"🧹 Softbanned {member}")
+    await interaction.followup.send(f"🧹 Softbanned {member}")
     await log(interaction.guild, f"SOFTBAN | {member}")
 
-@bot.tree.command(name="mute", description="Timeout member")
+@mod_group.command(name="mute", description="Timeout member")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(moderate_members=True)
-async def mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
+async def mod_mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
+    await interaction.response.defer()
     await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
     add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
-    await interaction.response.send_message(f"🔇 Muted {member.mention} for {minutes} minutes")
+    await interaction.followup.send(f"🔇 Muted {member.mention} for {minutes} minutes")
     await log(interaction.guild, f"MUTE | {member} | {minutes}min | {reason}")
 
-@bot.tree.command(name="unmute", description="Unmute member")
+@mod_group.command(name="unmute", description="Unmute member")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(moderate_members=True)
-async def unmute(interaction: discord.Interaction, member: discord.Member):
+async def mod_unmute(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer()
     await member.timeout(None)
     add_history(interaction.guild.id, member.id, str(member), "UNMUTE", f"Unmuted by {interaction.user}")
-    await interaction.response.send_message(f"🔊 Unmuted {member.mention}")
+    await interaction.followup.send(f"🔊 Unmuted {member.mention}")
     await log(interaction.guild, f"UNMUTE | {member}")
 
-@bot.tree.command(name="nick", description="Change nickname")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_nicknames=True)
-async def nick(interaction: discord.Interaction, member: discord.Member, nickname: str):
-    old = member.display_name
-    await member.edit(nick=nickname)
-    add_history(interaction.guild.id, member.id, str(member), "NICK_CHANGE", f"{old} -> {nickname} (by {interaction.user})")
-    await interaction.response.send_message(f"✏️ Changed {old}'s nickname to {nickname}")
-
-@bot.tree.command(name="giverole", description="Give role to member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_roles=True)
-async def giverole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    await member.add_roles(role)
-    add_history(interaction.guild.id, member.id, str(member), "ROLE_ADD", f"Role added: {role.name} (by {interaction.user})")
-    await interaction.response.send_message(f"✅ Gave {role.name} to {member.mention}")
-
-@bot.tree.command(name="removerole", description="Remove role from member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_roles=True)
-async def removerole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    await member.remove_roles(role)
-    add_history(interaction.guild.id, member.id, str(member), "ROLE_REMOVE", f"Role removed: {role.name} (by {interaction.user})")
-    await interaction.response.send_message(f"❌ Removed {role.name} from {member.mention}")
-
-@bot.tree.command(name="warn", description="Warn a member")
+@mod_group.command(name="warn", description="Warn a member")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(moderate_members=True)
-async def warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+async def mod_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
+    await interaction.response.defer()
     add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
     add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
     
@@ -1865,70 +1813,73 @@ async def warn(interaction: discord.Interaction, member: discord.Member, reason:
     embed.add_field(name="User", value=member.mention, inline=True)
     embed.add_field(name="Reason", value=reason, inline=True)
     embed.set_footer(text=f"By {interaction.user}")
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
     await log(interaction.guild, f"WARN | {member} | {reason}")
 
-@bot.tree.command(name="warnings", description="Show warnings for a member")
-async def warnings(interaction: discord.Interaction, member: discord.Member):
+@mod_group.command(name="warnings", description="Show warnings for a member")
+async def mod_warnings(interaction: discord.Interaction, member: discord.Member):
     warns = get_warnings(member.id, interaction.guild.id)
     if not warns:
         await interaction.response.send_message("✅ No warnings.")
         return
     
+    await interaction.response.defer()
     embed = discord.Embed(title=f"⚠️ Warnings for {member.display_name}", color=discord.Color.orange())
     for warn_id, reason, timestamp in warns:
         embed.add_field(name=f"Warning #{warn_id}", value=f"Reason: {reason}\nDate: {timestamp}", inline=False)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="unwarn", description="Remove a specific warning")
+@mod_group.command(name="unwarn", description="Remove a specific warning")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(moderate_members=True)
-async def unwarn(interaction: discord.Interaction, warning_id: int):
+async def mod_unwarn(interaction: discord.Interaction, warning_id: int):
     remove_warning(warning_id)
     await interaction.response.send_message(f"✅ Removed warning #{warning_id}")
 
-@bot.tree.command(name="clearwarns", description="Remove all warnings from a user")
+@mod_group.command(name="clearwarns", description="Remove all warnings from a user")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(moderate_members=True)
-async def clearwarns(interaction: discord.Interaction, member: discord.Member):
+async def mod_clearwarns(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.defer()
     c.execute("DELETE FROM warnings WHERE user_id=? AND guild_id=?", (member.id, interaction.guild.id))
     conn.commit()
     add_history(interaction.guild.id, member.id, str(member), "CLEAR_WARNS", f"All warnings cleared by {interaction.user}")
-    await interaction.response.send_message(f"🧹 Removed all warnings for {member.mention}")
+    await interaction.followup.send(f"🧹 Removed all warnings for {member.mention}")
     await log(interaction.guild, f"CLEARWARNS | {member}")
 
-@bot.tree.command(name="lock", description="Lock a channel")
+@mod_group.command(name="lock", description="Lock a channel")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(manage_channels=True)
-async def lock(interaction: discord.Interaction):
+async def mod_lock(interaction: discord.Interaction):
     overwrite = interaction.channel.overwrites_for(interaction.guild.default_role)
     overwrite.send_messages = False
     await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CHANNEL_LOCK", f"Locked #{interaction.channel.name}")
     await interaction.response.send_message("🔒 Channel locked.")
 
-@bot.tree.command(name="unlock", description="Unlock a channel")
+@mod_group.command(name="unlock", description="Unlock a channel")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(manage_channels=True)
-async def unlock(interaction: discord.Interaction):
+async def mod_unlock(interaction: discord.Interaction):
     overwrite = interaction.channel.overwrites_for(interaction.guild.default_role)
     overwrite.send_messages = None
     await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CHANNEL_UNLOCK", f"Unlocked #{interaction.channel.name}")
     await interaction.response.send_message("🔓 Channel unlocked.")
 
-@bot.tree.command(name="slowmode", description="Set slowmode delay")
+@mod_group.command(name="slowmode", description="Set slowmode delay")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(manage_channels=True)
-async def slowmode(interaction: discord.Interaction, seconds: int):
+async def mod_slowmode(interaction: discord.Interaction, seconds: int):
     await interaction.channel.edit(slowmode_delay=seconds)
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode to {seconds}s in #{interaction.channel.name}")
     await interaction.response.send_message(f"🐌 Slowmode set to {seconds} seconds.")
 
-@bot.tree.command(name="massban", description="Ban multiple users at once")
+@mod_group.command(name="massban", description="Ban multiple users at once")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(ban_members=True)
-async def massban(interaction: discord.Interaction, members: str, reason: str = "Mass ban"):
+async def mod_massban(interaction: discord.Interaction, members: str, reason: str = "Mass ban"):
+    await interaction.response.defer()
     ids = re.findall(r'\d+', members)
     banned = 0
     for uid in ids[:10]:
@@ -1936,21 +1887,23 @@ async def massban(interaction: discord.Interaction, members: str, reason: str = 
             await interaction.guild.ban(discord.Object(id=int(uid)), reason=reason)
             add_history(interaction.guild.id, int(uid), f"User({uid})", "BAN", f"Mass banned by {interaction.user}: {reason}")
             banned += 1
-        except:
+        except Exception as e:
             pass
-    await interaction.response.send_message(f"🔨 Banned {banned} users")
+    await interaction.followup.send(f"🔨 Banned {banned} users")
     await log(interaction.guild, f"MASSBAN | {banned} users")
 
 # ===== 🕰️ HISTORY COMMANDS =====
+history_group = app_commands.Group(name="history", description="History and analytics commands")
 
-@bot.tree.command(name="history", description="Show user history in this server")
-async def history_command(interaction: discord.Interaction, member: discord.Member):
+@history_group.command(name="user", description="Show user history in this server")
+async def history_user(interaction: discord.Interaction, member: discord.Member):
     rows = get_user_history(member.id, interaction.guild.id, 25)
     
     if not rows:
         await interaction.response.send_message(f"📭 No history found for {member.mention}.")
         return
     
+    await interaction.response.defer()
     embed = discord.Embed(
         title=f"🕰️ History: {member.display_name}",
         description=f"Last 25 events for {member.mention}",
@@ -1973,76 +1926,11 @@ async def history_command(interaction: discord.Interaction, member: discord.Memb
             inline=False
         )
     
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="historysearch", description="Search server history for events or keywords")
-async def history_search(interaction: discord.Interaction, query: str):
-    rows = get_history_search(interaction.guild.id, query, 15)
-    
-    if not rows:
-        await interaction.response.send_message(f"🔍 No results found for '{query}'.")
-        return
-    
-    embed = discord.Embed(
-        title=f"🔍 History Search: '{query}'",
-        description=f"Found {len(rows)} results",
-        color=discord.Color.purple()
-    )
-    
-    for event, details, time, username, user_id in rows[:15]:
-        embed.add_field(
-            name=f"{event} — {username}",
-            value=f"{details[:100]}\n{time}",
-            inline=False
-        )
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="historychannel", description="Show channel analytics and history")
-async def history_channel(interaction: discord.Interaction, channel: discord.TextChannel = None, days: int = 7):
-    channel = channel or interaction.channel
-    
-    stats = get_channel_stats(interaction.guild.id, channel.id, days)
-    
-    if not stats:
-        await interaction.response.send_message(f"📭 No data for #{channel.name} in the last {days} days.")
-        return
-    
-    total_msgs = sum(count for _, count in stats)
-    busiest_day = max(stats, key=lambda x: x[1]) if stats else ("N/A", 0)
-    
-    c.execute("""
-    SELECT event_type, details, timestamp, username
-    FROM history
-    WHERE guild_id=? AND details LIKE ?
-    ORDER BY id DESC LIMIT 10
-    """, (interaction.guild.id, f"%#{channel.name}%"))
-    events = c.fetchall()
-    
-    embed = discord.Embed(
-        title=f"📊 #{channel.name} Analytics",
-        description=f"Last {days} days",
-        color=discord.Color.teal()
-    )
-    embed.add_field(name="Total Messages", value=f"{total_msgs:,}", inline=True)
-    embed.add_field(name="Busiest Day", value=f"{busiest_day[0]} ({busiest_day[1]:,} msgs)", inline=True)
-    embed.add_field(name="Avg Per Day", value=f"{total_msgs//max(days,1):,}", inline=True)
-    
-    bar = ""
-    for date, count in stats[-7:]:
-        bar_len = max(1, int((count / max(busiest_day[1], 1)) * 8))
-        bar += f"`{date[-5:]}` {'█' * bar_len} {count:,}\n"
-    
-    embed.add_field(name="Activity", value=f"```{bar}```", inline=False)
-    
-    if events:
-        event_text = "\n".join([f"{e[0]}: {e[1][:50]}" for e in events[:5]])
-        embed.add_field(name="Recent Events", value=event_text[:500], inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="historyserver", description="Show server-wide analytics and summary")
+@history_group.command(name="server", description="Show server-wide analytics and summary")
 async def history_server(interaction: discord.Interaction, days: int = 7):
+    await interaction.response.defer()
     busiest = get_busiest_day(interaction.guild.id)
     
     most_active = get_most_active_user(interaction.guild.id, days)
@@ -2058,12 +1946,11 @@ async def history_server(interaction: discord.Interaction, days: int = 7):
         for cid, count in top_channels
     ]) or "No data"
     
-    today = datetime.now().strftime("%Y-%m-%d")
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
-    joins_today = count_events_for_date(interaction.guild.id, today, "JOIN")
-    leaves_today = count_events_for_date(interaction.guild.id, today, "LEAVE")
-    warns_today = count_events_for_date(interaction.guild.id, today, "WARN")
+    joins = count_events_for_date(interaction.guild.id, datetime.now().strftime("%Y-%m-%d"), "JOIN")
+    leaves = count_events_for_date(interaction.guild.id, datetime.now().strftime("%Y-%m-%d"), "LEAVE")
+    warns = count_events_for_date(interaction.guild.id, datetime.now().strftime("%Y-%m-%d"), "WARN")
     
     c.execute("""
     SELECT summary FROM daily_summaries
@@ -2082,16 +1969,16 @@ async def history_server(interaction: discord.Interaction, days: int = 7):
         embed.add_field(name="🚀 Busiest Day Ever", value=f"{busiest[0]} ({busiest[1]:,} msgs)", inline=False)
     
     embed.add_field(name="🏆 Most Active User", value=most_active_name, inline=True)
-    embed.add_field(name="📊 Today's Activity", value=f"👋 {joins_today} joins | 👋 {leaves_today} leaves | ⚠️ {warns_today} warns", inline=False)
+    embed.add_field(name="📊 Today's Activity", value=f"👋 {joins} joins | 👋 {leaves} leaves | ⚠️ {warns} warns", inline=False)
     embed.add_field(name="📈 Top Channels", value=channel_text, inline=False)
     
     if summary_row:
         embed.add_field(name="📋 Yesterday's Summary", value=summary_row[0][:500], inline=False)
     
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
-@bot.tree.command(name="rewind", description="🕰️ Time machine — See what happened on a specific date")
-async def rewind(interaction: discord.Interaction, date: str, channel: discord.TextChannel = None):
+@history_group.command(name="rewind", description="🕰️ See what happened on a specific date")
+async def history_rewind(interaction: discord.Interaction, date: str):
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         await interaction.response.send_message("❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-06-10)")
         return
@@ -2101,7 +1988,7 @@ async def rewind(interaction: discord.Interaction, date: str, channel: discord.T
     events = get_guild_history_by_date(interaction.guild.id, date, 50)
     
     if not events:
-        await interaction.response.send_message(f"📭 Nothing recorded for {date}.")
+        await interaction.followup.send(f"📭 Nothing recorded for {date}.")
         return
     
     event_counts = {}
@@ -2180,96 +2067,50 @@ async def rewind(interaction: discord.Interaction, date: str, channel: discord.T
     if timeline:
         embed.add_field(name="📋 Event Timeline", value="\n".join(timeline[:15]), inline=False)
     
-    embed.set_footer(text=f"Total events: {len(events)} | Use /askhistory for AI analysis")
+    embed.set_footer(text=f"Total events: {len(events)}")
     
+    await interaction.followup.send(embed=embed)
+
+# ===== FUN COMMANDS =====
+fun_group = app_commands.Group(name="fun", description="Fun commands")
+
+@fun_group.command(name="guess", description="Guess a number between 1 and 10")
+async def fun_guess(interaction: discord.Interaction, number: int):
+    secret = random.randint(1, 10)
+    if number == secret:
+        await interaction.response.send_message(f"🎉 You won! I picked {secret}")
+    else:
+        await interaction.response.send_message(f"❌ Wrong! I picked {secret}")
+
+@fun_group.command(name="coinflip", description="Flip a coin")
+async def fun_coinflip(interaction: discord.Interaction):
+    result = random.choice(["Heads", "Tails"])
+    embed = discord.Embed(title="🪙 Coin Flip", description=f"**{result}**", color=discord.Color.gold())
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="askhistory", description="🤖 Ask AI about server history")
-async def ask_history(interaction: discord.Interaction, question: str):
+@fun_group.command(name="dice", description="Roll a dice")
+async def fun_dice(interaction: discord.Interaction, sides: int = 6):
+    result = random.randint(1, sides)
+    await interaction.response.send_message(f"🎲 You rolled a **{result}** (1-{sides})")
+
+@fun_group.command(name="meme", description="Get a random meme")
+async def fun_meme(interaction: discord.Interaction):
     await interaction.response.defer()
-    
-    query_lower = question.lower()
-    
-    c.execute("""
-    SELECT event_type, details, timestamp, username
-    FROM history
-    WHERE guild_id=?
-    ORDER BY id DESC
-    LIMIT 100
-    """, (interaction.guild.id,))
-    
-    all_events = c.fetchall()
-    
-    if not all_events:
-        await interaction.response.send_message("📭 No history data available.")
-        return
-    
-    busiest = get_busiest_day(interaction.guild.id)
-    most_active = get_most_active_user(interaction.guild.id)
-    
-    c.execute("""
-    SELECT user_id, level FROM leveling
-    WHERE guild_id=?
-    ORDER BY level DESC
-    LIMIT 5
-    """, (interaction.guild.id,))
-    top_levels = c.fetchall()
-    top_level_text = "\n".join([f"<@{uid}>: Level {lvl}" for uid, lvl in top_levels]) or "No data"
-    
-    guild_memories = get_all_guild_memories(interaction.guild.id, limit=20)
-    memory_text = ""
-    if guild_memories:
-        memory_lines = []
-        for uid, key, val, imp in guild_memories[:10]:
-            user_obj = interaction.guild.get_member(uid)
-            name = user_obj.display_name if user_obj else f"User({uid})"
-            memory_lines.append(f"- {name} mentioned their {key} is '{val}'")
-        if memory_lines:
-            memory_text = "Things I've learned about users:\n" + "\n".join(memory_lines) + "\n"
-    
-    events_text = "\n".join([
-        f"[{t.split(' ')[0] if ' ' in t else t}] {u}: {e} -> {d[:100]}"
-        for e, d, t, u in all_events[:50]
-    ])
-    
-    stats_text = ""
-    if busiest:
-        stats_text += f"Busiest day ever: {busiest[0]} with {busiest[1]} messages.\n"
-    if most_active:
-        stats_text += f"Most active user (7 days): <@{most_active[0]}> with {most_active[1]} messages.\n"
-    
-    prompt = f"""
-You are a Discord history analyst AI.
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get("https://meme-api.com/gimme") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    embed = discord.Embed(title=data.get("title", "Meme"), color=discord.Color.random())
+                    embed.set_image(url=data["url"])
+                    embed.set_footer(text=f"👍 {data.get('ups', 0)} | r/{data.get('subreddit', 'unknown')}")
+                    await interaction.followup.send(embed=embed)
+                else:
+                    await interaction.followup.send("❌ Couldn't fetch a meme right now.")
+    except Exception as e:
+        await interaction.followup.send("❌ Meme API unavailable.")
 
-SERVER: {interaction.guild.name}
-
-RECENT EVENTS:
-{events_text}
-
-{memory_text}
-STATISTICS:
-{stats_text}
-TOP LEVEL PLAYERS:
-{top_level_text}
-
-QUESTION: {question}
-
-Answer based ONLY on the data provided. Be specific, use names and details.
-"""
-    
-    reply = await get_ai_response(prompt)
-    
-    embed = discord.Embed(
-        title="🤖 History Q&A",
-        description=f"**Question:** {question}",
-        color=discord.Color.purple()
-    )
-    embed.add_field(name="Answer", value=reply, inline=False)
-    embed.set_footer(text="Powered by Gemini AI + Server History")
-    
-    await interaction.response.send_message(embed=embed)
-
-# ===== UTILITY =====
+# ===== UTILITY COMMANDS =====
 @bot.tree.command(name="avatar", description="Show user avatar")
 async def avatar(interaction: discord.Interaction, member: discord.Member = None):
     member = member or interaction.user
@@ -2293,6 +2134,7 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member = No
     member = member or interaction.user
     roles = [role.mention for role in member.roles if role != interaction.guild.default_role]
     
+    await interaction.response.defer()
     embed = discord.Embed(title=f"User Info - {member.display_name}", color=member.color, timestamp=datetime.now())
     embed.set_thumbnail(url=member.display_avatar.url)
     embed.add_field(name="ID", value=member.id, inline=True)
@@ -2301,7 +2143,7 @@ async def userinfo(interaction: discord.Interaction, member: discord.Member = No
     embed.add_field(name=f"Roles [{len(roles)}]", value=" ".join(roles[:10]) or "None", inline=False)
     embed.add_field(name="Top Role", value=member.top_role.mention, inline=True)
     embed.add_field(name="Bot?", value="Yes" if member.bot else "No", inline=True)
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="serverinfo", description="Get server information")
 async def serverinfo(interaction: discord.Interaction):
@@ -2335,29 +2177,10 @@ async def create_poll(interaction: discord.Interaction, question: str, option1: 
     view = PollView(poll_id, options)
     await interaction.response.send_message(embed=embed, view=view)
 
-@bot.tree.command(name="pollresults", description="Show poll results")
-async def poll_results(interaction: discord.Interaction, poll_id: int):
-    c.execute("SELECT question, options, votes FROM polls WHERE id=?", (poll_id,))
-    result = c.fetchone()
-    if not result:
-        await interaction.response.send_message("❌ Poll not found.")
-        return
-    
-    question, options_str, votes_str = result
-    options = json.loads(options_str)
-    votes = json.loads(votes_str)
-    
-    embed = discord.Embed(title=f"📊 Poll Results: {question}", color=discord.Color.green())
-    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    for i, option in enumerate(options):
-        vote_count = len(votes.get(str(i), votes.get(i, [])))
-        bar = "█" * min(vote_count, 20) + "░" * max(0, 20 - min(vote_count, 20))
-        embed.add_field(name=f"{emojis[i]} {option}", value=f"{bar} {vote_count} votes", inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
 # ===== TICKET COMMANDS =====
-@bot.tree.command(name="ticketsetup", description="Setup ticket system in current channel")
+ticket_group = app_commands.Group(name="ticket", description="Ticket system commands")
+
+@ticket_group.command(name="setup", description="Setup ticket system in current channel")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(administrator=True)
 async def ticket_setup(interaction: discord.Interaction):
@@ -2366,9 +2189,9 @@ async def ticket_setup(interaction: discord.Interaction):
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "TICKET_SETUP", "Ticket system configured")
     await interaction.response.send_message("✅ Ticket system setup complete!", ephemeral=True)
 
-@bot.tree.command(name="addticket", description="Add user to current ticket")
+@ticket_group.command(name="add", description="Add user to current ticket")
 @app_commands.check(owner_check)
-async def add_ticket(interaction: discord.Interaction, member: discord.Member):
+async def ticket_add(interaction: discord.Interaction, member: discord.Member):
     c.execute("SELECT * FROM tickets WHERE channel_id=? AND status='open'", (interaction.channel.id,))
     ticket = c.fetchone()
     if not ticket:
@@ -2377,9 +2200,9 @@ async def add_ticket(interaction: discord.Interaction, member: discord.Member):
     await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
     await interaction.response.send_message(f"✅ Added {member.mention} to ticket")
 
-@bot.tree.command(name="removeticket", description="Remove user from current ticket")
+@ticket_group.command(name="remove", description="Remove user from current ticket")
 @app_commands.check(owner_check)
-async def remove_ticket(interaction: discord.Interaction, member: discord.Member):
+async def ticket_remove(interaction: discord.Interaction, member: discord.Member):
     c.execute("SELECT * FROM tickets WHERE channel_id=? AND status='open'", (interaction.channel.id,))
     ticket = c.fetchone()
     if not ticket:
@@ -2391,9 +2214,11 @@ async def remove_ticket(interaction: discord.Interaction, member: discord.Member
     await interaction.channel.set_permissions(member, overwrite=None)
     await interaction.response.send_message(f"✅ Removed {member.mention} from ticket")
 
-# ===== LEVELING =====
-@bot.tree.command(name="rank", description="Check your rank or another user's")
-async def rank(interaction: discord.Interaction, member: discord.Member = None):
+# ===== LEVELING COMMANDS =====
+level_group = app_commands.Group(name="level", description="Leveling system commands")
+
+@level_group.command(name="rank", description="Check your rank or another user's")
+async def level_rank(interaction: discord.Interaction, member: discord.Member = None):
     member = member or interaction.user
     c.execute("SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?", (member.id, interaction.guild.id))
     result = c.fetchone()
@@ -2425,8 +2250,8 @@ async def rank(interaction: discord.Interaction, member: discord.Member = None):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="leaderboard", description="Show server level leaderboard")
-async def leaderboard(interaction: discord.Interaction):
+@level_group.command(name="leaderboard", description="Show server level leaderboard")
+async def level_leaderboard(interaction: discord.Interaction):
     c.execute("SELECT user_id, level, xp FROM leveling WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10", (interaction.guild.id,))
     top_users = c.fetchall()
     
@@ -2445,20 +2270,11 @@ async def leaderboard(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="setlevel", description="Set a user's level (Admin)")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def set_level(interaction: discord.Interaction, member: discord.Member, level: int):
-    c.execute("UPDATE leveling SET level=? WHERE user_id=? AND guild_id=?", (level, member.id, interaction.guild.id))
-    if c.rowcount == 0:
-        c.execute("INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, 0, ?)", (member.id, interaction.guild.id, level))
-    conn.commit()
-    add_history(interaction.guild.id, member.id, str(member), "LEVEL_SET", f"Level set to {level} by {interaction.user}")
-    await interaction.response.send_message(f"✅ Set {member.mention}'s level to {level}")
+# ===== ECONOMY COMMANDS =====
+eco_group = app_commands.Group(name="economy", description="Economy system commands")
 
-# ===== ECONOMY =====
-@bot.tree.command(name="balance", description="Check your balance")
-async def balance(interaction: discord.Interaction, member: discord.Member = None):
+@eco_group.command(name="balance", description="Check your balance")
+async def eco_balance(interaction: discord.Interaction, member: discord.Member = None):
     member = member or interaction.user
     bal = get_balance(member.id, interaction.guild.id)
     
@@ -2468,8 +2284,8 @@ async def balance(interaction: discord.Interaction, member: discord.Member = Non
     embed.add_field(name="Total", value=f"${bal['wallet'] + bal['bank']:,}", inline=True)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="daily", description="Claim daily reward")
-async def daily(interaction: discord.Interaction):
+@eco_group.command(name="daily", description="Claim daily reward")
+async def eco_daily(interaction: discord.Interaction):
     user_id = interaction.user.id
     guild_id = interaction.guild.id
     
@@ -2510,8 +2326,8 @@ async def daily(interaction: discord.Interaction):
     embed.add_field(name="Streak Bonus", value=f"+${streak_bonus}", inline=True)
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="give", description="Give money to another user")
-async def give(interaction: discord.Interaction, member: discord.Member, amount: int):
+@eco_group.command(name="give", description="Give money to another user")
+async def eco_give(interaction: discord.Interaction, member: discord.Member, amount: int):
     if amount <= 0:
         await interaction.response.send_message("❌ Amount must be positive!")
         return
@@ -2528,8 +2344,8 @@ async def give(interaction: discord.Interaction, member: discord.Member, amount:
     
     await interaction.response.send_message(f"✅ Gave ${amount:,} to {member.mention}")
 
-@bot.tree.command(name="slot", description="Play the slot machine")
-async def slot(interaction: discord.Interaction, bet: int):
+@eco_group.command(name="slot", description="Play the slot machine")
+async def eco_slot(interaction: discord.Interaction, bet: int):
     if bet <= 0:
         await interaction.response.send_message("❌ Bet must be positive!")
         return
@@ -2564,11 +2380,13 @@ async def slot(interaction: discord.Interaction, bet: int):
     
     await interaction.response.send_message(embed=embed)
 
-# ===== GIVEAWAY =====
-@bot.tree.command(name="giveaway", description="Start a giveaway")
+# ===== GIVEAWAY COMMANDS =====
+giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
+
+@giveaway_group.command(name="start", description="Start a giveaway")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(administrator=True)
-async def giveaway(interaction: discord.Interaction, prize: str, duration_minutes: int, winners: int = 1, channel: discord.TextChannel = None):
+async def giveaway_start(interaction: discord.Interaction, prize: str, duration_minutes: int, winners: int = 1, channel: discord.TextChannel = None):
     channel = channel or interaction.channel
     end_time = datetime.now() + timedelta(minutes=duration_minutes)
     
@@ -2589,10 +2407,10 @@ async def giveaway(interaction: discord.Interaction, prize: str, duration_minute
     
     await interaction.response.send_message(f"✅ Giveaway started in {channel.mention}!", ephemeral=True)
 
-@bot.tree.command(name="reroll", description="Reroll a giveaway winner")
+@giveaway_group.command(name="reroll", description="Reroll a giveaway winner")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(administrator=True)
-async def reroll(interaction: discord.Interaction, message_id: str):
+async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
     try:
         msg = await interaction.channel.fetch_message(int(message_id))
         if not msg:
@@ -2612,10 +2430,49 @@ async def reroll(interaction: discord.Interaction, message_id: str):
             add_history(interaction.guild.id, winner.id, str(winner), "GIVEAWAY_WIN", f"Rerolled win")
         else:
             await interaction.response.send_message("❌ No one entered.")
-    except:
+    except Exception as e:
         await interaction.response.send_message("❌ Invalid message ID.")
 
-# ===== REACTION ROLES =====
+# ===== OTHER COMMANDS (standalone, not in groups to save slots) =====
+
+@bot.tree.command(name="nick", description="Change nickname")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_nicknames=True)
+async def nick(interaction: discord.Interaction, member: discord.Member, nickname: str):
+    old = member.display_name
+    await member.edit(nick=nickname)
+    add_history(interaction.guild.id, member.id, str(member), "NICK_CHANGE", f"{old} -> {nickname} (by {interaction.user})")
+    await interaction.response.send_message(f"✏️ Changed {old}'s nickname to {nickname}")
+
+@bot.tree.command(name="giverole", description="Give role to member")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def giverole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+    await interaction.response.defer()
+    await member.add_roles(role)
+    add_history(interaction.guild.id, member.id, str(member), "ROLE_ADD", f"Role added: {role.name} (by {interaction.user})")
+    await interaction.followup.send(f"✅ Gave {role.name} to {member.mention}")
+
+@bot.tree.command(name="removerole", description="Remove role from member")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(manage_roles=True)
+async def removerole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+    await interaction.response.defer()
+    await member.remove_roles(role)
+    add_history(interaction.guild.id, member.id, str(member), "ROLE_REMOVE", f"Role removed: {role.name} (by {interaction.user})")
+    await interaction.followup.send(f"❌ Removed {role.name} from {member.mention}")
+
+@bot.tree.command(name="setlevel", description="Set a user's level (Admin)")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(administrator=True)
+async def set_level(interaction: discord.Interaction, member: discord.Member, level: int):
+    c.execute("UPDATE leveling SET level=? WHERE user_id=? AND guild_id=?", (level, member.id, interaction.guild.id))
+    if c.rowcount == 0:
+        c.execute("INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, 0, ?)", (member.id, interaction.guild.id, level))
+    conn.commit()
+    add_history(interaction.guild.id, member.id, str(member), "LEVEL_SET", f"Level set to {level} by {interaction.user}")
+    await interaction.response.send_message(f"✅ Set {member.mention}'s level to {level}")
+
 @bot.tree.command(name="reactionrole", description="Setup reaction role message")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(administrator=True)
@@ -2630,38 +2487,29 @@ async def reaction_role(interaction: discord.Interaction, channel: discord.TextC
     except ValueError:
         await interaction.response.send_message("❌ Invalid message ID.")
 
-@bot.event
-async def on_raw_reaction_add(payload):
-    if payload.user_id == bot.user.id:
+@bot.tree.command(name="setbirthday", description="Set your birthday (MM-DD)")
+async def set_birthday(interaction: discord.Interaction, date: str, year: int = None):
+    if not re.match(r"^\d{2}-\d{2}$", date):
+        await interaction.response.send_message("❌ Invalid date format. Use MM-DD (e.g., 06-15)")
         return
     
-    c.execute("SELECT role_id FROM reaction_roles WHERE message_id=? AND emoji=?", (payload.message_id, str(payload.emoji)))
-    result = c.fetchone()
-    if result:
-        guild = bot.get_guild(payload.guild_id)
-        if guild:
-            role = guild.get_role(result[0])
-            member = guild.get_member(payload.user_id)
-            if role and member:
-                await member.add_roles(role)
-                add_history(payload.guild_id, payload.user_id, str(member), "REACTION_ROLE_ADD", f"Got role: @{role.name}")
+    c.execute("INSERT OR REPLACE INTO birthdays (user_id, guild_id, date, year) VALUES (?, ?, ?, ?)",
+              (interaction.user.id, interaction.guild.id, date, year or 0))
+    conn.commit()
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "BIRTHDAY_SET", f"Birthday set to {date}")
+    await interaction.response.send_message(f"✅ Birthday set to {date}!")
 
-@bot.event
-async def on_raw_reaction_remove(payload):
-    if payload.user_id == bot.user.id:
-        return
-    
-    c.execute("SELECT role_id FROM reaction_roles WHERE message_id=? AND emoji=?", (payload.message_id, str(payload.emoji)))
-    result = c.fetchone()
-    if result:
-        guild = bot.get_guild(payload.guild_id)
-        if guild:
-            role = guild.get_role(result[0])
-            member = guild.get_member(payload.user_id)
-            if role and member:
-                await member.remove_roles(role)
+@bot.tree.command(name="setwelcome", description="Set welcome channel and message")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(administrator=True)
+async def set_welcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
+    welcome_configs[interaction.guild.id] = {
+        'channel_id': channel.id,
+        'message': message or "Welcome {user} to {server}!"
+    }
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "WELCOME_SETUP", f"Welcome channel set to #{channel.name}")
+    await interaction.response.send_message(f"✅ Welcome messages will be sent to {channel.mention}")
 
-# ===== CUSTOM COMMANDS =====
 @bot.tree.command(name="addcommand", description="Add a custom command")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(administrator=True)
@@ -2697,115 +2545,6 @@ async def list_commands(interaction: discord.Interaction):
         embed.add_field(name=f"?{name}", value=response[:100] + ("..." if len(response) > 100 else ""), inline=False)
     await interaction.response.send_message(embed=embed)
 
-# ===== WELCOME SYSTEM =====
-@bot.tree.command(name="setwelcome", description="Set welcome channel and message")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def set_welcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
-    welcome_configs[interaction.guild.id] = {
-        'channel_id': channel.id,
-        'message': message or "Welcome {user} to {server}!"
-    }
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "WELCOME_SETUP", f"Welcome channel set to #{channel.name}")
-    await interaction.response.send_message(f"✅ Welcome messages will be sent to {channel.mention}")
-
-@bot.tree.command(name="testwelcome", description="Test the welcome message")
-@app_commands.check(owner_check)
-async def test_welcome(interaction: discord.Interaction):
-    config = welcome_configs.get(interaction.guild.id)
-    if config:
-        channel = interaction.guild.get_channel(config['channel_id'])
-        if channel:
-            msg = config['message'].format(user=interaction.user.mention, server=interaction.guild.name)
-            await channel.send(msg)
-            await interaction.response.send_message("✅ Welcome message sent to the configured channel.", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Configured channel not found.")
-    else:
-        await interaction.response.send_message("❌ No welcome config set. Use `/setwelcome` first.")
-
-# ===== BIRTHDAY SYSTEM =====
-@bot.tree.command(name="setbirthday", description="Set your birthday (MM-DD)")
-async def set_birthday(interaction: discord.Interaction, date: str, year: int = None):
-    if not re.match(r"^\d{2}-\d{2}$", date):
-        await interaction.response.send_message("❌ Invalid date format. Use MM-DD (e.g., 06-15)")
-        return
-    
-    c.execute("INSERT OR REPLACE INTO birthdays (user_id, guild_id, date, year) VALUES (?, ?, ?, ?)",
-              (interaction.user.id, interaction.guild.id, date, year or 0))
-    conn.commit()
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "BIRTHDAY_SET", f"Birthday set to {date}")
-    await interaction.response.send_message(f"✅ Birthday set to {date}!")
-
-@bot.tree.command(name="upcomingbirthdays", description="Show upcoming birthdays")
-async def upcoming_birthdays(interaction: discord.Interaction):
-    c.execute("SELECT user_id, date, year FROM birthdays WHERE guild_id=?", (interaction.guild.id,))
-    birthdays = c.fetchall()
-    
-    if not birthdays:
-        await interaction.response.send_message("No birthdays set.")
-        return
-    
-    embed = discord.Embed(title="🎂 Upcoming Birthdays", color=discord.Color.pink())
-    
-    for user_id, date, year in birthdays:
-        member = interaction.guild.get_member(user_id)
-        name = member.display_name if member else f"Unknown"
-        age = datetime.now().year - year if year else None
-        age_str = f" (turning {age})" if age else ""
-        embed.add_field(name=f"{date} - {name}{age_str}", value=f"<@{user_id}>", inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-# ===== MEME / FUN =====
-@bot.tree.command(name="meme", description="Get a random meme")
-async def meme(interaction: discord.Interaction):
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://meme-api.com/gimme") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    embed = discord.Embed(title=data.get("title", "Meme"), color=discord.Color.random())
-                    embed.set_image(url=data["url"])
-                    embed.set_footer(text=f"👍 {data.get('ups', 0)} | r/{data.get('subreddit', 'unknown')}")
-                    await interaction.response.send_message(embed=embed)
-                else:
-                    await interaction.response.send_message("❌ Couldn't fetch a meme right now.")
-    except:
-        await interaction.response.send_message("❌ Meme API unavailable.")
-
-@bot.tree.command(name="coinflip", description="Flip a coin")
-async def coinflip(interaction: discord.Interaction):
-    result = random.choice(["Heads", "Tails"])
-    embed = discord.Embed(title="🪙 Coin Flip", description=f"**{result}**", color=discord.Color.gold())
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="dice", description="Roll a dice")
-async def dice(interaction: discord.Interaction, sides: int = 6):
-    result = random.randint(1, sides)
-    await interaction.response.send_message(f"🎲 You rolled a **{result}** (1-{sides})")
-
-@bot.tree.command(name="say", description="Make the bot say something")
-@app_commands.check(owner_check)
-async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
-    channel = channel or interaction.channel
-    await channel.send(message)
-    await interaction.response.send_message("✅ Message sent!", ephemeral=True)
-
-@bot.tree.command(name="embed", description="Send an embed message")
-@app_commands.check(owner_check)
-async def send_embed(interaction: discord.Interaction, title: str, description: str, color: str = "blue", channel: discord.TextChannel = None):
-    colors = {
-        "red": discord.Color.red(), "blue": discord.Color.blue(), "green": discord.Color.green(),
-        "gold": discord.Color.gold(), "purple": discord.Color.purple(), "orange": discord.Color.orange(),
-        "random": discord.Color.random()
-    }
-    embed = discord.Embed(title=title, description=description, color=colors.get(color.lower(), discord.Color.blue()))
-    channel = channel or interaction.channel
-    await channel.send(embed=embed)
-    await interaction.response.send_message("✅ Embed sent!", ephemeral=True)
-
-# ===== VOICE COMMANDS =====
 @bot.tree.command(name="voicekick", description="Disconnect a user from voice channel")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(move_members=True)
@@ -2829,42 +2568,12 @@ async def voice_move(interaction: discord.Interaction, member: discord.Member, c
     else:
         await interaction.response.send_message("❌ User is not in a voice channel.")
 
-# ===== ADMIN =====
-@bot.tree.command(name="servers", description="List all servers the bot is in")
-@app_commands.check(owner_check)
-async def list_servers(interaction: discord.Interaction):
-    embed = discord.Embed(title="📋 Servers", color=discord.Color.blue())
-    for guild in bot.guilds:
-        embed.add_field(name=guild.name, value=f"ID: {guild.id}\nMembers: {guild.member_count}", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="leaveserver", description="Leave a server by ID")
-@app_commands.check(owner_check)
-async def leave_server(interaction: discord.Interaction, guild_id: str):
-    try:
-        guild = bot.get_guild(int(guild_id))
-        if guild:
-            add_history(guild.id, interaction.user.id, str(interaction.user), "BOT_LEAVE", f"Bot left server by admin request")
-            await guild.leave()
-            await interaction.response.send_message(f"✅ Left {guild.name}")
-        else:
-            await interaction.response.send_message("❌ Server not found.")
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid server ID.")
-
-@bot.tree.command(name="reload", description="Reload bot commands")
-@app_commands.check(owner_check)
-async def reload_commands(interaction: discord.Interaction):
-    await bot.tree.sync()
-    await interaction.response.send_message("✅ Commands reloaded!")
-
 @bot.tree.command(name="ping", description="Check bot latency")
 async def ping(interaction: discord.Interaction):
     embed = discord.Embed(title="🏓 Pong!", color=discord.Color.green())
     embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     await interaction.response.send_message(embed=embed)
 
-# Fix 5: Uptime uses START_TIME constant
 @bot.tree.command(name="uptime", description="Check bot uptime")
 async def uptime(interaction: discord.Interaction):
     uptime_delta = datetime.now() - START_TIME
@@ -2873,7 +2582,27 @@ async def uptime(interaction: discord.Interaction):
     minutes, seconds = divmod(remainder, 60)
     await interaction.response.send_message(f"⏱️ Uptime: {days}d {hours}h {minutes}m {seconds}s")
 
-# ===== PLAYLIST =====
+@bot.tree.command(name="say", description="Make the bot say something")
+@app_commands.check(owner_check)
+async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
+    channel = channel or interaction.channel
+    await channel.send(message)
+    await interaction.response.send_message("✅ Message sent!", ephemeral=True)
+
+@bot.tree.command(name="embed", description="Send an embed message")
+@app_commands.check(owner_check)
+async def send_embed(interaction: discord.Interaction, title: str, description: str, color: str = "blue", channel: discord.TextChannel = None):
+    colors = {
+        "red": discord.Color.red(), "blue": discord.Color.blue(), "green": discord.Color.green(),
+        "gold": discord.Color.gold(), "purple": discord.Color.purple(), "orange": discord.Color.orange(),
+        "random": discord.Color.random()
+    }
+    embed = discord.Embed(title=title, description=description, color=colors.get(color.lower(), discord.Color.blue()))
+    channel = channel or interaction.channel
+    await channel.send(embed=embed)
+    await interaction.response.send_message("✅ Embed sent!", ephemeral=True)
+
+# ===== PLAYLIST COMMANDS =====
 @bot.tree.command(name="addsong", description="Add a song to the server playlist")
 async def add_song(interaction: discord.Interaction, name: str, url: str):
     c.execute("INSERT INTO playlists (guild_id, name, url, added_by) VALUES (?, ?, ?, ?)",
@@ -2896,420 +2625,9 @@ async def show_playlist(interaction: discord.Interaction):
         embed.add_field(name=f"{i}. {name}", value=f"[Link]({url}) | Added by {member.display_name if member else 'Unknown'}", inline=False)
     await interaction.response.send_message(embed=embed)
 
-# ===== HISTORY MANAGEMENT =====
-@bot.tree.command(name="historystats", description="Show history database statistics")
-@app_commands.check(owner_check)
-async def history_stats(interaction: discord.Interaction):
-    c.execute("SELECT COUNT(*) FROM history WHERE guild_id=?", (interaction.guild.id,))
-    total_events = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM history WHERE guild_id=? AND user_id > 0", (interaction.guild.id,))
-    unique_users = c.fetchone()[0]
-    
-    c.execute("""
-    SELECT event_type, COUNT(*) as cnt
-    FROM history
-    WHERE guild_id=?
-    GROUP BY event_type
-    ORDER BY cnt DESC
-    LIMIT 10
-    """, (interaction.guild.id,))
-    event_breakdown = c.fetchall()
-    
-    c.execute("SELECT SUM(count) FROM message_stats WHERE guild_id=?", (interaction.guild.id,))
-    total_msgs = c.fetchone()[0] or 0
-    
-    c.execute("SELECT COUNT(*) FROM daily_summaries WHERE guild_id=?", (interaction.guild.id,))
-    total_summaries = c.fetchone()[0]
-    
-    embed = discord.Embed(
-        title="📊 History Database Stats",
-        description=f"Data collected for {interaction.guild.name}",
-        color=discord.Color.teal()
-    )
-    embed.add_field(name="Total Events", value=f"{total_events:,}", inline=True)
-    embed.add_field(name="Unique Users", value=f"{unique_users:,}", inline=True)
-    embed.add_field(name="Messages Tracked", value=f"{total_msgs:,}", inline=True)
-    embed.add_field(name="Daily Summaries", value=total_summaries, inline=True)
-    
-    breakdown_text = "\n".join([f"**{e}**: {c:,}" for e, c in event_breakdown]) or "No events"
-    embed.add_field(name="Event Breakdown", value=breakdown_text, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-# ===== ADVANCED HISTORY INSIGHTS =====
-
-@bot.tree.command(name="mostactive", description="Find the most active member in the last 30 days")
-async def who_was_most_active_last_month(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
-    
-    c.execute("""
-    SELECT user_id, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=? AND date >= ?
-    GROUP BY user_id
-    ORDER BY total DESC
-    LIMIT 5
-    """, (interaction.guild.id, thirty_days_ago))
-    
-    results = c.fetchall()
-    
-    if not results:
-        await interaction.response.send_message("📭 Not enough data yet. Let the bot run for a while!")
-        return
-    
-    embed = discord.Embed(
-        title="🏆 Most Active Members — Last 30 Days",
-        color=discord.Color.gold()
-    )
-    
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
-    for i, (user_id, total) in enumerate(results):
-        user = interaction.guild.get_member(user_id)
-        name = user.display_name if user else f"Unknown ({user_id})"
-        embed.add_field(
-            name=f"{medals[i]} {name}",
-            value=f"{total:,} messages",
-            inline=False
-        )
-    
-    c.execute("""
-    SELECT SUM(count) FROM message_stats
-    WHERE guild_id=? AND date >= ?
-    """, (interaction.guild.id, thirty_days_ago))
-    total_msgs = c.fetchone()[0] or 0
-    
-    embed.set_footer(text=f"Total server messages: {total_msgs:,}")
-    
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="mostwarned", description="See who has the most warnings in server history")
-async def who_got_warned_the_most(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    c.execute("""
-    SELECT user_id, COUNT(*) as total
-    FROM warnings
-    WHERE guild_id=?
-    GROUP BY user_id
-    ORDER BY total DESC
-    LIMIT 5
-    """, (interaction.guild.id,))
-    
-    results = c.fetchall()
-    
-    if not results:
-        await interaction.response.send_message("✅ No one has been warned! Clean server.")
-        return
-    
-    embed = discord.Embed(
-        title="⚠️ Most Warned Members",
-        color=discord.Color.orange()
-    )
-    
-    skulls = ["💀", "⚠️", "📋", "4️⃣", "5️⃣"]
-    for i, (user_id, total) in enumerate(results):
-        user = interaction.guild.get_member(user_id)
-        name = user.display_name if user else f"Unknown ({user_id})"
-        
-        c.execute("""
-        SELECT reason, timestamp FROM warnings
-        WHERE user_id=? AND guild_id=?
-        ORDER BY id DESC LIMIT 1
-        """, (user_id, interaction.guild.id))
-        last_warn = c.fetchone()
-        last_reason = last_warn[0] if last_warn else "N/A"
-        
-        embed.add_field(
-            name=f"{skulls[i]} {name} — {total} warnings",
-            value=f"Last: {last_reason[:80]}",
-            inline=False
-        )
-    
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="voicemates", description="See who you voice chat with the most")
-async def who_joins_voice_with_me_the_most(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    user_id = interaction.user.id
-    
-    c.execute("""
-    SELECT h1.user_id, h1.username, COUNT(*) as times_together
-    FROM history h1
-    JOIN history h2 ON h1.guild_id = h2.guild_id 
-        AND h1.event_type = 'VOICE_JOIN' 
-        AND h2.event_type = 'VOICE_JOIN'
-        AND h1.user_id != h2.user_id
-        AND h1.details = h2.details
-        AND ABS(strftime('%s', h1.timestamp) - strftime('%s', h2.timestamp)) < 30
-    WHERE h1.guild_id = ? AND h2.user_id = ?
-    GROUP BY h1.user_id
-    ORDER BY times_together DESC
-    LIMIT 10
-    """, (interaction.guild.id, user_id))
-    
-    results = c.fetchall()
-    
-    if not results:
-        await interaction.response.send_message("📭 Not enough voice data yet. Join some voice channels first!")
-        return
-    
-    embed = discord.Embed(
-        title=f"🎙️ Voice Chat Partners — {interaction.user.display_name}",
-        description="People you join voice channels with the most",
-        color=discord.Color.blue()
-    )
-    
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    for i, (other_id, username, count) in enumerate(results[:10]):
-        user = interaction.guild.get_member(other_id)
-        name = user.display_name if user else (username or f"Unknown ({other_id})")
-        embed.add_field(
-            name=f"{medals[i]} {name}",
-            value=f"{count} times together",
-            inline=False
-        )
-    
-    await interaction.response.send_message(embed=embed)
-
-
-# Fix 1: Shortened command name from 43 chars to 9 chars
-@bot.tree.command(name="biggestday", description="Find the most active day ever in this server")
-async def biggest_day(interaction: discord.Interaction):
-    await interaction.response.defer()
-
-    c.execute("""
-    SELECT date, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=?
-    GROUP BY date
-    ORDER BY total DESC
-    LIMIT 1
-    """, (interaction.guild.id,))
-    
-    busiest = c.fetchone()
-    
-    c.execute("""
-    SELECT SUBSTR(timestamp, 1, 10) as day, COUNT(*) as total
-    FROM history
-    WHERE guild_id=?
-    GROUP BY day
-    ORDER BY total DESC
-    LIMIT 3
-    """, (interaction.guild.id,))
-    top_event_days = c.fetchall()
-    
-    if not busiest and not top_event_days:
-        await interaction.response.send_message("📭 Not enough data yet. Let the bot run for a while!")
-        return
-    
-    embed = discord.Embed(
-        title="📊 Biggest Days in Server History",
-        color=discord.Color.gold()
-    )
-    
-    if busiest:
-        date_str = busiest[0]
-        try:
-            dt = datetime.strptime(date_str, "%Y-%m-%d")
-            formatted_date = dt.strftime("%B %d, %Y")
-        except:
-            formatted_date = date_str
-        
-        embed.add_field(
-            name="🚀 Most Messages",
-            value=f"**{formatted_date}** — {busiest[1]:,} messages",
-            inline=False
-        )
-        
-        c.execute("""
-        SELECT event_type, COUNT(*) as cnt
-        FROM history
-        WHERE guild_id=? AND timestamp LIKE ?
-        GROUP BY event_type
-        ORDER BY cnt DESC
-        LIMIT 5
-        """, (interaction.guild.id, f"{date_str}%"))
-        events = c.fetchall()
-        
-        if events:
-            event_text = "\n".join([f"**{e}**: {c}" for e, c in events])
-            embed.add_field(name="Events That Day", value=event_text, inline=False)
-        
-        c.execute("""
-        SELECT user_id, SUM(count) as total
-        FROM message_stats
-        WHERE guild_id=? AND date=?
-        GROUP BY user_id
-        ORDER BY total DESC
-        LIMIT 1
-        """, (interaction.guild.id, date_str))
-        top_user = c.fetchone()
-        if top_user:
-            user = interaction.guild.get_member(top_user[0])
-            name = user.display_name if user else f"User({top_user[0]})"
-            embed.add_field(name="🏆 Top Chatter", value=f"{name} — {top_user[1]:,} messages", inline=False)
-    
-    if top_event_days:
-        days_text = "\n".join([
-            f"**{d}** — {c} events" for d, c in top_event_days[:3]
-        ])
-        embed.add_field(name="📋 Most Eventful Days", value=days_text, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="showdrama", description="Show controversial events — warnings, kicks, bans")
-async def show_drama(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    drama_types = ["WARN", "KICK", "BAN", "SOFTBAN", "MUTE", "DELETE"]
-    
-    embed = discord.Embed(
-        title="🔥 Server Drama Log",
-        description="Recent warnings, kicks, bans, mutes, and deleted messages",
-        color=discord.Color.red()
-    )
-    
-    for event_type in drama_types:
-        c.execute("""
-        SELECT username, details, timestamp
-        FROM history
-        WHERE guild_id=? AND event_type=?
-        ORDER BY id DESC
-        LIMIT 3
-        """, (interaction.guild.id, event_type))
-        
-        results = c.fetchall()
-        if results:
-            event_emoji = {
-                "WARN": "⚠️", "KICK": "👢", "BAN": "🔨", 
-                "SOFTBAN": "🧹", "MUTE": "🔇", "DELETE": "🗑️"
-            }
-            emoji = event_emoji.get(event_type, "📌")
-            
-            lines = []
-            for username, details, timestamp in results:
-                time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp
-                lines.append(f"`{time_only}` **{username}**: {details[:70]}")
-            
-            embed.add_field(
-                name=f"{emoji} {event_type}s (Last 3)",
-                value="\n".join(lines),
-                inline=False
-            )
-    
-    c.execute("""
-    SELECT event_type, COUNT(*) as cnt
-    FROM history
-    WHERE guild_id=? AND event_type IN ('WARN','KICK','BAN','MUTE')
-    """, (interaction.guild.id,))
-    totals = c.fetchall()
-    
-    if totals:
-        total_text = " | ".join([f"{e}: {c}" for e, c in totals])
-        embed.set_footer(text=f"Server totals: {total_text}")
-    
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="weeklysummary", description="Get a weekly summary of everything that happened")
-async def summarize_this_week(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-    
-    c.execute("""
-    SELECT SUM(count) FROM message_stats
-    WHERE guild_id=? AND date >= ?
-    """, (interaction.guild.id, week_ago))
-    total_msgs = c.fetchone()[0] or 0
-    
-    events_to_count = ["JOIN", "LEAVE", "WARN", "KICK", "BAN", "MUTE", "NICK_CHANGE", "ROLE_ADD", "ROLE_REMOVE", "DELETE", "LEVEL_UP"]
-    event_counts = {}
-    for event in events_to_count:
-        c.execute("""
-        SELECT COUNT(*) FROM history
-        WHERE guild_id=? AND event_type=? AND timestamp >= ?
-        """, (interaction.guild.id, event, week_ago))
-        event_counts[event] = c.fetchone()[0]
-    
-    most_active = get_most_active_user(interaction.guild.id, 7)
-    most_active_name = "No data"
-    if most_active:
-        user = interaction.guild.get_member(most_active[0])
-        most_active_name = user.display_name if user else f"User({most_active[0]})"
-    
-    top_channels = get_top_channels(interaction.guild.id, 7)
-    
-    c.execute("""
-    SELECT COUNT(*) FROM history
-    WHERE guild_id=? AND event_type='CHANNEL_CREATE' AND timestamp >= ?
-    """, (interaction.guild.id, week_ago))
-    channels_created = c.fetchone()[0]
-    
-    c.execute("""
-    SELECT COUNT(*) FROM history
-    WHERE guild_id=? AND event_type='CHANNEL_DELETE' AND timestamp >= ?
-    """, (interaction.guild.id, week_ago))
-    channels_deleted = c.fetchone()[0]
-    
-    level_ups = event_counts.get("LEVEL_UP", 0)
-    nick_changes = event_counts.get("NICK_CHANGE", 0)
-    
-    embed = discord.Embed(
-        title=f"📅 Weekly Summary — {interaction.guild.name}",
-        description=f"Last 7 days ({week_ago} → today)",
-        color=discord.Color.blue()
-    )
-    
-    overview = (
-        f"📝 **{total_msgs:,}** messages sent\n"
-        f"👋 **{event_counts.get('JOIN', 0)}** joins | 👋 **{event_counts.get('LEAVE', 0)}** leaves\n"
-        f"⚠️ **{event_counts.get('WARN', 0)}** warnings | 👢 **{event_counts.get('KICK', 0)}** kicks\n"
-        f"🔨 **{event_counts.get('BAN', 0)}** bans | 🔇 **{event_counts.get('MUTE', 0)}** mutes\n"
-        f"🗑️ **{event_counts.get('DELETE', 0)}** deleted messages\n"
-        f"📁 **+{channels_created}** / **-{channels_deleted}** channels\n"
-        f"⬆️ **{level_ups}** level ups | ✏️ **{nick_changes}** nickname changes"
-    )
-    embed.add_field(name="📊 Overview", value=overview, inline=False)
-    embed.add_field(name="🏆 Most Active", value=most_active_name, inline=True)
-    
-    if top_channels:
-        channel_text = "\n".join([f"<#{cid}>: {c:,} msgs" for cid, c in top_channels[:3]])
-        embed.add_field(name="📈 Top Channels", value=channel_text, inline=True)
-    
-    role_adds = event_counts.get("ROLE_ADD", 0)
-    role_removes = event_counts.get("ROLE_REMOVE", 0)
-    embed.add_field(name="🎭 Role Changes", value=f"+{role_adds} / -{role_removes}", inline=True)
-    
-    c.execute("""
-    SELECT event_type, username, details, timestamp
-    FROM history
-    WHERE guild_id=? AND timestamp >= ? AND event_type IN ('KICK', 'BAN', 'SOFTBAN', 'CHANNEL_CREATE', 'CHANNEL_DELETE')
-    ORDER BY id DESC
-    LIMIT 5
-    """, (interaction.guild.id, week_ago))
-    notable = c.fetchall()
-    
-    if notable:
-        notable_lines = []
-        for event, username, details, timestamp in notable:
-            time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp
-            notable_lines.append(f"`{time_only}` **{event}** — {username}: {details[:60]}")
-        embed.add_field(name="🔥 Notable Events", value="\n".join(notable_lines), inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
 # =========================
 # AI Chat Command
 # =========================
-
 @bot.tree.command(name="ai", description="🤖 Chat with the AI — remembers you across sessions!")
 async def ai_chat(interaction: discord.Interaction, message: str):
     await interaction.response.defer()
@@ -3367,17 +2685,10 @@ Respond naturally, conversationally, and keep it concise (under 300 words). Refe
     )
     embed.set_footer(text=f"🧠 I remember you, {interaction.user.display_name}!")
     
-    await interaction.response.send_message(embed=embed)
-
-
-# =========================
-# AI Memory Management Commands
-# =========================
+    await interaction.followup.send(embed=embed)
 
 @bot.tree.command(name="whatiknow", description="🧠 See what the AI has learned about you")
 async def what_i_know(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
     memories = get_ai_memories(interaction.guild.id, interaction.user.id)
     traits = get_user_personality(interaction.guild.id, interaction.user.id)
     
@@ -3404,7 +2715,6 @@ async def what_i_know(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name="forgetme", description="🧹 Make the AI forget everything about you")
 async def forget_me(interaction: discord.Interaction):
     c.execute("DELETE FROM ai_memories WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
@@ -3413,75 +2723,12 @@ async def forget_me(interaction: discord.Interaction):
     conn.commit()
     await interaction.response.send_message("🧹 Done! I've forgotten everything about you. Let's start fresh whenever you're ready.")
 
-
-@bot.tree.command(name="aistats", description="📊 Show AI memory and conversation stats")
-@app_commands.check(owner_check)
-async def ai_stats(interaction: discord.Interaction):
-    await interaction.response.defer()
-    
-    c.execute("SELECT COUNT(*) FROM ai_memories WHERE guild_id=?", (interaction.guild.id,))
-    total_memories = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM ai_memories WHERE guild_id=?", (interaction.guild.id,))
-    users_with_memories = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(*) FROM ai_conversations WHERE guild_id=?", (interaction.guild.id,))
-    total_conversations = c.fetchone()[0]
-    
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM ai_conversations WHERE guild_id=?", (interaction.guild.id,))
-    users_engaged = c.fetchone()[0]
-    
-    c.execute("""
-    SELECT user_id, COUNT(*) as cnt FROM ai_memories
-    WHERE guild_id=?
-    GROUP BY user_id ORDER BY cnt DESC LIMIT 3
-    """, (interaction.guild.id,))
-    top_remembered = c.fetchall()
-    
-    embed = discord.Embed(
-        title="📊 AI System Stats",
-        description=f"Data for {interaction.guild.name}",
-        color=discord.Color.purple()
-    )
-    embed.add_field(name="🧠 Total Memories", value=f"{total_memories:,}", inline=True)
-    embed.add_field(name="👥 Users Remembered", value=f"{users_with_memories:,}", inline=True)
-    embed.add_field(name="💬 Conversations Saved", value=f"{total_conversations:,}", inline=True)
-    embed.add_field(name="🗣️ Users Engaged", value=f"{users_engaged:,}", inline=True)
-    
-    if top_remembered:
-        lines = []
-        for uid, cnt in top_remembered:
-            user = interaction.guild.get_member(uid)
-            name = user.display_name if user else f"Unknown"
-            lines.append(f"**{name}**: {cnt} facts")
-        embed.add_field(name="📝 Most Remembered", value="\n".join(lines), inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-
-# Fix 7: Safe error handler
-@bot.tree.error
-async def error_handler(interaction: discord.Interaction, error):
-    if interaction.response.is_done():
-        await interaction.followup.send(
-            f"❌ Error: {error}",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"❌ Error: {error}",
-            ephemeral=True
-        )
-
-
-# =====================================================
-# 🎵 MUSIC SYSTEM - SLASH COMMANDS (LARA BOT STYLE)
-# =====================================================
+# =========================
+# 🎵 MUSIC SYSTEM - SLASH COMMANDS
+# =========================
 
 @bot.tree.command(name="play", description="🎵 Play a song by name or URL (YouTube, Spotify, SoundCloud)")
 async def play_music(interaction: discord.Interaction, query: str):
-    """Play a song by search term or URL. Supports YouTube, Spotify, SoundCloud."""
-    
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
         return
@@ -3492,19 +2739,17 @@ async def play_music(interaction: discord.Interaction, query: str):
     
     connected = await player.connect_voice(interaction.user.voice.channel)
     if not connected:
-        await interaction.response.send_message("❌ Could not connect to voice channel.", ephemeral=True)
+        await interaction.followup.send("❌ Could not connect to voice channel.", ephemeral=True)
         return
     
     try:
-        # Check if it's a URL or search term
         is_url = bool(URL_REGEX.match(query))
         
         if is_url and ('playlist' in query.lower() or '&list=' in query.lower()):
-            # It's a playlist
             playlist_title, tracks = await YTDLSource.from_playlist(query)
             
             if not tracks:
-                await interaction.response.send_message("❌ Could not find any tracks in that playlist.")
+                await interaction.followup.send("❌ Could not find any tracks in that playlist.")
                 return
             
             for track in tracks:
@@ -3520,11 +2765,10 @@ async def play_music(interaction: discord.Interaction, query: str):
             if player.current:
                 embed.add_field(name="Now Playing", value=f"[{player.current.get('title', 'Unknown')}]({player.current.get('url', '')})", inline=False)
             
-            await interaction.response.send_message(embed=embed)
+            await interaction.followup.send(embed=embed)
             add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST", f"Added playlist: {playlist_title} ({len(tracks)} tracks)")
             return
         
-        # Single track
         source = await YTDLSource.from_url(query)
         
         track_data = {
@@ -3558,20 +2802,16 @@ async def play_music(interaction: discord.Interaction, query: str):
         if queue_size > 0:
             embed.add_field(name="Position in Queue", value=f"#{queue_size}", inline=True)
         
-        await interaction.response.send_message(embed=embed)
-        
+        await interaction.followup.send(embed=embed)
         add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAY", f"Played: {source.title}")
         
     except ValueError as e:
-        await interaction.response.send_message(f"❌ {str(e)}")
+        await interaction.followup.send(f"❌ {str(e)}")
     except Exception as e:
-        await interaction.response.send_message(f"❌ Error playing song: {str(e)[:100]}")
-
+        await interaction.followup.send(f"❌ Error playing song: {str(e)[:100]}")
 
 @bot.tree.command(name="search", description="🔍 Search YouTube and pick a song to play")
 async def search_music(interaction: discord.Interaction, query: str):
-    """Search YouTube and select from results."""
-    
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
         return
@@ -3582,7 +2822,7 @@ async def search_music(interaction: discord.Interaction, query: str):
         results = await YTDLSource.search_results(query, max_results=5)
         
         if not results:
-            await interaction.response.send_message(f"❌ No results found for '{query}'.")
+            await interaction.followup.send(f"❌ No results found for '{query}'.")
             return
         
         embed = discord.Embed(
@@ -3599,7 +2839,6 @@ async def search_music(interaction: discord.Interaction, query: str):
                 inline=False
             )
         
-        # Create select menu for results
         class SearchSelect(discord.ui.Select):
             def __init__(self):
                 options = []
@@ -3642,15 +2881,13 @@ async def search_music(interaction: discord.Interaction, query: str):
         view = discord.ui.View(timeout=30)
         view.add_item(SearchSelect())
         
-        await interaction.response.send_message(embed=embed, view=view)
+        await interaction.followup.send(embed=embed, view=view)
         
     except Exception as e:
-        await interaction.response.send_message(f"❌ Search error: {str(e)[:100]}")
-
+        await interaction.followup.send(f"❌ Search error: {str(e)[:100]}")
 
 @bot.tree.command(name="pause", description="⏸️ Pause the current song")
 async def pause_music(interaction: discord.Interaction):
-    """Pause the currently playing song."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3665,10 +2902,8 @@ async def pause_music(interaction: discord.Interaction):
     await interaction.response.send_message("⏸️ **Paused** — Use `/resume` to continue.")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PAUSE", "Paused music")
 
-
 @bot.tree.command(name="resume", description="▶️ Resume the paused song")
 async def resume_music(interaction: discord.Interaction):
-    """Resume the paused song."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3683,10 +2918,8 @@ async def resume_music(interaction: discord.Interaction):
     await interaction.response.send_message("▶️ **Resumed** — Enjoy the music!")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_RESUME", "Resumed music")
 
-
 @bot.tree.command(name="skip", description="⏭️ Skip the current song")
 async def skip_music(interaction: discord.Interaction):
-    """Skip the currently playing song."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3703,10 +2936,8 @@ async def skip_music(interaction: discord.Interaction):
     await interaction.response.send_message(f"⏭️ **Skipped** `{current_title}`")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SKIP", f"Skipped: {current_title}")
 
-
 @bot.tree.command(name="previous", description="⏮️ Go back to the previous song")
 async def previous_music(interaction: discord.Interaction):
-    """Go back to the previous song."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3719,10 +2950,8 @@ async def previous_music(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ No previous song in history.")
 
-
 @bot.tree.command(name="stop", description="⏹️ Stop music and clear the queue")
 async def stop_music(interaction: discord.Interaction):
-    """Stop the music and clear the queue."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3733,10 +2962,8 @@ async def stop_music(interaction: discord.Interaction):
     await interaction.response.send_message("⏹️ **Stopped** — Music stopped and queue cleared.")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_STOP", "Stopped music and cleared queue")
 
-
 @bot.tree.command(name="queue", description="📋 Show the current music queue")
 async def queue_music(interaction: discord.Interaction, page: int = 1):
-    """Display the current song queue."""
     player = get_music_player(interaction.guild.id)
     
     queue_list = player.get_queue_list()
@@ -3786,10 +3013,8 @@ async def queue_music(interaction: discord.Interaction, page: int = 1):
     
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name="nowplaying", description="🎶 Show what's currently playing")
 async def now_playing(interaction: discord.Interaction):
-    """Display the currently playing song."""
     player = get_music_player(interaction.guild.id)
     
     if not player.current:
@@ -3821,10 +3046,8 @@ async def now_playing(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name="volume", description="🔊 Set the volume (0-100)")
 async def volume_music(interaction: discord.Interaction, level: int):
-    """Set the playback volume (0-100)."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3839,10 +3062,8 @@ async def volume_music(interaction: discord.Interaction, level: int):
     await interaction.response.send_message(f"🔊 **Volume set to {level}%**")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_VOLUME", f"Volume set to {level}%")
 
-
 @bot.tree.command(name="loop", description="🔁 Set loop mode: none, one, or all")
 async def loop_music(interaction: discord.Interaction, mode: str):
-    """Set loop mode: none, one, or all."""
     player = get_music_player(interaction.guild.id)
     
     mode = mode.lower().strip()
@@ -3856,10 +3077,8 @@ async def loop_music(interaction: discord.Interaction, mode: str):
     await interaction.response.send_message(f"**Loop: {loop_names[mode]}**")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_LOOP", f"Loop mode: {mode}")
 
-
 @bot.tree.command(name="shuffle", description="🔀 Shuffle the queue")
 async def shuffle_music(interaction: discord.Interaction):
-    """Shuffle all songs in the queue."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3875,10 +3094,8 @@ async def shuffle_music(interaction: discord.Interaction):
     await interaction.response.send_message(f"🔀 **Queue shuffled!** ({len(queue_list)} songs)")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SHUFFLE", "Shuffled queue")
 
-
 @bot.tree.command(name="remove", description="❌ Remove a song from the queue by its number")
 async def remove_music(interaction: discord.Interaction, position: int):
-    """Remove a song from the queue by position number."""
     player = get_music_player(interaction.guild.id)
     
     removed = player.remove_from_queue(position)
@@ -3888,10 +3105,8 @@ async def remove_music(interaction: discord.Interaction, position: int):
     else:
         await interaction.response.send_message(f"❌ Invalid position. Use `/queue` to see positions.")
 
-
 @bot.tree.command(name="clearqueue", description="🧹 Clear the entire queue")
 async def clear_queue_music(interaction: discord.Interaction):
-    """Clear all songs from the queue (current song continues)."""
     player = get_music_player(interaction.guild.id)
     
     queue_list = player.get_queue_list()
@@ -3904,10 +3119,8 @@ async def clear_queue_music(interaction: discord.Interaction):
     await interaction.response.send_message(f"🧹 **Cleared {count} songs** from the queue. Current song continues.")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_CLEAR", f"Cleared {count} songs from queue")
 
-
 @bot.tree.command(name="join", description="🔊 Make the bot join your voice channel")
 async def join_voice(interaction: discord.Interaction):
-    """Make the bot join your current voice channel."""
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You must be in a voice channel first!")
         return
@@ -3921,10 +3134,8 @@ async def join_voice(interaction: discord.Interaction):
     else:
         await interaction.response.send_message("❌ Could not connect to that voice channel.")
 
-
 @bot.tree.command(name="leave", description="👋 Make the bot leave the voice channel")
 async def leave_voice(interaction: discord.Interaction):
-    """Make the bot leave the voice channel and clear the queue."""
     player = get_music_player(interaction.guild.id)
     
     if not player.voice_client or not player.voice_client.is_connected():
@@ -3939,10 +3150,8 @@ async def leave_voice(interaction: discord.Interaction):
     await interaction.response.send_message(f"👋 **Left** {channel_name} — Queue cleared.")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_LEAVE", f"Left voice channel")
 
-
 @bot.tree.command(name="lyrics", description="📝 Get lyrics for the current song")
 async def lyrics_music(interaction: discord.Interaction, song: str = None):
-    """Search for song lyrics. Leave empty for the current song."""
     await interaction.response.defer()
     
     if not song:
@@ -3950,7 +3159,7 @@ async def lyrics_music(interaction: discord.Interaction, song: str = None):
         if player.current:
             song = player.current.get('title', '')
         else:
-            await interaction.response.send_message("❌ Provide a song name or play something first.")
+            await interaction.followup.send("❌ Provide a song name or play something first.")
             return
     
     try:
@@ -3969,9 +3178,8 @@ async def lyrics_music(interaction: discord.Interaction, song: str = None):
                         description=lyrics or "No lyrics found.",
                         color=discord.Color.purple()
                     )
-                    await interaction.response.send_message(embed=embed)
+                    await interaction.followup.send(embed=embed)
                 else:
-                    # Try another format: artist - title
                     async with session.get(f"https://api.lyrics.ovh/v1/{song.replace(' - ', '/')}") as resp2:
                         if resp2.status == 200:
                             data = await resp2.json()
@@ -3983,16 +3191,14 @@ async def lyrics_music(interaction: discord.Interaction, song: str = None):
                                 description=lyrics or "No lyrics found.",
                                 color=discord.Color.purple()
                             )
-                            await interaction.response.send_message(embed=embed)
+                            await interaction.followup.send(embed=embed)
                         else:
-                            await interaction.response.send_message(f"❌ Could not find lyrics for `{song}`.")
+                            await interaction.followup.send(f"❌ Could not find lyrics for `{song}`.")
     except Exception as e:
-        await interaction.response.send_message(f"❌ Lyrics lookup failed: {str(e)[:100]}")
-
+        await interaction.followup.send(f"❌ Lyrics lookup failed: {str(e)[:100]}")
 
 @bot.tree.command(name="favorite", description="⭐ Save the current song to your favorites")
 async def favorite_music(interaction: discord.Interaction):
-    """Save the currently playing song to your favorites."""
     player = get_music_player(interaction.guild.id)
     
     if not player.current:
@@ -4016,10 +3222,8 @@ async def favorite_music(interaction: discord.Interaction):
     await interaction.response.send_message(f"⭐ **Added to favorites:** {track.get('title', 'Unknown')}")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_FAVORITE", f"Favorited: {track.get('title', 'Unknown')}")
 
-
 @bot.tree.command(name="favorites", description="⭐ Show your favorite songs")
 async def favorites_music(interaction: discord.Interaction):
-    """Display your favorite songs."""
     c.execute("SELECT title, url, added_at FROM music_favorites WHERE user_id=? AND guild_id=? ORDER BY id DESC LIMIT 25",
               (interaction.user.id, interaction.guild.id))
     favorites = c.fetchall()
@@ -4039,10 +3243,8 @@ async def favorites_music(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name="playlistcreate", description="📁 Create a new music playlist")
 async def playlist_create(interaction: discord.Interaction, name: str):
-    """Create a new custom playlist."""
     c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
               (interaction.guild.id, name, interaction.user.id))
     existing = c.fetchone()
@@ -4058,10 +3260,8 @@ async def playlist_create(interaction: discord.Interaction, name: str):
     await interaction.response.send_message(f"📁 **Playlist created:** `{name}` — Use `/playlistadd` to add songs!")
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST_CREATE", f"Created playlist: {name}")
 
-
 @bot.tree.command(name="playlistadd", description="➕ Add the current song to a playlist")
 async def playlist_add(interaction: discord.Interaction, playlist_name: str):
-    """Add the currently playing song to one of your playlists."""
     player = get_music_player(interaction.guild.id)
     
     if not player.current:
@@ -4088,10 +3288,8 @@ async def playlist_add(interaction: discord.Interaction, playlist_name: str):
     
     await interaction.response.send_message(f"➕ **Added to `{playlist_name}`:** {track.get('title', 'Unknown')}")
 
-
 @bot.tree.command(name="playlists", description="📁 Show your playlists")
 async def playlists_show(interaction: discord.Interaction):
-    """Display all your playlists."""
     c.execute("SELECT id, name, created_at FROM music_playlists WHERE guild_id=? AND user_id=? ORDER BY id DESC",
               (interaction.guild.id, interaction.user.id))
     playlists = c.fetchall()
@@ -4113,10 +3311,8 @@ async def playlists_show(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-
 @bot.tree.command(name="playlistplay", description="▶️ Play all songs from a playlist")
 async def playlist_play(interaction: discord.Interaction, name: str):
-    """Play all songs from one of your playlists."""
     if not interaction.user.voice:
         await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
         return
@@ -4142,7 +3338,7 @@ async def playlist_play(interaction: discord.Interaction, name: str):
     player = get_music_player(interaction.guild.id)
     connected = await player.connect_voice(interaction.user.voice.channel)
     if not connected:
-        await interaction.response.send_message("❌ Could not connect to voice channel.")
+        await interaction.followup.send("❌ Could not connect to voice channel.")
         return
     
     for title, url in tracks:
@@ -4165,13 +3361,11 @@ async def playlist_play(interaction: discord.Interaction, name: str):
     )
     embed.add_field(name="Tracks", value=f"{len(tracks)} songs added to queue", inline=False)
     
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST_PLAY", f"Playing playlist: {name} ({len(tracks)} tracks)")
-
 
 @bot.tree.command(name="playlistdelete", description="🗑️ Delete a playlist")
 async def playlist_delete(interaction: discord.Interaction, name: str):
-    """Delete one of your playlists."""
     c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
               (interaction.guild.id, name, interaction.user.id))
     pl = c.fetchone()
@@ -4187,6 +3381,63 @@ async def playlist_delete(interaction: discord.Interaction, name: str):
     
     await interaction.response.send_message(f"🗑️ **Deleted playlist:** `{name}`")
 
+# =========================
+# ADMIN COMMANDS
+# =========================
+@bot.tree.command(name="servers", description="List all servers the bot is in")
+@app_commands.check(owner_check)
+async def list_servers(interaction: discord.Interaction):
+    embed = discord.Embed(title="📋 Servers", color=discord.Color.blue())
+    for guild in bot.guilds:
+        embed.add_field(name=guild.name, value=f"ID: {guild.id}\nMembers: {guild.member_count}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@bot.tree.command(name="leaveserver", description="Leave a server by ID")
+@app_commands.check(owner_check)
+async def leave_server(interaction: discord.Interaction, guild_id: str):
+    try:
+        guild = bot.get_guild(int(guild_id))
+        if guild:
+            add_history(guild.id, interaction.user.id, str(interaction.user), "BOT_LEAVE", f"Bot left server by admin request")
+            await guild.leave()
+            await interaction.response.send_message(f"✅ Left {guild.name}")
+        else:
+            await interaction.response.send_message("❌ Server not found.")
+    except ValueError:
+        await interaction.response.send_message("❌ Invalid server ID.")
+
+@bot.tree.command(name="reload", description="Reload bot commands")
+@app_commands.check(owner_check)
+async def reload_commands(interaction: discord.Interaction):
+    await bot.tree.sync()
+    await interaction.response.send_message("✅ Commands reloaded!")
+
+# =========================
+# REGISTER GROUPS
+# =========================
+bot.tree.add_command(mod_group)
+bot.tree.add_command(history_group)
+bot.tree.add_command(fun_group)
+bot.tree.add_command(ticket_group)
+bot.tree.add_command(level_group)
+bot.tree.add_command(eco_group)
+bot.tree.add_command(giveaway_group)
+
+# =========================
+# ERROR HANDLER
+# =========================
+@bot.tree.error
+async def error_handler(interaction: discord.Interaction, error):
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            f"❌ Error: {error}",
+            ephemeral=True
+        )
+    else:
+        await interaction.response.send_message(
+            f"❌ Error: {error}",
+            ephemeral=True
+        )
 
 # =========================
 # RUN
