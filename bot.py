@@ -3685,7 +3685,7 @@ async def resume_music(interaction: discord.Interaction):
     """Resume the paused song."""
     player = get_music_player(interaction.guild.id)
     
-    if not player.voice_client or !player.voice_client.is_connected():
+    if not player.voice_client or not player.voice_client.is_connected():
         await interaction.response.send_message("❌ I'm not in a voice channel.")
         return
     
