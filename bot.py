@@ -2785,20 +2785,6 @@ async def dice(interaction: discord.Interaction, sides: int = 6):
     result = random.randint(1, sides)
     await interaction.response.send_message(f"🎲 You rolled a **{result}** (1-{sides})")
 
-@bot.tree.command(name="8ball", description="Ask the magic 8-ball")
-async def eightball(interaction: discord.Interaction, question: str):
-    responses = [
-        "It is certain.", "It is decidedly so.", "Without a doubt.", "Yes - definitely.",
-        "You may rely on it.", "As I see it, yes.", "Most likely.", "Outlook good.",
-        "Yes.", "Signs point to yes.", "Reply hazy, try again.", "Ask again later.",
-        "Better not tell you now.", "Cannot predict now.", "Concentrate and ask again.",
-        "Don't count on it.", "My reply is no.", "My sources say no.", "Outlook not so good.", "Very doubtful."
-    ]
-    embed = discord.Embed(title="🎱 Magic 8-Ball", color=discord.Color.purple())
-    embed.add_field(name="Question", value=question, inline=False)
-    embed.add_field(name="Answer", value=random.choice(responses), inline=False)
-    await interaction.response.send_message(embed=embed)
-
 @bot.tree.command(name="say", description="Make the bot say something")
 @app_commands.check(owner_check)
 async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
