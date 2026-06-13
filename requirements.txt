@@ -1,5 +1,7 @@
+yt-dlp
 discord.py
+pynacl
 google-genai
 pypdf
 python-docx
-aiohttp>=3.9.0
+aiohttp
