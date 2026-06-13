@@ -1171,7 +1171,7 @@ class MusicPlayer:
                     await self.voice_client.move_to(channel)
                 return True
             
-            self.voice_client = await channel.connect(cls=discord.VoiceClient, timeout=20.0)
+            self.voice_client = await channel.connect(timeout=20.0)
             return True
         except Exception as e:
             import traceback
