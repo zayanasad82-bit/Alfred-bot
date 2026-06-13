@@ -34,6 +34,9 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+# Fix 5: Uptime constant at module level
+START_TIME = datetime.now()
+
 # =========================
 # DATABASE
 # =========================
@@ -46,6 +49,7 @@ CREATE TABLE IF NOT EXISTS warnings (
     user_id INTEGER,
     guild_id INTEGER,
     reason TEXT,
+    moderator TEXT,
     timestamp TEXT
 )
 """)
@@ -155,7 +159,7 @@ CREATE TABLE IF NOT EXISTS polls (
 """)
 
 # =========================
-# 🕰️ HISTORY SYSTEM (Stage 1 - 5)
+# 🕰️ HISTORY SYSTEM
 # =========================
 c.execute("""
 CREATE TABLE IF NOT EXISTS history (
@@ -169,7 +173,6 @@ CREATE TABLE IF NOT EXISTS history (
 )
 """)
 
-# Daily summaries cache
 c.execute("""
 CREATE TABLE IF NOT EXISTS daily_summaries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -183,7 +186,6 @@ CREATE TABLE IF NOT EXISTS daily_summaries (
 )
 """)
 
-# Message count per channel per day for analytics
 c.execute("""
 CREATE TABLE IF NOT EXISTS message_stats (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -193,6 +195,41 @@ CREATE TABLE IF NOT EXISTS message_stats (
     date TEXT,
     count INTEGER DEFAULT 0,
     topics TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS ai_conversations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    channel_id INTEGER,
+    user_id INTEGER,
+    role TEXT,
+    content TEXT,
+    timestamp TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS ai_memories (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id INTEGER,
+    key TEXT,
+    value TEXT,
+    importance INTEGER DEFAULT 1,
+    created_at TEXT,
+    last_accessed TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS ai_personality (
+    guild_id INTEGER,
+    user_id INTEGER,
+    trait TEXT,
+    value TEXT,
+    PRIMARY KEY (guild_id, user_id, trait)
 )
 """)
 
@@ -260,7 +297,6 @@ def get_history_search(guild_id, search_term, limit=20):
 # =========================
 def log_message(guild_id, channel_id, user_id, content):
     today = datetime.now().strftime("%Y-%m-%d")
-    # Update message count
     c.execute("""
     INSERT INTO message_stats (guild_id, channel_id, user_id, date, count, topics)
     VALUES (?, ?, ?, ?, 1, ?)
@@ -319,7 +355,6 @@ def get_busiest_day(guild_id):
     return c.fetchone()
 
 def get_topic_for_date(guild_id, date_str, channel_id=None):
-    """Get the most discussed topic based on history events for a date"""
     if channel_id:
         c.execute("""
         SELECT details FROM history
@@ -358,15 +393,244 @@ def save_memory(user_id, user_name=None, bot_name=None):
         c.execute("INSERT INTO memory (user_id, user_name, bot_name) VALUES (?, ?, ?)", (user_id, user_name, bot_name))
     conn.commit()
 
-def add_warning(user_id, guild_id, reason, moderator):
-    c.execute("INSERT INTO warnings (user_id, guild_id, reason, timestamp) VALUES (?, ?, ?, ?)",
-              (user_id, guild_id, reason, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+def save_ai_memory(guild_id, user_id, key, value, importance=1):
+    c.execute("""
+    INSERT INTO ai_memories (guild_id, user_id, key, value, importance, created_at, last_accessed)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(guild_id, user_id, key)
+    DO UPDATE SET value=excluded.value, importance=excluded.importance, last_accessed=excluded.last_accessed
+    """, (guild_id, user_id, key, value, importance, datetime.now().isoformat(), datetime.now().isoformat()))
+    conn.commit()
+
+def get_ai_memories(guild_id, user_id, limit=20):
+    c.execute("""
+    SELECT key, value, importance, created_at, last_accessed
+    FROM ai_memories
+    WHERE guild_id=? AND user_id=?
+    ORDER BY importance DESC, last_accessed DESC
+    LIMIT ?
+    """, (guild_id, user_id, limit))
+    memories = c.fetchall()
+    c.execute("""
+    UPDATE ai_memories SET last_accessed=? WHERE guild_id=? AND user_id=?
+    """, (datetime.now().isoformat(), guild_id, user_id))
+    conn.commit()
+    return memories
+
+def get_all_guild_memories(guild_id, limit=50):
+    c.execute("""
+    SELECT user_id, key, value, importance
+    FROM ai_memories
+    WHERE guild_id=?
+    ORDER BY importance DESC, last_accessed DESC
+    LIMIT ?
+    """, (guild_id, limit))
+    return c.fetchall()
+
+def save_conversation(guild_id, channel_id, user_id, role, content):
+    c.execute("""
+    INSERT INTO ai_conversations (guild_id, channel_id, user_id, role, content, timestamp)
+    VALUES (?, ?, ?, ?, ?, ?)
+    """, (guild_id, channel_id, user_id, role, content[:1000], datetime.now().isoformat()))
+    conn.commit()
+
+def get_recent_conversation(guild_id, channel_id, user_id=None, limit=15):
+    if user_id:
+        c.execute("""
+        SELECT role, content, timestamp, user_id
+        FROM ai_conversations
+        WHERE guild_id=? AND channel_id=? AND user_id=?
+        ORDER BY id DESC LIMIT ?
+        """, (guild_id, channel_id, user_id, limit))
+    else:
+        c.execute("""
+        SELECT role, content, timestamp, user_id
+        FROM ai_conversations
+        WHERE guild_id=? AND channel_id=?
+        ORDER BY id DESC LIMIT ?
+        """, (guild_id, channel_id, limit))
+    return list(reversed(c.fetchall()))
+
+def save_personality_trait(guild_id, user_id, trait, value):
+    c.execute("""
+    INSERT INTO ai_personality (guild_id, user_id, trait, value)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(guild_id, user_id, trait)
+    DO UPDATE SET value=excluded.value
+    """, (guild_id, user_id, trait, value))
+    conn.commit()
+
+def get_user_personality(guild_id, user_id):
+    c.execute("""
+    SELECT trait, value FROM ai_personality
+    WHERE guild_id=? AND user_id=?
+    """, (guild_id, user_id))
+    return c.fetchall()
+
+async def build_ai_context(guild_id, channel_id, user_id, username, message_content):
+    mem = get_memory(user_id)
+    user_name = mem[0] if mem else username
+    bot_name = mem[1] if mem else "AI Bot"
+    
+    ai_memories = get_ai_memories(guild_id, user_id)
+    traits = get_user_personality(guild_id, user_id)
+    recent_msgs = get_recent_conversation(guild_id, channel_id, limit=10)
+    user_events = get_user_history(user_id, guild_id, limit=5)
+    
+    c.execute("SELECT level FROM leveling WHERE user_id=? AND guild_id=?", (user_id, guild_id))
+    level_row = c.fetchone()
+    level = level_row[0] if level_row else 0
+    
+    bal = get_balance(user_id, guild_id)
+    
+    await extract_memory_facts(guild_id, user_id, message_content)
+    
+    context_parts = []
+    context_parts.append(f"User's name: {user_name}")
+    context_parts.append(f"Bot's name: {bot_name}")
+    context_parts.append(f"Server: {bot.get_guild(guild_id).name if bot.get_guild(guild_id) else 'Unknown'}")
+    context_parts.append(f"User's Level: {level}")
+    context_parts.append(f"User's Wallet Balance: ${bal['wallet']:,}")
+    context_parts.append(f"User's Bank Balance: ${bal['bank']:,}")
+    
+    if traits:
+        trait_str = " | ".join([f"{t}: {v}" for t, v in traits])
+        context_parts.append(f"Known traits about user: {trait_str}")
+    
+    if ai_memories:
+        memory_str = "; ".join([f"{k}: {v}" for k, v, imp, _, _ in ai_memories if imp >= 2])
+        if memory_str:
+            context_parts.append(f"Things I remember about this user: {memory_str}")
+    
+    if recent_msgs:
+        conv_lines = []
+        for role, content, ts, uid in recent_msgs:
+            name = "User" if role == "user" else bot_name
+            conv_lines.append(f"{name}: {content[:200]}")
+        context_parts.append(f"Recent conversation:\n" + "\n".join(conv_lines))
+    
+    if user_events:
+        event_lines = [f"- {e}: {d[:80]}" for e, d, _ in user_events[:3]]
+        context_parts.append(f"Recent user activity: " + " | ".join(event_lines))
+    
+    return "\n".join(context_parts)
+
+async def extract_memory_facts(guild_id, user_id, message):
+    msg_lower = message.lower()
+    
+    name_patterns = [
+        (r"my name is (\w+)", "preferred_name"),
+        (r"call me (\w+)", "preferred_name"),
+        (r"i'm (\w+)", "preferred_name"),
+        (r"i am (\w+)", "preferred_name"),
+    ]
+    for pattern, key in name_patterns:
+        m = re.search(pattern, msg_lower)
+        if m and m.group(1).lower() not in ("a", "the", "an", "just", "not", "going", "trying"):
+            save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=5)
+            break
+    
+    age_m = re.search(r"i(?:')?m (\d+) (?:years old|yr old|yo)", msg_lower)
+    if age_m:
+        save_ai_memory(guild_id, user_id, "age", age_m.group(1), importance=4)
+    
+    loc_m = re.search(r"i(?:')?m (?:from|in) (\w+(?:\s+\w+)?)", msg_lower)
+    if loc_m:
+        save_ai_memory(guild_id, user_id, "location", loc_m.group(1).title(), importance=3)
+    
+    hobby_patterns = [
+        (r"i (?:like|love|enjoy) (\w+(?: \w+)?)", "hobby"),
+        (r"my (?:hobby|favorite) (?:is|are) (\w+(?: \w+)?)", "hobby"),
+        (r"i (?:play|code|draw|write|read|game|stream) (\w+(?: \w+)?)", "interest"),
+    ]
+    for pattern, key in hobby_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=2)
+    
+    mood_m = re.search(r"i(?:')?m (?:feeling|so|very|really) (\w+)", msg_lower)
+    if mood_m:
+        save_ai_memory(guild_id, user_id, "current_mood", mood_m.group(1), importance=1)
+        save_personality_trait(guild_id, user_id, "recent_mood", mood_m.group(1))
+    
+    pref_patterns = [
+        (r"i (?:don't|do not) like (\w+(?: \w+)?)", "dislikes"),
+        (r"i love (\w+(?: \w+)?)", "likes"),
+    ]
+    for pattern, default_key in pref_patterns:
+        m = re.search(pattern, msg_lower)
+        if m:
+            save_ai_memory(guild_id, user_id, default_key, m.group(1).title(), importance=2)
+    
+    work_m = re.search(r"i (?:work|study) (?:at|in|as) (\w+(?: \w+)?)", msg_lower)
+    if work_m:
+        save_ai_memory(guild_id, user_id, "occupation", work_m.group(1).title(), importance=3)
+
+_ai_response_cache = {}
+_ai_rate_limit = defaultdict(float)
+
+async def get_ai_response(prompt, temperature=0.7, max_retries=2):
+    cache_key = hash(prompt[:500])
+    
+    if cache_key in _ai_response_cache:
+        cached_time, cached_response = _ai_response_cache[cache_key]
+        if (datetime.now() - cached_time).seconds < 5:
+            return cached_response
+    
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt,
+                config={
+                    "temperature": temperature,
+                    "max_output_tokens": 500,
+                }
+            )
+            reply = response.text
+            
+            _ai_response_cache[cache_key] = (datetime.now(), reply)
+            
+            if len(_ai_response_cache) > 100:
+                oldest_key = min(_ai_response_cache.keys(), key=lambda k: _ai_response_cache[k][0])
+                del _ai_response_cache[oldest_key]
+            
+            return reply
+            
+        except Exception as e:
+            last_error = e
+            await asyncio.sleep(0.5 * (attempt + 1))
+    
+    return f"⚠️ AI Error: {last_error}"
+
+async def summarize_conversation(conversation_text):
+    if len(conversation_text) < 500:
+        return conversation_text
+    
+    prompt = f"""Summarize this conversation concisely, keeping key facts, preferences, and topics discussed:
+
+{conversation_text}
+
+Summary:"""
+    
+    try:
+        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+        return response.text[:500]
+    except:
+        return conversation_text[-500:]
+
+# Fix 3: Updated add_warning to include moderator
+def add_warning(user_id, guild_id, reason, moderator=None):
+    c.execute("INSERT INTO warnings (user_id, guild_id, reason, moderator, timestamp) VALUES (?, ?, ?, ?, ?)",
+              (user_id, guild_id, reason, moderator, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
     conn.commit()
 
 def get_warnings(user_id, guild_id):
     c.execute("SELECT id, reason, timestamp FROM warnings WHERE user_id=? AND guild_id=?", (user_id, guild_id))
     return c.fetchall()
 
+# Fix 2: Single remove_warning function using id
 def remove_warning(warning_id):
     c.execute("DELETE FROM warnings WHERE id=?", (warning_id,))
     conn.commit()
@@ -374,7 +638,7 @@ def remove_warning(warning_id):
 # =========================
 # LEVELING SYSTEM
 # =========================
-XP_PER_MESSAGE = random.randint(15, 25)
+# Fix 4: Removed static XP_PER_MESSAGE - now random inside add_xp
 XP_COOLDOWN = {}
 
 async def add_xp(user_id, guild_id):
@@ -387,12 +651,15 @@ async def add_xp(user_id, guild_id):
             return
     XP_COOLDOWN[key] = now
     
+    # Fix 4: Random XP per message
+    xp_gain = random.randint(15, 25)
+    
     c.execute("SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?", (user_id, guild_id))
     result = c.fetchone()
     
     if result:
         xp, level = result
-        xp += XP_PER_MESSAGE
+        xp += xp_gain
         xp_needed = level * 100
         if xp >= xp_needed:
             level += 1
@@ -403,7 +670,7 @@ async def add_xp(user_id, guild_id):
         else:
             c.execute("UPDATE leveling SET xp=? WHERE user_id=? AND guild_id=?", (xp, user_id, guild_id))
     else:
-        c.execute("INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, ?, 1)", (user_id, guild_id, XP_PER_MESSAGE))
+        c.execute("INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, ?, 1)", (user_id, guild_id, xp_gain))
     
     conn.commit()
     return None
@@ -446,14 +713,15 @@ BAD_WORDS = ["badword1", "badword2"]
 INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
 
 # =========================
-# OWNER CHECK
+# OWNER CHECK - Fix 6
 # =========================
 async def owner_check(interaction: discord.Interaction):
-    return any(role.name == "Owner" for role in interaction.user.roles)
+    # Safer: check by ID first, then fall back to role name
+    return interaction.user.id == OWNER_ID
 
 def is_owner():
     async def predicate(interaction: discord.Interaction):
-        return interaction.user.id == OWNER_ID or any(role.name == "Owner" for role in interaction.user.roles)
+        return interaction.user.id == OWNER_ID
     return app_commands.check(predicate)
 
 # =========================
@@ -494,7 +762,6 @@ class TicketView(discord.ui.View):
                   (guild.id, user.id, channel.id, datetime.now().isoformat()))
         conn.commit()
         
-        # Log ticket creation
         add_history(guild.id, user.id, str(user), "TICKET_CREATE", f"Created ticket #{channel.name}")
         
         embed = discord.Embed(title="🎫 New Ticket", description=f"Ticket created by {user.mention}\nPlease describe your issue.", color=discord.Color.green())
@@ -639,11 +906,9 @@ async def check_birthdays():
 
 @tasks.loop(hours=24)
 async def generate_daily_summary():
-    """Stage 3: Daily summaries"""
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
     for guild in bot.guilds:
-        # Get stats
         busiest = get_busiest_day(guild.id)
         most_active = get_most_active_user(guild.id)
         
@@ -654,7 +919,6 @@ async def generate_daily_summary():
         kicks = count_events_for_date(guild.id, yesterday, "KICK")
         bans = count_events_for_date(guild.id, yesterday, "BAN")
         
-        # Get total messages
         c.execute("""
         SELECT SUM(count) FROM message_stats
         WHERE guild_id=? AND date=?
@@ -676,27 +940,35 @@ async def generate_daily_summary():
             f"🏆 Most Active: {most_active_name}"
         )
         
-        # Save summary
         c.execute("""
         INSERT INTO daily_summaries (guild_id, date, summary, total_messages, most_active_user_id, top_topic, generated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """, (guild.id, yesterday, summary, total_msgs, most_active[0] if most_active else 0, "", datetime.now().isoformat()))
         conn.commit()
         
-        # Post to mod-logs if exists
         channel = discord.utils.get(guild.text_channels, name="mod-logs")
         if channel and total_msgs > 0:
             await channel.send(summary)
+
+@tasks.loop(hours=6)
+async def consolidate_memories():
+    cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+    c.execute("""
+    DELETE FROM ai_memories
+    WHERE importance <= 1 AND last_accessed < ?
+    """, (cutoff,))
+    deleted = c.rowcount
+    conn.commit()
+    if deleted > 0:
+        print(f"🧹 Consolidated {deleted} old memories")
 
 # =========================
 # EVENTS
 # =========================
 @bot.event
 async def on_member_join(member):
-    # History: record join
     add_history(member.guild.id, member.id, str(member), "JOIN", "Joined the server")
     
-    # Welcome message
     config = welcome_configs.get(member.guild.id)
     if config:
         channel = member.guild.get_channel(config.get('channel_id'))
@@ -704,7 +976,6 @@ async def on_member_join(member):
             msg = config.get('message', "Welcome {user} to {server}!").format(user=member.mention, server=member.guild.name)
             await channel.send(msg)
     
-    # Auto-role
     c.execute("SELECT role_id FROM reaction_roles WHERE guild_id=? AND emoji='AUTO_ROLE'", (member.guild.id,))
     roles = c.fetchall()
     for (role_id,) in roles:
@@ -715,7 +986,6 @@ async def on_member_join(member):
 
 @bot.event
 async def on_member_remove(member):
-    # History: record leave
     add_history(member.guild.id, member.id, str(member), "LEAVE", "Left the server")
     await log(member.guild, f"👋 {member} left the server")
 
@@ -723,8 +993,6 @@ async def on_member_remove(member):
 async def on_message_delete(message):
     if message.author.bot:
         return
-    
-    # History: record deletion
     add_history(
         message.guild.id,
         message.author.id,
@@ -739,8 +1007,6 @@ async def on_message_edit(before, after):
         return
     if before.content == after.content:
         return
-    
-    # History: record edit
     add_history(
         before.guild.id,
         before.author.id,
@@ -751,7 +1017,6 @@ async def on_message_edit(before, after):
 
 @bot.event
 async def on_guild_channel_create(channel):
-    """Stage 2: Record channel creation"""
     add_history(
         channel.guild.id,
         0,
@@ -762,7 +1027,6 @@ async def on_guild_channel_create(channel):
 
 @bot.event
 async def on_guild_channel_delete(channel):
-    """Stage 2: Record channel deletion"""
     add_history(
         channel.guild.id,
         0,
@@ -775,17 +1039,14 @@ async def on_guild_channel_delete(channel):
 async def on_voice_state_update(member, before, after):
     if before.channel != after.channel:
         if after.channel:
-            # User joined voice
             add_history(member.guild.id, member.id, str(member), "VOICE_JOIN", f"Joined {after.channel.name}")
             await log(member.guild, f"🔊 {member} joined {after.channel.name}")
         elif before.channel:
-            # User left voice
             add_history(member.guild.id, member.id, str(member), "VOICE_LEAVE", f"Left {before.channel.name}")
             await log(member.guild, f"🔇 {member} left {before.channel.name}")
 
 @bot.event
 async def on_member_update(before, after):
-    """Stage 2: Record nickname and role changes"""
     if before.nick != after.nick:
         add_history(
             after.guild.id,
@@ -795,7 +1056,6 @@ async def on_member_update(before, after):
             f"{before.nick or before.name} -> {after.nick or after.name}"
         )
     
-    # Role changes
     added_roles = set(after.roles) - set(before.roles)
     removed_roles = set(before.roles) - set(after.roles)
     
@@ -812,7 +1072,6 @@ async def on_message(message):
     if message.author.bot:
         return
     
-    # Log message for stats
     if message.guild:
         log_message(message.guild.id, message.channel.id, message.author.id, message.content)
     
@@ -836,6 +1095,8 @@ async def on_message(message):
         
         dm_memory[key] += f"User: {message.content}\n"
         
+        await extract_memory_facts(0, user_id, message.content)
+        
         msg = message.content.lower()
         m1 = re.search(r"my name is (.+)", msg)
         if m1:
@@ -848,14 +1109,25 @@ async def on_message(message):
         mem = get_memory(user_id)
         user_name, bot_name = mem if mem else (None, None)
         
+        ai_mems = get_ai_memories(0, user_id, limit=15)
+        memory_context = ""
+        if ai_mems:
+            facts = [f"- {k}: {v}" for k, v, imp, _, _ in ai_mems if imp >= 2]
+            if facts:
+                memory_context = "Things I remember about you:\n" + "\n".join(facts) + "\n"
+        
         prompt = f"""
-You are a Discord AI bot.
+You are a Discord AI bot. You have persistent memory and learn about the user over time.
 
 User name: {user_name or "unknown"}
 Bot name: {bot_name or "AI Bot"}
 
-Conversation:
-{dm_memory[key]}
+{memory_context}
+
+Recent conversation:
+{dm_memory[key][-2000:]}
+
+Respond naturally and conversationally. If the user mentions something new about themselves, remember it for next time.
 """
         
         try:
@@ -866,6 +1138,7 @@ Conversation:
                     img = await attachment.read()
                     uploaded = client.files.upload(file=img, config={"mime_type": attachment.content_type})
                     response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, uploaded])
+                    reply = response.text
                 
                 elif attachment.filename.endswith(".pdf"):
                     pdf_data = await attachment.read()
@@ -876,31 +1149,35 @@ Conversation:
                         if t:
                             text += t + "\n"
                     response = client.models.generate_content(model=MODEL_NAME, contents=f"{prompt}\nPDF:\n{text}")
+                    reply = response.text
                 
                 elif attachment.filename.endswith(".docx"):
                     doc_data = await attachment.read()
                     doc = Document(io.BytesIO(doc_data))
                     text = "\n".join(p.text for p in doc.paragraphs)
                     response = client.models.generate_content(model=MODEL_NAME, contents=f"{prompt}\nDOCX:\n{text}")
+                    reply = response.text
                 
                 elif attachment.filename.endswith(".txt"):
                     txt = await attachment.read()
                     text = txt.decode("utf-8", errors="ignore")
                     response = client.models.generate_content(model=MODEL_NAME, contents=f"{prompt}\nTXT:\n{text}")
+                    reply = response.text
                 
                 else:
-                    response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
+                    reply = await get_ai_response(prompt)
             
             else:
-                response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
-            
-            reply = response.text
+                reply = await get_ai_response(prompt)
         
         except Exception as e:
             reply = f"⚠️ AI error: {e}"
         
+        save_conversation(0, 0, user_id, "user", message.content)
+        save_conversation(0, 0, user_id, "assistant", reply)
+        
         dm_memory[key] += f"Bot: {reply}\n"
-        dm_memory[key] = dm_memory[key][-4000:]
+        dm_memory[key] = dm_memory[key][-8000:]
         
         while len(reply) > 1900:
             await message.channel.send(reply[:1900])
@@ -918,7 +1195,6 @@ Conversation:
             await message.channel.send(f"🎉 {message.author.mention} leveled up to **Level {new_level}**!")
             add_history(message.guild.id, message.author.id, str(message.author), "LEVEL_UP", f"Reached level {new_level}")
         
-        # Auto-mod: bad words
         for word in BAD_WORDS:
             if word in message.content.lower():
                 await message.delete()
@@ -927,14 +1203,12 @@ Conversation:
                 add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", f"Bad word filter: {word}")
                 break
         
-        # Auto-mod: invite links
         if re.search(INVITE_REGEX, message.content.lower()):
             await message.delete()
             await message.channel.send(f"{message.author.mention} No invite links!", delete_after=5)
             add_warning(message.author.id, message.guild.id, "Invite link", "AutoMod")
             add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", "Invite link filtered")
         
-        # Custom commands
         if message.content.startswith('?'):
             cmd_name = message.content[1:].lower().split()[0]
             c.execute("SELECT response FROM custom_commands WHERE guild_id=? AND name=?", (message.guild.id, cmd_name))
@@ -950,12 +1224,13 @@ async def on_ready():
     check_giveaways.start()
     check_birthdays.start()
     generate_daily_summary.start()
+    consolidate_memories.start()
     print(f"✅ ULTIMATE BOT ONLINE: {bot.user}")
     print(f"   Servers: {len(bot.guilds)}")
     print(f"   Commands: {len(bot.tree.get_commands())}")
 
 # =========================
-# WELCOME SYSTEM (moved up for event reference)
+# WELCOME SYSTEM
 # =========================
 welcome_configs = {}
 
@@ -1161,11 +1436,10 @@ async def massban(interaction: discord.Interaction, members: str, reason: str = 
     await interaction.response.send_message(f"🔨 Banned {banned} users")
     await log(interaction.guild, f"MASSBAN | {banned} users")
 
-# ===== 🕰️ HISTORY COMMANDS (Stage 1, 2, 3, 4, 5) =====
+# ===== 🕰️ HISTORY COMMANDS =====
 
 @bot.tree.command(name="history", description="Show user history in this server")
 async def history_command(interaction: discord.Interaction, member: discord.Member):
-    """Stage 1 & 2: Show complete user history"""
     rows = get_user_history(member.id, interaction.guild.id, 25)
     
     if not rows:
@@ -1198,7 +1472,6 @@ async def history_command(interaction: discord.Interaction, member: discord.Memb
 
 @bot.tree.command(name="historysearch", description="Search server history for events or keywords")
 async def history_search(interaction: discord.Interaction, query: str):
-    """Search through all history"""
     rows = get_history_search(interaction.guild.id, query, 15)
     
     if not rows:
@@ -1222,10 +1495,8 @@ async def history_search(interaction: discord.Interaction, query: str):
 
 @bot.tree.command(name="historychannel", description="Show channel analytics and history")
 async def history_channel(interaction: discord.Interaction, channel: discord.TextChannel = None, days: int = 7):
-    """Stage 3: Channel analytics"""
     channel = channel or interaction.channel
     
-    # Get channel stats
     stats = get_channel_stats(interaction.guild.id, channel.id, days)
     
     if not stats:
@@ -1235,7 +1506,6 @@ async def history_channel(interaction: discord.Interaction, channel: discord.Tex
     total_msgs = sum(count for _, count in stats)
     busiest_day = max(stats, key=lambda x: x[1]) if stats else ("N/A", 0)
     
-    # Get events in this channel
     c.execute("""
     SELECT event_type, details, timestamp, username
     FROM history
@@ -1253,7 +1523,6 @@ async def history_channel(interaction: discord.Interaction, channel: discord.Tex
     embed.add_field(name="Busiest Day", value=f"{busiest_day[0]} ({busiest_day[1]:,} msgs)", inline=True)
     embed.add_field(name="Avg Per Day", value=f"{total_msgs//max(days,1):,}", inline=True)
     
-    # Activity over days
     bar = ""
     for date, count in stats[-7:]:
         bar_len = max(1, int((count / max(busiest_day[1], 1)) * 8))
@@ -1269,11 +1538,8 @@ async def history_channel(interaction: discord.Interaction, channel: discord.Tex
 
 @bot.tree.command(name="historyserver", description="Show server-wide analytics and summary")
 async def history_server(interaction: discord.Interaction, days: int = 7):
-    """Stage 3: Server-wide analytics"""
-    # Get busiest day
     busiest = get_busiest_day(interaction.guild.id)
     
-    # Get most active user
     most_active = get_most_active_user(interaction.guild.id, days)
     most_active_name = "No data"
     if most_active:
@@ -1281,14 +1547,12 @@ async def history_server(interaction: discord.Interaction, days: int = 7):
         if user:
             most_active_name = user.display_name
     
-    # Get top channels
     top_channels = get_top_channels(interaction.guild.id, days)
     channel_text = "\n".join([
         f"<#{cid}>: {count:,} msgs"
         for cid, count in top_channels
     ]) or "No data"
     
-    # Count events
     today = datetime.now().strftime("%Y-%m-%d")
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
@@ -1296,7 +1560,6 @@ async def history_server(interaction: discord.Interaction, days: int = 7):
     leaves_today = count_events_for_date(interaction.guild.id, today, "LEAVE")
     warns_today = count_events_for_date(interaction.guild.id, today, "WARN")
     
-    # Get stored summary if available
     c.execute("""
     SELECT summary FROM daily_summaries
     WHERE guild_id=? AND date=?
@@ -1322,36 +1585,30 @@ async def history_server(interaction: discord.Interaction, days: int = 7):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="rewind", description="🕰️ TIME MACHINE — See what happened on a specific date (Stage 5)")
+@bot.tree.command(name="rewind", description="🕰️ Time machine — See what happened on a specific date")
 async def rewind(interaction: discord.Interaction, date: str, channel: discord.TextChannel = None):
-    """Stage 5: Time machine — see everything that happened on a given date"""
-    # Validate date format (YYYY-MM-DD)
     if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
         await interaction.response.send_message("❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-06-10)")
         return
     
     await interaction.response.defer()
     
-    # Get all events for that date
     events = get_guild_history_by_date(interaction.guild.id, date, 50)
     
     if not events:
         await interaction.response.send_message(f"📭 Nothing recorded for {date}.")
         return
     
-    # Count event types
     event_counts = {}
     for event, _, _, _, _ in events:
         event_counts[event] = event_counts.get(event, 0) + 1
     
-    # Get message stats for that date
     c.execute("""
     SELECT SUM(count) FROM message_stats
     WHERE guild_id=? AND date=?
     """, (interaction.guild.id, date))
     total_msgs = c.fetchone()[0] or 0
     
-    # Get most active user
     c.execute("""
     SELECT user_id, SUM(count) as total
     FROM message_stats
@@ -1369,14 +1626,12 @@ async def rewind(interaction: discord.Interaction, date: str, channel: discord.T
         else:
             top_user_name = f"User({top_user_row[0]})"
     
-    # Build embed
     embed = discord.Embed(
         title=f"🕰️ Time Machine: {date}",
         description=f"What happened on this day in {interaction.guild.name}",
         color=discord.Color.dark_gold()
     )
     
-    # Summary stats
     summary_lines = []
     if total_msgs > 0:
         summary_lines.append(f"📝 **{total_msgs:,}** messages sent")
@@ -1403,7 +1658,6 @@ async def rewind(interaction: discord.Interaction, date: str, channel: discord.T
     
     embed.add_field(name="📊 Summary", value="\n".join(summary_lines) or "No significant events", inline=False)
     
-    # Timeline of events
     timeline = []
     for event, details, time, username, user_id in events[:20]:
         emoji_map = {
@@ -1415,63 +1669,22 @@ async def rewind(interaction: discord.Interaction, date: str, channel: discord.T
             "CHANNEL_UNLOCK": "🔓", "SLOWMODE": "🐌"
         }
         emoji = emoji_map.get(event, "📌")
-        # Extract time portion
         time_only = time.split(" ")[1][:5] if " " in time else time
         timeline.append(f"**{time_only}** {emoji} **{username}**: {details[:80]}")
     
     if timeline:
-        embed.add_field(
-            name="📋 Event Timeline",
-            value="\n".join(timeline[:15]),
-            inline=False
-        )
+        embed.add_field(name="📋 Event Timeline", value="\n".join(timeline[:15]), inline=False)
     
-    embed.set_footer(text=f"Total events recorded: {len(events)} | Use /askhistory for AI analysis")
+    embed.set_footer(text=f"Total events: {len(events)} | Use /askhistory for AI analysis")
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="askhistory", description="🤖 Ask AI about server history (Stage 4)")
+@bot.tree.command(name="askhistory", description="🤖 Ask AI about server history")
 async def ask_history(interaction: discord.Interaction, question: str):
-    """Stage 4: AI-powered history Q&A"""
     await interaction.response.defer()
     
-    # Gather relevant history data based on the question
     query_lower = question.lower()
     
-    # Determine what to search for
-    search_terms = []
-    
-    if "yesterday" in query_lower:
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-        search_terms.append(("date", yesterday))
-    
-    if "today" in query_lower:
-        today = datetime.now().strftime("%Y-%m-%d")
-        search_terms.append(("date", today))
-    
-    if "week" in query_lower:
-        week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
-        search_terms.append(("since", week_ago))
-    
-    if "deleted" in query_lower or "delete" in query_lower:
-        search_terms.append(("event", "DELETE"))
-    
-    if "warn" in query_lower or "warning" in query_lower:
-        search_terms.append(("event", "WARN"))
-    
-    if "ban" in query_lower or "banned" in query_lower:
-        search_terms.append(("event", "BAN"))
-    
-    if "kick" in query_lower:
-        search_terms.append(("event", "KICK"))
-    
-    if "level" in query_lower:
-        search_terms.append(("event", "LEVEL_UP"))
-    
-    if "first" in query_lower or "oldest" in query_lower:
-        search_terms.append(("order", "ASC"))
-    
-    # Fetch relevant history
     c.execute("""
     SELECT event_type, details, timestamp, username
     FROM history
@@ -1483,14 +1696,12 @@ async def ask_history(interaction: discord.Interaction, question: str):
     all_events = c.fetchall()
     
     if not all_events:
-        await interaction.response.send_message("📭 No history data available to answer your question.")
+        await interaction.response.send_message("📭 No history data available.")
         return
     
-    # Get server stats
     busiest = get_busiest_day(interaction.guild.id)
     most_active = get_most_active_user(interaction.guild.id)
     
-    # Get level leader
     c.execute("""
     SELECT user_id, level FROM leveling
     WHERE guild_id=?
@@ -1500,7 +1711,17 @@ async def ask_history(interaction: discord.Interaction, question: str):
     top_levels = c.fetchall()
     top_level_text = "\n".join([f"<@{uid}>: Level {lvl}" for uid, lvl in top_levels]) or "No data"
     
-    # Format events for AI
+    guild_memories = get_all_guild_memories(interaction.guild.id, limit=20)
+    memory_text = ""
+    if guild_memories:
+        memory_lines = []
+        for uid, key, val, imp in guild_memories[:10]:
+            user_obj = interaction.guild.get_member(uid)
+            name = user_obj.display_name if user_obj else f"User({uid})"
+            memory_lines.append(f"- {name} mentioned their {key} is '{val}'")
+        if memory_lines:
+            memory_text = "Things I've learned about users:\n" + "\n".join(memory_lines) + "\n"
+    
     events_text = "\n".join([
         f"[{t.split(' ')[0] if ' ' in t else t}] {u}: {e} -> {d[:100]}"
         for e, d, t, u in all_events[:50]
@@ -1513,34 +1734,28 @@ async def ask_history(interaction: discord.Interaction, question: str):
         stats_text += f"Most active user (7 days): <@{most_active[0]}> with {most_active[1]} messages.\n"
     
     prompt = f"""
-You are a Discord history analyst AI. You have access to the full event history of a Discord server.
+You are a Discord history analyst AI.
 
 SERVER: {interaction.guild.name}
 
-RECENT EVENTS (last 50):
+RECENT EVENTS:
 {events_text}
 
+{memory_text}
 STATISTICS:
 {stats_text}
 TOP LEVEL PLAYERS:
 {top_level_text}
 
-USER QUESTION: {question}
+QUESTION: {question}
 
-Please answer the question based ONLY on the history data provided. Be specific, use names, dates, and details from the events. If you don't have enough information to answer, say so clearly. Keep your response concise and helpful.
+Answer based ONLY on the data provided. Be specific, use names and details.
 """
-
-    try:
-        response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt
-        )
-        reply = response.text[:1900]
-    except Exception as e:
-        reply = f"⚠️ AI error: {e}"
+    
+    reply = await get_ai_response(prompt)
     
     embed = discord.Embed(
-        title=f"🤖 History Q&A",
+        title="🤖 History Q&A",
         description=f"**Question:** {question}",
         color=discord.Color.purple()
     )
@@ -1548,7 +1763,6 @@ Please answer the question based ONLY on the history data provided. Be specific,
     embed.set_footer(text="Powered by Gemini AI + Server History")
     
     await interaction.response.send_message(embed=embed)
-
 
 # ===== UTILITY =====
 @bot.tree.command(name="avatar", description="Show user avatar")
@@ -2159,11 +2373,10 @@ async def ping(interaction: discord.Interaction):
     embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     await interaction.response.send_message(embed=embed)
 
+# Fix 5: Uptime uses START_TIME constant
 @bot.tree.command(name="uptime", description="Check bot uptime")
 async def uptime(interaction: discord.Interaction):
-    if not hasattr(bot, 'start_time'):
-        bot.start_time = datetime.now()
-    uptime_delta = datetime.now() - bot.start_time
+    uptime_delta = datetime.now() - START_TIME
     days = uptime_delta.days
     hours, remainder = divmod(uptime_delta.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
@@ -2196,7 +2409,6 @@ async def show_playlist(interaction: discord.Interaction):
 @bot.tree.command(name="historystats", description="Show history database statistics")
 @app_commands.check(owner_check)
 async def history_stats(interaction: discord.Interaction):
-    """View how much history data has been collected"""
     c.execute("SELECT COUNT(*) FROM history WHERE guild_id=?", (interaction.guild.id,))
     total_events = c.fetchone()[0]
     
@@ -2234,11 +2446,9 @@ async def history_stats(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-# =========================
-# 🕰️ STAGE 5 — ADVANCED HISTORY INSIGHTS
-# =========================
+# ===== ADVANCED HISTORY INSIGHTS =====
 
-@bot.tree.command(name="who_was_most_active_last_month", description="Find the most active member in the last 30 days")
+@bot.tree.command(name="mostactive", description="Find the most active member in the last 30 days")
 async def who_was_most_active_last_month(interaction: discord.Interaction):
     await interaction.response.defer()
     
@@ -2274,7 +2484,6 @@ async def who_was_most_active_last_month(interaction: discord.Interaction):
             inline=False
         )
     
-    # Also get total server messages
     c.execute("""
     SELECT SUM(count) FROM message_stats
     WHERE guild_id=? AND date >= ?
@@ -2286,7 +2495,7 @@ async def who_was_most_active_last_month(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="who_got_warned_the_most", description="See who has the most warnings in server history")
+@bot.tree.command(name="mostwarned", description="See who has the most warnings in server history")
 async def who_got_warned_the_most(interaction: discord.Interaction):
     await interaction.response.defer()
     
@@ -2315,7 +2524,6 @@ async def who_got_warned_the_most(interaction: discord.Interaction):
         user = interaction.guild.get_member(user_id)
         name = user.display_name if user else f"Unknown ({user_id})"
         
-        # Get latest warning
         c.execute("""
         SELECT reason, timestamp FROM warnings
         WHERE user_id=? AND guild_id=?
@@ -2333,13 +2541,12 @@ async def who_got_warned_the_most(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="who_joins_voice_with_me_the_most", description="See who you voice chat with the most")
+@bot.tree.command(name="voicemates", description="See who you voice chat with the most")
 async def who_joins_voice_with_me_the_most(interaction: discord.Interaction):
     await interaction.response.defer()
     
     user_id = interaction.user.id
     
-    # Find voice join events where this user and another joined the same channel around the same time
     c.execute("""
     SELECT h1.user_id, h1.username, COUNT(*) as times_together
     FROM history h1
@@ -2380,15 +2587,11 @@ async def who_joins_voice_with_me_the_most(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(
-    name="biggest_day",
-    description="Find the most active day ever in this server"
-)
+# Fix 1: Shortened command name from 43 chars to 9 chars
+@bot.tree.command(name="biggestday", description="Find the most active day ever in this server")
 async def biggest_day(interaction: discord.Interaction):
     await interaction.response.defer()
 
-    
-    # Get busiest day from message stats
     c.execute("""
     SELECT date, SUM(count) as total
     FROM message_stats
@@ -2400,7 +2603,6 @@ async def biggest_day(interaction: discord.Interaction):
     
     busiest = c.fetchone()
     
-    # Get busiest day from history events
     c.execute("""
     SELECT SUBSTR(timestamp, 1, 10) as day, COUNT(*) as total
     FROM history
@@ -2422,7 +2624,6 @@ async def biggest_day(interaction: discord.Interaction):
     
     if busiest:
         date_str = busiest[0]
-        # Format date nicely
         try:
             dt = datetime.strptime(date_str, "%Y-%m-%d")
             formatted_date = dt.strftime("%B %d, %Y")
@@ -2435,7 +2636,6 @@ async def biggest_day(interaction: discord.Interaction):
             inline=False
         )
         
-        # What happened that day?
         c.execute("""
         SELECT event_type, COUNT(*) as cnt
         FROM history
@@ -2450,7 +2650,6 @@ async def biggest_day(interaction: discord.Interaction):
             event_text = "\n".join([f"**{e}**: {c}" for e, c in events])
             embed.add_field(name="Events That Day", value=event_text, inline=False)
         
-        # Who was most active that day?
         c.execute("""
         SELECT user_id, SUM(count) as total
         FROM message_stats
@@ -2474,7 +2673,7 @@ async def biggest_day(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="show_drama", description="🔍 Show controversial events — warnings, kicks, bans, and conflicts")
+@bot.tree.command(name="showdrama", description="Show controversial events — warnings, kicks, bans")
 async def show_drama(interaction: discord.Interaction):
     await interaction.response.defer()
     
@@ -2514,13 +2713,10 @@ async def show_drama(interaction: discord.Interaction):
                 inline=False
             )
     
-    # Count totals
     c.execute("""
     SELECT event_type, COUNT(*) as cnt
     FROM history
     WHERE guild_id=? AND event_type IN ('WARN','KICK','BAN','MUTE')
-    GROUP BY event_type
-    ORDER BY cnt DESC
     """, (interaction.guild.id,))
     totals = c.fetchall()
     
@@ -2531,42 +2727,35 @@ async def show_drama(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="summarize_this_week", description="Get a weekly summary of everything that happened")
+@bot.tree.command(name="weeklysummary", description="Get a weekly summary of everything that happened")
 async def summarize_this_week(interaction: discord.Interaction):
     await interaction.response.defer()
     
     week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
     
-    # Gather stats
     c.execute("""
     SELECT SUM(count) FROM message_stats
     WHERE guild_id=? AND date >= ?
     """, (interaction.guild.id, week_ago))
     total_msgs = c.fetchone()[0] or 0
     
-    # Event counts
     events_to_count = ["JOIN", "LEAVE", "WARN", "KICK", "BAN", "MUTE", "NICK_CHANGE", "ROLE_ADD", "ROLE_REMOVE", "DELETE", "LEVEL_UP"]
     event_counts = {}
     for event in events_to_count:
-        cnt = count_events_for_date(interaction.guild.id, week_ago.split("T")[0], event)
-        # Actually need to count from week_ago to now
         c.execute("""
         SELECT COUNT(*) FROM history
         WHERE guild_id=? AND event_type=? AND timestamp >= ?
         """, (interaction.guild.id, event, week_ago))
         event_counts[event] = c.fetchone()[0]
     
-    # Most active user
     most_active = get_most_active_user(interaction.guild.id, 7)
     most_active_name = "No data"
     if most_active:
         user = interaction.guild.get_member(most_active[0])
         most_active_name = user.display_name if user else f"User({most_active[0]})"
     
-    # Top channels
     top_channels = get_top_channels(interaction.guild.id, 7)
     
-    # Channel creations/deletions
     c.execute("""
     SELECT COUNT(*) FROM history
     WHERE guild_id=? AND event_type='CHANNEL_CREATE' AND timestamp >= ?
@@ -2579,10 +2768,7 @@ async def summarize_this_week(interaction: discord.Interaction):
     """, (interaction.guild.id, week_ago))
     channels_deleted = c.fetchone()[0]
     
-    # Level ups
     level_ups = event_counts.get("LEVEL_UP", 0)
-    
-    # Nickname changes
     nick_changes = event_counts.get("NICK_CHANGE", 0)
     
     embed = discord.Embed(
@@ -2591,7 +2777,6 @@ async def summarize_this_week(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     
-    # Overview
     overview = (
         f"📝 **{total_msgs:,}** messages sent\n"
         f"👋 **{event_counts.get('JOIN', 0)}** joins | 👋 **{event_counts.get('LEAVE', 0)}** leaves\n"
@@ -2602,19 +2787,16 @@ async def summarize_this_week(interaction: discord.Interaction):
         f"⬆️ **{level_ups}** level ups | ✏️ **{nick_changes}** nickname changes"
     )
     embed.add_field(name="📊 Overview", value=overview, inline=False)
-    
     embed.add_field(name="🏆 Most Active", value=most_active_name, inline=True)
     
     if top_channels:
         channel_text = "\n".join([f"<#{cid}>: {c:,} msgs" for cid, c in top_channels[:3]])
         embed.add_field(name="📈 Top Channels", value=channel_text, inline=True)
     
-    # Role changes
     role_adds = event_counts.get("ROLE_ADD", 0)
     role_removes = event_counts.get("ROLE_REMOVE", 0)
     embed.add_field(name="🎭 Role Changes", value=f"+{role_adds} / -{role_removes}", inline=True)
     
-    # Get recent notable events
     c.execute("""
     SELECT event_type, username, details, timestamp
     FROM history
@@ -2634,16 +2816,171 @@ async def summarize_this_week(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # =========================
-# ERROR HANDLER
+# AI Chat Command
 # =========================
+
+@bot.tree.command(name="ai", description="🤖 Chat with the AI — remembers you across sessions!")
+async def ai_chat(interaction: discord.Interaction, message: str):
+    await interaction.response.defer()
+    
+    guild_id = interaction.guild.id
+    channel_id = interaction.channel.id
+    user_id = interaction.user.id
+    
+    save_conversation(guild_id, channel_id, user_id, "user", message)
+    
+    context = await build_ai_context(guild_id, channel_id, user_id, interaction.user.display_name, message)
+    
+    guild_mems = get_all_guild_memories(guild_id, limit=10)
+    guild_memory_text = ""
+    if guild_mems:
+        lines = []
+        for uid, key, val, _ in guild_mems[:5]:
+            user_obj = interaction.guild.get_member(uid)
+            name = user_obj.display_name if user_obj else f"User({uid})"
+            lines.append(f"- {name}'s {key}: {val}")
+        if lines:
+            guild_memory_text = "What I know about server members:\n" + "\n".join(lines) + "\n"
+    
+    channel_context = get_recent_conversation(guild_id, channel_id, limit=8)
+    channel_text = ""
+    if channel_context:
+        lines = []
+        for role, content, ts, uid in channel_context:
+            if role == "user":
+                user_obj = interaction.guild.get_member(uid)
+                name = user_obj.display_name if user_obj else f"User({uid})"
+                lines.append(f"{name}: {content[:200]}")
+            else:
+                lines.append(f"Bot: {content[:200]}")
+        channel_text = "Recent channel discussion:\n" + "\n".join(lines) + "\n"
+    
+    prompt = f"""You are a friendly AI assistant in a Discord server. You have memory of users.
+
+{context}
+
+{guild_memory_text}
+{channel_text}
+
+{interaction.user.display_name}: {message}
+
+Respond naturally, conversationally, and keep it concise (under 300 words). Reference things you remember about the user when relevant."""
+    
+    reply = await get_ai_response(prompt, temperature=0.8)
+    
+    save_conversation(guild_id, channel_id, user_id, "assistant", reply)
+    
+    embed = discord.Embed(
+        description=reply,
+        color=discord.Color.purple()
+    )
+    embed.set_footer(text=f"🧠 I remember you, {interaction.user.display_name}!")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+# =========================
+# AI Memory Management Commands
+# =========================
+
+@bot.tree.command(name="whatiknow", description="🧠 See what the AI has learned about you")
+async def what_i_know(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    memories = get_ai_memories(interaction.guild.id, interaction.user.id)
+    traits = get_user_personality(interaction.guild.id, interaction.user.id)
+    
+    if not memories and not traits:
+        await interaction.response.send_message("🤖 I don't know much about you yet! Chat with me using `/ai` and I'll learn about you naturally.")
+        return
+    
+    embed = discord.Embed(
+        title=f"🧠 What I Know About {interaction.user.display_name}",
+        description="Things I've learned from our conversations",
+        color=discord.Color.purple()
+    )
+    
+    if memories:
+        memory_text = ""
+        for key, value, importance, created, accessed in memories:
+            icon = "⭐" if importance >= 4 else "📌" if importance >= 2 else "🔹"
+            memory_text += f"{icon} **{key.replace('_', ' ').title()}**: {value}\n"
+        embed.add_field(name="📝 Memories", value=memory_text, inline=False)
+    
+    if traits:
+        trait_text = "\n".join([f"• **{t.replace('_', ' ').title()}**: {v}" for t, v in traits])
+        embed.add_field(name="🎭 Personality", value=trait_text, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="forgetme", description="🧹 Make the AI forget everything about you")
+async def forget_me(interaction: discord.Interaction):
+    c.execute("DELETE FROM ai_memories WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
+    c.execute("DELETE FROM ai_personality WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
+    c.execute("DELETE FROM ai_conversations WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
+    conn.commit()
+    await interaction.response.send_message("🧹 Done! I've forgotten everything about you. Let's start fresh whenever you're ready.")
+
+
+@bot.tree.command(name="aistats", description="📊 Show AI memory and conversation stats")
+@app_commands.check(owner_check)
+async def ai_stats(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    c.execute("SELECT COUNT(*) FROM ai_memories WHERE guild_id=?", (interaction.guild.id,))
+    total_memories = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM ai_memories WHERE guild_id=?", (interaction.guild.id,))
+    users_with_memories = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(*) FROM ai_conversations WHERE guild_id=?", (interaction.guild.id,))
+    total_conversations = c.fetchone()[0]
+    
+    c.execute("SELECT COUNT(DISTINCT user_id) FROM ai_conversations WHERE guild_id=?", (interaction.guild.id,))
+    users_engaged = c.fetchone()[0]
+    
+    c.execute("""
+    SELECT user_id, COUNT(*) as cnt FROM ai_memories
+    WHERE guild_id=?
+    GROUP BY user_id ORDER BY cnt DESC LIMIT 3
+    """, (interaction.guild.id,))
+    top_remembered = c.fetchall()
+    
+    embed = discord.Embed(
+        title="📊 AI System Stats",
+        description=f"Data for {interaction.guild.name}",
+        color=discord.Color.purple()
+    )
+    embed.add_field(name="🧠 Total Memories", value=f"{total_memories:,}", inline=True)
+    embed.add_field(name="👥 Users Remembered", value=f"{users_with_memories:,}", inline=True)
+    embed.add_field(name="💬 Conversations Saved", value=f"{total_conversations:,}", inline=True)
+    embed.add_field(name="🗣️ Users Engaged", value=f"{users_engaged:,}", inline=True)
+    
+    if top_remembered:
+        lines = []
+        for uid, cnt in top_remembered:
+            user = interaction.guild.get_member(uid)
+            name = user.display_name if user else f"Unknown"
+            lines.append(f"**{name}**: {cnt} facts")
+        embed.add_field(name="📝 Most Remembered", value="\n".join(lines), inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+# Fix 7: Safe error handler
 @bot.tree.error
 async def error_handler(interaction: discord.Interaction, error):
-    if isinstance(error, app_commands.CheckFailure):
-        await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-    elif isinstance(error, app_commands.CommandOnCooldown):
-        await interaction.response.send_message(f"⏳ Command on cooldown. Try again in {error.retry_after:.0f}s", ephemeral=True)
+    if interaction.response.is_done():
+        await interaction.followup.send(
+            f"❌ Error: {error}",
+            ephemeral=True
+        )
     else:
-        await interaction.response.send_message(f"❌ Error: {error}", ephemeral=True)
+        await interaction.response.send_message(
+            f"❌ Error: {error}",
+            ephemeral=True
+        )
 
 # =========================
 # RUN
