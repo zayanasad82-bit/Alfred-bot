@@ -2235,6 +2235,401 @@ async def history_stats(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 # =========================
+# 🕰️ STAGE 5 — ADVANCED HISTORY INSIGHTS
+# =========================
+
+@bot.tree.command(name="who_was_most_active_last_month", description="Find the most active member in the last 30 days")
+async def who_was_most_active_last_month(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
+    
+    c.execute("""
+    SELECT user_id, SUM(count) as total
+    FROM message_stats
+    WHERE guild_id=? AND date >= ?
+    GROUP BY user_id
+    ORDER BY total DESC
+    LIMIT 5
+    """, (interaction.guild.id, thirty_days_ago))
+    
+    results = c.fetchall()
+    
+    if not results:
+        await interaction.response.send_message("📭 Not enough data yet. Let the bot run for a while!")
+        return
+    
+    embed = discord.Embed(
+        title="🏆 Most Active Members — Last 30 Days",
+        color=discord.Color.gold()
+    )
+    
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    for i, (user_id, total) in enumerate(results):
+        user = interaction.guild.get_member(user_id)
+        name = user.display_name if user else f"Unknown ({user_id})"
+        embed.add_field(
+            name=f"{medals[i]} {name}",
+            value=f"{total:,} messages",
+            inline=False
+        )
+    
+    # Also get total server messages
+    c.execute("""
+    SELECT SUM(count) FROM message_stats
+    WHERE guild_id=? AND date >= ?
+    """, (interaction.guild.id, thirty_days_ago))
+    total_msgs = c.fetchone()[0] or 0
+    
+    embed.set_footer(text=f"Total server messages: {total_msgs:,}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="who_got_warned_the_most", description="See who has the most warnings in server history")
+async def who_got_warned_the_most(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    c.execute("""
+    SELECT user_id, COUNT(*) as total
+    FROM warnings
+    WHERE guild_id=?
+    GROUP BY user_id
+    ORDER BY total DESC
+    LIMIT 5
+    """, (interaction.guild.id,))
+    
+    results = c.fetchall()
+    
+    if not results:
+        await interaction.response.send_message("✅ No one has been warned! Clean server.")
+        return
+    
+    embed = discord.Embed(
+        title="⚠️ Most Warned Members",
+        color=discord.Color.orange()
+    )
+    
+    skulls = ["💀", "⚠️", "📋", "4️⃣", "5️⃣"]
+    for i, (user_id, total) in enumerate(results):
+        user = interaction.guild.get_member(user_id)
+        name = user.display_name if user else f"Unknown ({user_id})"
+        
+        # Get latest warning
+        c.execute("""
+        SELECT reason, timestamp FROM warnings
+        WHERE user_id=? AND guild_id=?
+        ORDER BY id DESC LIMIT 1
+        """, (user_id, interaction.guild.id))
+        last_warn = c.fetchone()
+        last_reason = last_warn[0] if last_warn else "N/A"
+        
+        embed.add_field(
+            name=f"{skulls[i]} {name} — {total} warnings",
+            value=f"Last: {last_reason[:80]}",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="who_joins_voice_with_me_the_most", description="See who you voice chat with the most")
+async def who_joins_voice_with_me_the_most(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    user_id = interaction.user.id
+    
+    # Find voice join events where this user and another joined the same channel around the same time
+    c.execute("""
+    SELECT h1.user_id, h1.username, COUNT(*) as times_together
+    FROM history h1
+    JOIN history h2 ON h1.guild_id = h2.guild_id 
+        AND h1.event_type = 'VOICE_JOIN' 
+        AND h2.event_type = 'VOICE_JOIN'
+        AND h1.user_id != h2.user_id
+        AND h1.details = h2.details
+        AND ABS(strftime('%s', h1.timestamp) - strftime('%s', h2.timestamp)) < 30
+    WHERE h1.guild_id = ? AND h2.user_id = ?
+    GROUP BY h1.user_id
+    ORDER BY times_together DESC
+    LIMIT 10
+    """, (interaction.guild.id, user_id))
+    
+    results = c.fetchall()
+    
+    if not results:
+        await interaction.response.send_message("📭 Not enough voice data yet. Join some voice channels first!")
+        return
+    
+    embed = discord.Embed(
+        title=f"🎙️ Voice Chat Partners — {interaction.user.display_name}",
+        description="People you join voice channels with the most",
+        color=discord.Color.blue()
+    )
+    
+    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+    for i, (other_id, username, count) in enumerate(results[:10]):
+        user = interaction.guild.get_member(other_id)
+        name = user.display_name if user else (username or f"Unknown ({other_id})")
+        embed.add_field(
+            name=f"{medals[i]} {name}",
+            value=f"{count} times together",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="what_was_the_biggest_day_in_server_history", description="Find the most active day ever in this server")
+async def what_was_the_biggest_day_in_server_history(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    # Get busiest day from message stats
+    c.execute("""
+    SELECT date, SUM(count) as total
+    FROM message_stats
+    WHERE guild_id=?
+    GROUP BY date
+    ORDER BY total DESC
+    LIMIT 1
+    """, (interaction.guild.id,))
+    
+    busiest = c.fetchone()
+    
+    # Get busiest day from history events
+    c.execute("""
+    SELECT SUBSTR(timestamp, 1, 10) as day, COUNT(*) as total
+    FROM history
+    WHERE guild_id=?
+    GROUP BY day
+    ORDER BY total DESC
+    LIMIT 3
+    """, (interaction.guild.id,))
+    top_event_days = c.fetchall()
+    
+    if not busiest and not top_event_days:
+        await interaction.response.send_message("📭 Not enough data yet. Let the bot run for a while!")
+        return
+    
+    embed = discord.Embed(
+        title="📊 Biggest Days in Server History",
+        color=discord.Color.gold()
+    )
+    
+    if busiest:
+        date_str = busiest[0]
+        # Format date nicely
+        try:
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            formatted_date = dt.strftime("%B %d, %Y")
+        except:
+            formatted_date = date_str
+        
+        embed.add_field(
+            name="🚀 Most Messages",
+            value=f"**{formatted_date}** — {busiest[1]:,} messages",
+            inline=False
+        )
+        
+        # What happened that day?
+        c.execute("""
+        SELECT event_type, COUNT(*) as cnt
+        FROM history
+        WHERE guild_id=? AND timestamp LIKE ?
+        GROUP BY event_type
+        ORDER BY cnt DESC
+        LIMIT 5
+        """, (interaction.guild.id, f"{date_str}%"))
+        events = c.fetchall()
+        
+        if events:
+            event_text = "\n".join([f"**{e}**: {c}" for e, c in events])
+            embed.add_field(name="Events That Day", value=event_text, inline=False)
+        
+        # Who was most active that day?
+        c.execute("""
+        SELECT user_id, SUM(count) as total
+        FROM message_stats
+        WHERE guild_id=? AND date=?
+        GROUP BY user_id
+        ORDER BY total DESC
+        LIMIT 1
+        """, (interaction.guild.id, date_str))
+        top_user = c.fetchone()
+        if top_user:
+            user = interaction.guild.get_member(top_user[0])
+            name = user.display_name if user else f"User({top_user[0]})"
+            embed.add_field(name="🏆 Top Chatter", value=f"{name} — {top_user[1]:,} messages", inline=False)
+    
+    if top_event_days:
+        days_text = "\n".join([
+            f"**{d}** — {c} events" for d, c in top_event_days[:3]
+        ])
+        embed.add_field(name="📋 Most Eventful Days", value=days_text, inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="show_drama", description="🔍 Show controversial events — warnings, kicks, bans, and conflicts")
+async def show_drama(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    drama_types = ["WARN", "KICK", "BAN", "SOFTBAN", "MUTE", "DELETE"]
+    
+    embed = discord.Embed(
+        title="🔥 Server Drama Log",
+        description="Recent warnings, kicks, bans, mutes, and deleted messages",
+        color=discord.Color.red()
+    )
+    
+    for event_type in drama_types:
+        c.execute("""
+        SELECT username, details, timestamp
+        FROM history
+        WHERE guild_id=? AND event_type=?
+        ORDER BY id DESC
+        LIMIT 3
+        """, (interaction.guild.id, event_type))
+        
+        results = c.fetchall()
+        if results:
+            event_emoji = {
+                "WARN": "⚠️", "KICK": "👢", "BAN": "🔨", 
+                "SOFTBAN": "🧹", "MUTE": "🔇", "DELETE": "🗑️"
+            }
+            emoji = event_emoji.get(event_type, "📌")
+            
+            lines = []
+            for username, details, timestamp in results:
+                time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp
+                lines.append(f"`{time_only}` **{username}**: {details[:70]}")
+            
+            embed.add_field(
+                name=f"{emoji} {event_type}s (Last 3)",
+                value="\n".join(lines),
+                inline=False
+            )
+    
+    # Count totals
+    c.execute("""
+    SELECT event_type, COUNT(*) as cnt
+    FROM history
+    WHERE guild_id=? AND event_type IN ('WARN','KICK','BAN','MUTE')
+    GROUP BY event_type
+    ORDER BY cnt DESC
+    """, (interaction.guild.id,))
+    totals = c.fetchall()
+    
+    if totals:
+        total_text = " | ".join([f"{e}: {c}" for e, c in totals])
+        embed.set_footer(text=f"Server totals: {total_text}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="summarize_this_week", description="Get a weekly summary of everything that happened")
+async def summarize_this_week(interaction: discord.Interaction):
+    await interaction.response.defer()
+    
+    week_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+    
+    # Gather stats
+    c.execute("""
+    SELECT SUM(count) FROM message_stats
+    WHERE guild_id=? AND date >= ?
+    """, (interaction.guild.id, week_ago))
+    total_msgs = c.fetchone()[0] or 0
+    
+    # Event counts
+    events_to_count = ["JOIN", "LEAVE", "WARN", "KICK", "BAN", "MUTE", "NICK_CHANGE", "ROLE_ADD", "ROLE_REMOVE", "DELETE", "LEVEL_UP"]
+    event_counts = {}
+    for event in events_to_count:
+        cnt = count_events_for_date(interaction.guild.id, week_ago.split("T")[0], event)
+        # Actually need to count from week_ago to now
+        c.execute("""
+        SELECT COUNT(*) FROM history
+        WHERE guild_id=? AND event_type=? AND timestamp >= ?
+        """, (interaction.guild.id, event, week_ago))
+        event_counts[event] = c.fetchone()[0]
+    
+    # Most active user
+    most_active = get_most_active_user(interaction.guild.id, 7)
+    most_active_name = "No data"
+    if most_active:
+        user = interaction.guild.get_member(most_active[0])
+        most_active_name = user.display_name if user else f"User({most_active[0]})"
+    
+    # Top channels
+    top_channels = get_top_channels(interaction.guild.id, 7)
+    
+    # Channel creations/deletions
+    c.execute("""
+    SELECT COUNT(*) FROM history
+    WHERE guild_id=? AND event_type='CHANNEL_CREATE' AND timestamp >= ?
+    """, (interaction.guild.id, week_ago))
+    channels_created = c.fetchone()[0]
+    
+    c.execute("""
+    SELECT COUNT(*) FROM history
+    WHERE guild_id=? AND event_type='CHANNEL_DELETE' AND timestamp >= ?
+    """, (interaction.guild.id, week_ago))
+    channels_deleted = c.fetchone()[0]
+    
+    # Level ups
+    level_ups = event_counts.get("LEVEL_UP", 0)
+    
+    # Nickname changes
+    nick_changes = event_counts.get("NICK_CHANGE", 0)
+    
+    embed = discord.Embed(
+        title=f"📅 Weekly Summary — {interaction.guild.name}",
+        description=f"Last 7 days ({week_ago} → today)",
+        color=discord.Color.blue()
+    )
+    
+    # Overview
+    overview = (
+        f"📝 **{total_msgs:,}** messages sent\n"
+        f"👋 **{event_counts.get('JOIN', 0)}** joins | 👋 **{event_counts.get('LEAVE', 0)}** leaves\n"
+        f"⚠️ **{event_counts.get('WARN', 0)}** warnings | 👢 **{event_counts.get('KICK', 0)}** kicks\n"
+        f"🔨 **{event_counts.get('BAN', 0)}** bans | 🔇 **{event_counts.get('MUTE', 0)}** mutes\n"
+        f"🗑️ **{event_counts.get('DELETE', 0)}** deleted messages\n"
+        f"📁 **+{channels_created}** / **-{channels_deleted}** channels\n"
+        f"⬆️ **{level_ups}** level ups | ✏️ **{nick_changes}** nickname changes"
+    )
+    embed.add_field(name="📊 Overview", value=overview, inline=False)
+    
+    embed.add_field(name="🏆 Most Active", value=most_active_name, inline=True)
+    
+    if top_channels:
+        channel_text = "\n".join([f"<#{cid}>: {c:,} msgs" for cid, c in top_channels[:3]])
+        embed.add_field(name="📈 Top Channels", value=channel_text, inline=True)
+    
+    # Role changes
+    role_adds = event_counts.get("ROLE_ADD", 0)
+    role_removes = event_counts.get("ROLE_REMOVE", 0)
+    embed.add_field(name="🎭 Role Changes", value=f"+{role_adds} / -{role_removes}", inline=True)
+    
+    # Get recent notable events
+    c.execute("""
+    SELECT event_type, username, details, timestamp
+    FROM history
+    WHERE guild_id=? AND timestamp >= ? AND event_type IN ('KICK', 'BAN', 'SOFTBAN', 'CHANNEL_CREATE', 'CHANNEL_DELETE')
+    ORDER BY id DESC
+    LIMIT 5
+    """, (interaction.guild.id, week_ago))
+    notable = c.fetchall()
+    
+    if notable:
+        notable_lines = []
+        for event, username, details, timestamp in notable:
+            time_only = timestamp.split(" ")[1][:5] if " " in timestamp else timestamp
+            notable_lines.append(f"`{time_only}` **{event}** — {username}: {details[:60]}")
+        embed.add_field(name="🔥 Notable Events", value="\n".join(notable_lines), inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+# =========================
 # ERROR HANDLER
 # =========================
 @bot.tree.error
