@@ -2380,9 +2380,13 @@ async def who_joins_voice_with_me_the_most(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="what_was_the_biggest_day_in_server_history", description="Find the most active day ever in this server")
-async def what_was_the_biggest_day_in_server_history(interaction: discord.Interaction):
+@bot.tree.command(
+    name="biggest_day",
+    description="Find the most active day ever in this server"
+)
+async def biggest_day(interaction: discord.Interaction):
     await interaction.response.defer()
+
     
     # Get busiest day from message stats
     c.execute("""
