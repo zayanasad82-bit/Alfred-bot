@@ -18,6 +18,16 @@ from pypdf import PdfReader
 from docx import Document
 from discord.utils import utcnow
 
+# =========================
+# 🔥 MUSIC SYSTEM IMPORTS
+# =========================
+import yt_dlp
+import urllib.parse
+import urllib.request
+import math
+import functools
+from discord import PCMVolumeTransformer, FFmpegPCMAudio
+
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID"))
@@ -230,6 +240,41 @@ CREATE TABLE IF NOT EXISTS ai_personality (
     trait TEXT,
     value TEXT,
     PRIMARY KEY (guild_id, user_id, trait)
+)
+""")
+
+# =========================
+# 🎵 MUSIC SYSTEM TABLES
+# =========================
+c.execute("""
+CREATE TABLE IF NOT EXISTS music_favorites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    guild_id INTEGER,
+    title TEXT,
+    url TEXT,
+    added_at TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS music_playlists (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    name TEXT,
+    user_id INTEGER,
+    created_at TEXT
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS music_playlist_tracks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    playlist_id INTEGER,
+    title TEXT,
+    url TEXT,
+    position INTEGER,
+    added_at TEXT
 )
 """)
 
@@ -963,6 +1008,465 @@ async def consolidate_memories():
         print(f"🧹 Consolidated {deleted} old memories")
 
 # =========================
+# 🎵 MUSIC BACKGROUND TASKS
+# =========================
+@tasks.loop(minutes=5)
+async def clean_inactive_players():
+    """Disconnect music players that have been idle for too long."""
+    for guild_id, player in list(music_players.items()):
+        if player.voice_client and player.voice_client.is_connected():
+            channel = player.voice_client.channel
+            if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
+                if not player.is_playing() and not player.is_paused:
+                    await player.disconnect_voice()
+                    if guild_id in music_players:
+                        del music_players[guild_id]
+
+# =========================
+# 🎵 MUSIC SYSTEM - YT-DLP CONFIGURATION
+# =========================
+
+yt_dlp.utils.bug_reports_message = lambda: ''
+
+YTDLP_OPTIONS = {
+    'format': 'bestaudio/best',
+    'extractaudio': True,
+    'audioformat': 'mp3',
+    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
+    'restrictfilenames': True,
+    'noplaylist': True,
+    'nocheckcertificate': True,
+    'ignoreerrors': False,
+    'logtostderr': False,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0',
+    'extract_flat': False,
+}
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn -dn',
+}
+
+URL_REGEX = re.compile(r'https?://')
+
+
+class YTDLSource(PCMVolumeTransformer):
+    """Represents an audio source from yt-dlp for discord.py voice."""
+    
+    def __init__(self, source: discord.FFmpegPCMAudio, *, data: dict, volume: float = 0.5):
+        super().__init__(source, volume)
+        self.data = data
+        self.title = data.get('title', 'Unknown')
+        self.url = data.get('webpage_url', '')
+        self.duration = data.get('duration', 0)
+        self.thumbnail = data.get('thumbnail', '')
+        self.channel = data.get('channel', '')
+        self.channel_url = data.get('channel_url', '')
+        self.uploader = data.get('uploader', '')
+        self.views = data.get('view_count', 0)
+        self.upload_date = data.get('upload_date', '')
+    
+    @classmethod
+    async def from_url(cls, url: str, *, loop: asyncio.AbstractEventLoop = None, stream: bool = True):
+        """Create a YTDLSource from a URL or search query."""
+        loop = loop or asyncio.get_event_loop()
+        
+        if not URL_REGEX.match(url):
+            url = f'ytsearch:{url}'
+        
+        partial = functools.partial(cls._extract_info, url, stream)
+        data = await loop.run_in_executor(None, partial)
+        
+        if data is None:
+            raise ValueError("Could not find any matching song.")
+        
+        if 'entries' in data:
+            data = data['entries'][0]
+        
+        filename = data['url'] if stream else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
+        
+        audio_source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
+        return cls(audio_source, data=data)
+    
+    @classmethod
+    async def from_playlist(cls, url: str, *, loop: asyncio.AbstractEventLoop = None):
+        """Extract all tracks from a playlist URL."""
+        loop = loop or asyncio.get_event_loop()
+        
+        opts = YTDLP_OPTIONS.copy()
+        opts['noplaylist'] = False
+        opts['extract_flat'] = True
+        
+        partial = functools.partial(cls._extract_info, url, True, opts)
+        data = await loop.run_in_executor(None, partial)
+        
+        if data is None:
+            raise ValueError("Could not find any matching playlist.")
+        
+        tracks = []
+        playlist_title = 'Unknown Playlist'
+        if 'entries' in data:
+            playlist_title = data.get('title', 'Unknown Playlist')
+            for entry in data['entries']:
+                if entry:
+                    tracks.append({
+                        'title': entry.get('title', 'Unknown'),
+                        'url': entry.get('url') or entry.get('webpage_url', ''),
+                        'duration': entry.get('duration', 0),
+                        'thumbnail': entry.get('thumbnail', ''),
+                        'channel': entry.get('channel', ''),
+                        'uploader': entry.get('uploader', ''),
+                    })
+        
+        return playlist_title, tracks
+    
+    @staticmethod
+    def _extract_info(url: str, stream: bool, custom_opts: dict = None):
+        """Synchronous extraction of media info."""
+        opts = YTDLP_OPTIONS.copy()
+        if custom_opts:
+            opts.update(custom_opts)
+        
+        try:
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                return ydl.extract_info(url, download=not stream)
+        except Exception as e:
+            print(f"yt-dlp extract error: {e}")
+            return None
+
+    @classmethod
+    async def search_results(cls, query: str, *, loop: asyncio.AbstractEventLoop = None, max_results: int = 5):
+        """Search YouTube and return list of results."""
+        loop = loop or asyncio.get_event_loop()
+        
+        search_url = f'ytsearch{max_results}:{query}'
+        opts = YTDLP_OPTIONS.copy()
+        opts['noplaylist'] = True
+        opts['extract_flat'] = True
+        
+        partial = functools.partial(cls._extract_info, search_url, True, opts)
+        data = await loop.run_in_executor(None, partial)
+        
+        results = []
+        if data and 'entries' in data:
+            for entry in data['entries']:
+                if entry:
+                    results.append({
+                        'title': entry.get('title', 'Unknown'),
+                        'url': f"https://www.youtube.com/watch?v={entry.get('id', '')}",
+                        'duration': entry.get('duration', 0),
+                        'thumbnail': entry.get('thumbnail', ''),
+                        'channel': entry.get('channel', ''),
+                        'uploader': entry.get('uploader', ''),
+                    })
+        return results
+
+
+class MusicPlayer:
+    """Manages music playback for a single guild."""
+    
+    def __init__(self, bot: commands.Bot, guild_id: int):
+        self.bot = bot
+        self.guild_id = guild_id
+        self.queue = asyncio.Queue()
+        self.queue_history = []
+        self.current = None
+        self.voice_client = None
+        self.loop_mode = 'none'
+        self.volume = 0.5
+        self.is_paused = False
+        self.now_playing_message = None
+        self._play_next_lock = asyncio.Lock()
+        self._task = None
+    
+    async def connect_voice(self, channel: discord.VoiceChannel) -> bool:
+        """Connect to a voice channel."""
+        try:
+            if self.voice_client and self.voice_client.is_connected():
+                if self.voice_client.channel.id != channel.id:
+                    await self.voice_client.move_to(channel)
+                return True
+            
+            self.voice_client = await channel.connect(cls=discord.VoiceClient, timeout=20.0)
+            return True
+        except Exception as e:
+            print(f"Voice connect error: {e}")
+            return False
+    
+    async def disconnect_voice(self):
+        """Disconnect from voice channel."""
+        if self.voice_client and self.voice_client.is_connected():
+            self.queue = asyncio.Queue()
+            self.queue_history.clear()
+            self.current = None
+            self.is_paused = False
+            self.loop_mode = 'none'
+            if self._task:
+                self._task.cancel()
+                self._task = None
+            await self.voice_client.disconnect(force=True)
+            self.voice_client = None
+    
+    async def add_to_queue(self, track_data: dict, at_front: bool = False):
+        """Add a track to the queue."""
+        if at_front:
+            old_queue = []
+            while not self.queue.empty():
+                old_queue.append(await self.queue.get())
+            self.queue.put_nowait(track_data)
+            for item in old_queue:
+                self.queue.put_nowait(item)
+        else:
+            await self.queue.put(track_data)
+        
+        if not self.is_playing() and not self.is_paused:
+            await self.start_playback()
+    
+    async def start_playback(self):
+        """Start the playback loop."""
+        self._task = asyncio.create_task(self._playback_loop())
+    
+    async def _playback_loop(self):
+        """Main playback loop - pulls from queue and plays."""
+        try:
+            while True:
+                if self.loop_mode == 'none':
+                    self.current = await self.queue.get()
+                elif self.loop_mode == 'one':
+                    pass
+                elif self.loop_mode == 'all':
+                    await self.queue.put(self.current)
+                    self.current = await self.queue.get()
+                
+                if self.current:
+                    self.queue_history.append(self.current)
+                    if len(self.queue_history) > 50:
+                        self.queue_history.pop(0)
+                    
+                    await self._play_track(self.current)
+                
+                while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+                    await asyncio.sleep(1)
+                
+                if self.loop_mode == 'one' and self.current:
+                    continue
+                
+                if self.queue.empty() and self.loop_mode != 'all':
+                    self.current = None
+                    break
+        
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            print(f"Playback loop error: {e}")
+    
+    async def _play_track(self, track_data: dict):
+        """Actually play a track."""
+        if not self.voice_client or not self.voice_client.is_connected():
+            return
+        
+        try:
+            source = await YTDLSource.from_url(track_data['url'])
+            source.volume = self.volume
+            
+            self.current = track_data
+            self.is_paused = False
+            
+            self.voice_client.play(source, after=lambda e: print(f"Player error: {e}") if e else None)
+            
+            await self._update_now_playing()
+        
+        except Exception as e:
+            print(f"Play error: {e}")
+    
+    async def _update_now_playing(self):
+        """Update the now playing embed/message."""
+        if not self.current or not self.now_playing_message:
+            return
+        
+        try:
+            embed = self._create_now_playing_embed()
+            await self.now_playing_message.edit(embed=embed)
+        except:
+            pass
+    
+    def _create_now_playing_embed(self) -> discord.Embed:
+        """Create the now playing embed."""
+        if not self.current:
+            return discord.Embed(title="🎵 No track playing", color=discord.Color.blue())
+        
+        track = self.current
+        duration_str = self._format_duration(track.get('duration', 0))
+        
+        embed = discord.Embed(
+            title="🎵 Now Playing",
+            description=f"[{track.get('title', 'Unknown')}]({track.get('url', '')})",
+            color=discord.Color.green()
+        )
+        
+        if track.get('thumbnail'):
+            embed.set_thumbnail(url=track['thumbnail'])
+        
+        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed.add_field(name="Uploader", value=track.get('uploader', 'Unknown'), inline=True)
+        
+        queue_size = self.queue.qsize()
+        embed.add_field(name="Queue", value=f"{queue_size} songs" if queue_size > 0 else "Empty", inline=True)
+        
+        loop_icons = {'none': '➡️', 'one': '🔂', 'all': '🔁'}
+        embed.set_footer(text=f"Volume: {int(self.volume * 100)}% | Loop: {loop_icons.get(self.loop_mode, '➡️')}")
+        
+        return embed
+    
+    def is_playing(self) -> bool:
+        """Check if audio is currently playing."""
+        return self.voice_client and self.voice_client.is_playing()
+    
+    def pause(self):
+        """Pause playback."""
+        if self.voice_client and self.voice_client.is_playing():
+            self.voice_client.pause()
+            self.is_paused = True
+    
+    def resume(self):
+        """Resume playback."""
+        if self.voice_client and self.voice_client.is_paused():
+            self.voice_client.resume()
+            self.is_paused = False
+    
+    def stop(self):
+        """Stop playback and clear queue."""
+        if self.voice_client:
+            self.voice_client.stop()
+        
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                break
+        
+        self.queue = asyncio.Queue()
+        self.queue_history.clear()
+        self.current = None
+        self.is_paused = False
+    
+    def skip(self) -> bool:
+        """Skip the current track."""
+        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            self.voice_client.stop()
+            return True
+        return False
+    
+    def previous(self) -> bool:
+        """Go back to the previous track."""
+        if len(self.queue_history) >= 2:
+            self.queue_history.pop()
+            prev = self.queue_history.pop()
+            old_queue = []
+            while not self.queue.empty():
+                old_queue.append(self.queue.get_nowait())
+            self.queue.put_nowait(prev)
+            for item in old_queue:
+                self.queue.put_nowait(item)
+            
+            if self.voice_client:
+                self.voice_client.stop()
+            return True
+        return False
+    
+    def shuffle(self):
+        """Shuffle the queue."""
+        items = []
+        while not self.queue.empty():
+            try:
+                items.append(self.queue.get_nowait())
+            except:
+                break
+        
+        random.shuffle(items)
+        
+        self.queue = asyncio.Queue()
+        for item in items:
+            self.queue.put_nowait(item)
+    
+    def clear_queue(self):
+        """Clear the entire queue except current."""
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                break
+        self.queue = asyncio.Queue()
+    
+    def remove_from_queue(self, index: int) -> Optional[dict]:
+        """Remove a track from the queue by index (1-based)."""
+        items = []
+        while not self.queue.empty():
+            try:
+                items.append(self.queue.get_nowait())
+            except:
+                break
+        
+        if index < 1 or index > len(items):
+            return None
+        
+        removed = items.pop(index - 1)
+        
+        self.queue = asyncio.Queue()
+        for item in items:
+            self.queue.put_nowait(item)
+        
+        return removed
+    
+    def get_queue_list(self) -> list:
+        """Get a list of all tracks in the queue."""
+        items = []
+        while not self.queue.empty():
+            try:
+                items.append(self.queue.get_nowait())
+            except:
+                break
+        
+        self.queue = asyncio.Queue()
+        for item in items:
+            self.queue.put_nowait(item)
+        
+        return items
+    
+    def set_volume(self, vol: float):
+        """Set volume (0.0 to 1.0)."""
+        self.volume = max(0.0, min(1.0, vol))
+        if self.voice_client and self.voice_client.source:
+            if hasattr(self.voice_client.source, 'volume'):
+                self.voice_client.source.volume = self.volume
+    
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        """Format duration in seconds to HH:MM:SS or MM:SS."""
+        if not seconds:
+            return "Live"
+        h, remainder = divmod(seconds, 3600)
+        m, s = divmod(remainder, 60)
+        if h:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+
+# Guild music players cache
+music_players: dict[int, MusicPlayer] = {}
+
+
+def get_music_player(guild_id: int) -> MusicPlayer:
+    """Get or create a MusicPlayer for a guild."""
+    if guild_id not in music_players:
+        music_players[guild_id] = MusicPlayer(bot, guild_id)
+    return music_players[guild_id]
+
+
+# =========================
 # EVENTS
 # =========================
 @bot.event
@@ -1225,6 +1729,7 @@ async def on_ready():
     check_birthdays.start()
     generate_daily_summary.start()
     consolidate_memories.start()
+    clean_inactive_players.start()
     print(f"✅ ULTIMATE BOT ONLINE: {bot.user}")
     print(f"   Servers: {len(bot.guilds)}")
     print(f"   Commands: {len(bot.tree.get_commands())}")
@@ -2981,6 +3486,721 @@ async def error_handler(interaction: discord.Interaction, error):
             f"❌ Error: {error}",
             ephemeral=True
         )
+
+
+# =====================================================
+# 🎵 MUSIC SYSTEM - SLASH COMMANDS (LARA BOT STYLE)
+# =====================================================
+
+@bot.tree.command(name="play", description="🎵 Play a song by name or URL (YouTube, Spotify, SoundCloud)")
+async def play_music(interaction: discord.Interaction, query: str):
+    """Play a song by search term or URL. Supports YouTube, Spotify, SoundCloud."""
+    
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+    
+    player = get_music_player(interaction.guild.id)
+    
+    connected = await player.connect_voice(interaction.user.voice.channel)
+    if not connected:
+        await interaction.response.send_message("❌ Could not connect to voice channel.", ephemeral=True)
+        return
+    
+    try:
+        # Check if it's a URL or search term
+        is_url = bool(URL_REGEX.match(query))
+        
+        if is_url and ('playlist' in query.lower() or '&list=' in query.lower()):
+            # It's a playlist
+            playlist_title, tracks = await YTDLSource.from_playlist(query)
+            
+            if not tracks:
+                await interaction.response.send_message("❌ Could not find any tracks in that playlist.")
+                return
+            
+            for track in tracks:
+                await player.add_to_queue(track)
+            
+            embed = discord.Embed(
+                title="📋 Playlist Added",
+                description=f"**{playlist_title}**",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Tracks", value=f"{len(tracks)} songs added to queue", inline=False)
+            
+            if player.current:
+                embed.add_field(name="Now Playing", value=f"[{player.current.get('title', 'Unknown')}]({player.current.get('url', '')})", inline=False)
+            
+            await interaction.response.send_message(embed=embed)
+            add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST", f"Added playlist: {playlist_title} ({len(tracks)} tracks)")
+            return
+        
+        # Single track
+        source = await YTDLSource.from_url(query)
+        
+        track_data = {
+            'title': source.title,
+            'url': source.url,
+            'duration': source.duration,
+            'thumbnail': source.thumbnail,
+            'channel': source.channel,
+            'channel_url': source.channel_url,
+            'uploader': source.uploader,
+            'views': source.views,
+        }
+        
+        await player.add_to_queue(track_data)
+        
+        duration_str = MusicPlayer._format_duration(source.duration)
+        
+        embed = discord.Embed(
+            title="🎵 Added to Queue" if player.is_playing() else "🎵 Now Playing",
+            description=f"[{source.title}]({source.url})",
+            color=discord.Color.green()
+        )
+        
+        if source.thumbnail:
+            embed.set_thumbnail(url=source.thumbnail)
+        
+        embed.add_field(name="Duration", value=duration_str, inline=True)
+        embed.add_field(name="Uploader", value=source.uploader, inline=True)
+        
+        queue_size = player.queue.qsize()
+        if queue_size > 0:
+            embed.add_field(name="Position in Queue", value=f"#{queue_size}", inline=True)
+        
+        await interaction.response.send_message(embed=embed)
+        
+        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAY", f"Played: {source.title}")
+        
+    except ValueError as e:
+        await interaction.response.send_message(f"❌ {str(e)}")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error playing song: {str(e)[:100]}")
+
+
+@bot.tree.command(name="search", description="🔍 Search YouTube and pick a song to play")
+async def search_music(interaction: discord.Interaction, query: str):
+    """Search YouTube and select from results."""
+    
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
+        return
+    
+    await interaction.response.defer()
+    
+    try:
+        results = await YTDLSource.search_results(query, max_results=5)
+        
+        if not results:
+            await interaction.response.send_message(f"❌ No results found for '{query}'.")
+            return
+        
+        embed = discord.Embed(
+            title="🔍 Search Results",
+            description=f"Results for: **{query}**\n*Click a button below to play*",
+            color=discord.Color.blue()
+        )
+        
+        for i, result in enumerate(results, 1):
+            duration = MusicPlayer._format_duration(result.get('duration', 0))
+            embed.add_field(
+                name=f"{i}. {result['title'][:80]}",
+                value=f"Duration: {duration} | {result.get('uploader', 'Unknown')}",
+                inline=False
+            )
+        
+        # Create select menu for results
+        class SearchSelect(discord.ui.Select):
+            def __init__(self):
+                options = []
+                for i, result in enumerate(results, 1):
+                    label = f"{i}. {result['title'][:80]}"
+                    options.append(discord.SelectOption(
+                        label=label[:100],
+                        description=f"{MusicPlayer._format_duration(result.get('duration', 0))}",
+                        value=str(i - 1)
+                    ))
+                super().__init__(placeholder="Choose a song to play...", min_values=1, max_values=1, options=options)
+            
+            async def callback(self, interaction: discord.Interaction):
+                selected_idx = int(self.values[0])
+                selected = results[selected_idx]
+                
+                player = get_music_player(interaction.guild.id)
+                connected = await player.connect_voice(interaction.user.voice.channel)
+                if not connected:
+                    await interaction.response.send_message("❌ Could not connect to voice channel.", ephemeral=True)
+                    return
+                
+                await player.add_to_queue(selected)
+                
+                duration_str = MusicPlayer._format_duration(selected.get('duration', 0))
+                
+                embed = discord.Embed(
+                    title="🎵 Added to Queue",
+                    description=f"[{selected['title']}]({selected['url']})",
+                    color=discord.Color.green()
+                )
+                if selected.get('thumbnail'):
+                    embed.set_thumbnail(url=selected['thumbnail'])
+                embed.add_field(name="Duration", value=duration_str, inline=True)
+                embed.add_field(name="Uploader", value=selected.get('uploader', 'Unknown'), inline=True)
+                
+                await interaction.response.edit_message(embed=embed, view=None)
+                add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SEARCH", f"Searched and played: {selected['title']}")
+        
+        view = discord.ui.View(timeout=30)
+        view.add_item(SearchSelect())
+        
+        await interaction.response.send_message(embed=embed, view=view)
+        
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Search error: {str(e)[:100]}")
+
+
+@bot.tree.command(name="pause", description="⏸️ Pause the current song")
+async def pause_music(interaction: discord.Interaction):
+    """Pause the currently playing song."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    if not player.is_playing():
+        await interaction.response.send_message("❌ Nothing is playing right now.")
+        return
+    
+    player.pause()
+    await interaction.response.send_message("⏸️ **Paused** — Use `/resume` to continue.")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PAUSE", "Paused music")
+
+
+@bot.tree.command(name="resume", description="▶️ Resume the paused song")
+async def resume_music(interaction: discord.Interaction):
+    """Resume the paused song."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or !player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    if not player.is_paused:
+        await interaction.response.send_message("❌ The music isn't paused.")
+        return
+    
+    player.resume()
+    await interaction.response.send_message("▶️ **Resumed** — Enjoy the music!")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_RESUME", "Resumed music")
+
+
+@bot.tree.command(name="skip", description="⏭️ Skip the current song")
+async def skip_music(interaction: discord.Interaction):
+    """Skip the currently playing song."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    if not player.is_playing() and not player.is_paused:
+        await interaction.response.send_message("❌ Nothing is playing right now.")
+        return
+    
+    current_title = player.current.get('title', 'Unknown') if player.current else 'Unknown'
+    player.skip()
+    
+    await interaction.response.send_message(f"⏭️ **Skipped** `{current_title}`")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SKIP", f"Skipped: {current_title}")
+
+
+@bot.tree(command="previous", description="⏮️ Go back to the previous song")
+async def previous_music(interaction: discord.Interaction):
+    """Go back to the previous song."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    if player.previous():
+        await interaction.response.send_message("⏮️ **Going back to previous song**")
+        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PREVIOUS", "Went to previous song")
+    else:
+        await interaction.response.send_message("❌ No previous song in history.")
+
+
+@bot.tree.command(name="stop", description="⏹️ Stop music and clear the queue")
+async def stop_music(interaction: discord.Interaction):
+    """Stop the music and clear the queue."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    player.stop()
+    await interaction.response.send_message("⏹️ **Stopped** — Music stopped and queue cleared.")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_STOP", "Stopped music and cleared queue")
+
+
+@bot.tree.command(name="queue", description="📋 Show the current music queue")
+async def queue_music(interaction: discord.Interaction, page: int = 1):
+    """Display the current song queue."""
+    player = get_music_player(interaction.guild.id)
+    
+    queue_list = player.get_queue_list()
+    total_songs = len(queue_list)
+    
+    if total_songs == 0 and not player.current:
+        await interaction.response.send_message("📋 **Queue is empty** — Use `/play` to add songs!")
+        return
+    
+    items_per_page = 10
+    total_pages = max(1, (total_songs + items_per_page - 1) // items_per_page)
+    page = max(1, min(page, total_pages))
+    
+    start_idx = (page - 1) * items_per_page
+    end_idx = min(start_idx + items_per_page, total_songs)
+    
+    embed = discord.Embed(
+        title="📋 Music Queue",
+        color=discord.Color.blue()
+    )
+    
+    if player.current:
+        current = player.current
+        duration_str = MusicPlayer._format_duration(current.get('duration', 0))
+        status = "▶️ Playing" if player.is_playing() else "⏸️ Paused"
+        embed.add_field(
+            name=f"{status} — Now Playing",
+            value=f"[{current.get('title', 'Unknown')}]({current.get('url', '')})\n`{duration_str}` • {current.get('uploader', 'Unknown')}",
+            inline=False
+        )
+    
+    if queue_list:
+        queue_text = ""
+        for i in range(start_idx, end_idx):
+            track = queue_list[i]
+            duration_str = MusicPlayer._format_duration(track.get('duration', 0))
+            queue_text += f"**{i + 1}.** [{track.get('title', 'Unknown')[:50]}]({track.get('url', '')}) `{duration_str}`\n"
+        
+        embed.add_field(
+            name=f"⏭️ Up Next ({start_idx + 1}-{end_idx} of {total_songs})",
+            value=queue_text or "No more songs",
+            inline=False
+        )
+    
+    loop_icons = {'none': '➡️ No Loop', 'one': '🔂 Loop One', 'all': '🔁 Loop All'}
+    embed.set_footer(text=f"Page {page}/{total_pages} | {loop_icons.get(player.loop_mode, '➡️ No Loop')} | Volume: {int(player.volume * 100)}%")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="nowplaying", description="🎶 Show what's currently playing")
+async def now_playing(interaction: discord.Interaction):
+    """Display the currently playing song."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.current:
+        await interaction.response.send_message("❌ Nothing is playing right now.")
+        return
+    
+    track = player.current
+    duration_str = MusicPlayer._format_duration(track.get('duration', 0))
+    status = "▶️ Playing" if player.is_playing() else "⏸️ Paused"
+    
+    embed = discord.Embed(
+        title=f"{status} — Now Playing",
+        description=f"[{track.get('title', 'Unknown')}]({track.get('url', '')})",
+        color=discord.Color.green()
+    )
+    
+    if track.get('thumbnail'):
+        embed.set_thumbnail(url=track['thumbnail'])
+    
+    embed.add_field(name="Duration", value=duration_str, inline=True)
+    embed.add_field(name="Uploader", value=track.get('uploader', 'Unknown'), inline=True)
+    embed.add_field(name="Channel", value=track.get('channel', 'Unknown'), inline=True)
+    
+    queue_size = player.queue.qsize()
+    embed.add_field(name="Songs in Queue", value=str(queue_size), inline=True)
+    
+    loop_icons = {'none': '➡️', 'one': '🔂', 'all': '🔁'}
+    embed.set_footer(text=f"Volume: {int(player.volume * 100)}% | Loop: {loop_icons.get(player.loop_mode, '➡️')}")
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="volume", description="🔊 Set the volume (0-100)")
+async def volume_music(interaction: discord.Interaction, level: int):
+    """Set the playback volume (0-100)."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    if level < 0 or level > 100:
+        await interaction.response.send_message("❌ Volume must be between 0 and 100.")
+        return
+    
+    player.set_volume(level / 100)
+    await interaction.response.send_message(f"🔊 **Volume set to {level}%**")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_VOLUME", f"Volume set to {level}%")
+
+
+@bot.tree.command(name="loop", description="🔁 Set loop mode: none, one, or all")
+async def loop_music(interaction: discord.Interaction, mode: str):
+    """Set loop mode: none, one, or all."""
+    player = get_music_player(interaction.guild.id)
+    
+    mode = mode.lower().strip()
+    if mode not in ['none', 'one', 'all']:
+        await interaction.response.send_message("❌ Mode must be `none`, `one`, or `all`.")
+        return
+    
+    player.loop_mode = mode
+    
+    loop_names = {'none': '➡️ No Loop', 'one': '🔂 Loop One', 'all': '🔁 Loop All'}
+    await interaction.response.send_message(f"**Loop: {loop_names[mode]}**")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_LOOP", f"Loop mode: {mode}")
+
+
+@bot.tree.command(name="shuffle", description="🔀 Shuffle the queue")
+async def shuffle_music(interaction: discord.Interaction):
+    """Shuffle all songs in the queue."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    queue_list = player.get_queue_list()
+    if len(queue_list) < 2:
+        await interaction.response.send_message("❌ Not enough songs in queue to shuffle (need at least 2).")
+        return
+    
+    player.shuffle()
+    await interaction.response.send_message(f"🔀 **Queue shuffled!** ({len(queue_list)} songs)")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SHUFFLE", "Shuffled queue")
+
+
+@bot.tree.command(name="remove", description="❌ Remove a song from the queue by its number")
+async def remove_music(interaction: discord.Interaction, position: int):
+    """Remove a song from the queue by position number."""
+    player = get_music_player(interaction.guild.id)
+    
+    removed = player.remove_from_queue(position)
+    if removed:
+        await interaction.response.send_message(f"❌ Removed **{removed.get('title', 'Unknown')}** from position #{position}")
+        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_REMOVE", f"Removed #{position} from queue")
+    else:
+        await interaction.response.send_message(f"❌ Invalid position. Use `/queue` to see positions.")
+
+
+@bot.tree.command(name="clearqueue", description="🧹 Clear the entire queue")
+async def clear_queue_music(interaction: discord.Interaction):
+    """Clear all songs from the queue (current song continues)."""
+    player = get_music_player(interaction.guild.id)
+    
+    queue_list = player.get_queue_list()
+    if not queue_list:
+        await interaction.response.send_message("❌ Queue is already empty.")
+        return
+    
+    count = len(queue_list)
+    player.clear_queue()
+    await interaction.response.send_message(f"🧹 **Cleared {count} songs** from the queue. Current song continues.")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_CLEAR", f"Cleared {count} songs from queue")
+
+
+@bot.tree.command(name="join", description="🔊 Make the bot join your voice channel")
+async def join_voice(interaction: discord.Interaction):
+    """Make the bot join your current voice channel."""
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ You must be in a voice channel first!")
+        return
+    
+    player = get_music_player(interaction.guild.id)
+    connected = await player.connect_voice(interaction.user.voice.channel)
+    
+    if connected:
+        await interaction.response.send_message(f"🔊 **Joined** {interaction.user.voice.channel.mention}")
+        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_JOIN", f"Joined {interaction.user.voice.channel.name}")
+    else:
+        await interaction.response.send_message("❌ Could not connect to that voice channel.")
+
+
+@bot.tree.command(name="leave", description="👋 Make the bot leave the voice channel")
+async def leave_voice(interaction: discord.Interaction):
+    """Make the bot leave the voice channel and clear the queue."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.voice_client or not player.voice_client.is_connected():
+        await interaction.response.send_message("❌ I'm not in a voice channel.")
+        return
+    
+    channel_name = player.voice_client.channel.name
+    await player.disconnect_voice()
+    if interaction.guild.id in music_players:
+        del music_players[interaction.guild.id]
+    
+    await interaction.response.send_message(f"👋 **Left** {channel_name} — Queue cleared.")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_LEAVE", f"Left voice channel")
+
+
+@bot.tree.command(name="lyrics", description="📝 Get lyrics for the current song")
+async def lyrics_music(interaction: discord.Interaction, song: str = None):
+    """Search for song lyrics. Leave empty for the current song."""
+    await interaction.response.defer()
+    
+    if not song:
+        player = get_music_player(interaction.guild.id)
+        if player.current:
+            song = player.current.get('title', '')
+        else:
+            await interaction.response.send_message("❌ Provide a song name or play something first.")
+            return
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            search_query = urllib.parse.quote(song)
+            async with session.get(f"https://api.lyrics.ovh/v1/{search_query}") as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    lyrics = data.get('lyrics', '')
+                    
+                    if len(lyrics) > 4000:
+                        lyrics = lyrics[:4000] + "\n\n*...truncated*"
+                    
+                    embed = discord.Embed(
+                        title=f"📝 Lyrics: {song}",
+                        description=lyrics or "No lyrics found.",
+                        color=discord.Color.purple()
+                    )
+                    await interaction.response.send_message(embed=embed)
+                else:
+                    # Try another format: artist - title
+                    async with session.get(f"https://api.lyrics.ovh/v1/{song.replace(' - ', '/')}") as resp2:
+                        if resp2.status == 200:
+                            data = await resp2.json()
+                            lyrics = data.get('lyrics', '')
+                            if len(lyrics) > 4000:
+                                lyrics = lyrics[:4000] + "\n\n*...truncated*"
+                            embed = discord.Embed(
+                                title=f"📝 Lyrics: {song}",
+                                description=lyrics or "No lyrics found.",
+                                color=discord.Color.purple()
+                            )
+                            await interaction.response.send_message(embed=embed)
+                        else:
+                            await interaction.response.send_message(f"❌ Could not find lyrics for `{song}`.")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Lyrics lookup failed: {str(e)[:100]}")
+
+
+@bot.tree.command(name="favorite", description="⭐ Save the current song to your favorites")
+async def favorite_music(interaction: discord.Interaction):
+    """Save the currently playing song to your favorites."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.current:
+        await interaction.response.send_message("❌ Nothing is playing right now.")
+        return
+    
+    track = player.current
+    
+    c.execute("SELECT id FROM music_favorites WHERE user_id=? AND guild_id=? AND url=?",
+              (interaction.user.id, interaction.guild.id, track.get('url', '')))
+    existing = c.fetchone()
+    
+    if existing:
+        await interaction.response.send_message("⭐ This song is already in your favorites!")
+        return
+    
+    c.execute("INSERT INTO music_favorites (user_id, guild_id, title, url, added_at) VALUES (?, ?, ?, ?, ?)",
+              (interaction.user.id, interaction.guild.id, track.get('title', 'Unknown'), track.get('url', ''), datetime.now().isoformat()))
+    conn.commit()
+    
+    await interaction.response.send_message(f"⭐ **Added to favorites:** {track.get('title', 'Unknown')}")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_FAVORITE", f"Favorited: {track.get('title', 'Unknown')}")
+
+
+@bot.tree.command(name="favorites", description="⭐ Show your favorite songs")
+async def favorites_music(interaction: discord.Interaction):
+    """Display your favorite songs."""
+    c.execute("SELECT title, url, added_at FROM music_favorites WHERE user_id=? AND guild_id=? ORDER BY id DESC LIMIT 25",
+              (interaction.user.id, interaction.guild.id))
+    favorites = c.fetchall()
+    
+    if not favorites:
+        await interaction.response.send_message("⭐ You don't have any favorites yet. Use `/favorite` to save a song!")
+        return
+    
+    embed = discord.Embed(
+        title=f"⭐ {interaction.user.display_name}'s Favorites",
+        color=discord.Color.gold()
+    )
+    
+    for i, (title, url, added_at) in enumerate(favorites, 1):
+        date_only = added_at[:10] if added_at else 'Unknown'
+        embed.add_field(name=f"{i}. {title[:50]}", value=f"[Link]({url}) • Added {date_only}", inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="playlistcreate", description="📁 Create a new music playlist")
+async def playlist_create(interaction: discord.Interaction, name: str):
+    """Create a new custom playlist."""
+    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
+              (interaction.guild.id, name, interaction.user.id))
+    existing = c.fetchone()
+    
+    if existing:
+        await interaction.response.send_message(f"❌ You already have a playlist named `{name}`.")
+        return
+    
+    c.execute("INSERT INTO music_playlists (guild_id, name, user_id, created_at) VALUES (?, ?, ?, ?)",
+              (interaction.guild.id, name, interaction.user.id, datetime.now().isoformat()))
+    conn.commit()
+    
+    await interaction.response.send_message(f"📁 **Playlist created:** `{name}` — Use `/playlistadd` to add songs!")
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST_CREATE", f"Created playlist: {name}")
+
+
+@bot.tree.command(name="playlistadd", description="➕ Add the current song to a playlist")
+async def playlist_add(interaction: discord.Interaction, playlist_name: str):
+    """Add the currently playing song to one of your playlists."""
+    player = get_music_player(interaction.guild.id)
+    
+    if not player.current:
+        await interaction.response.send_message("❌ Nothing is playing right now.")
+        return
+    
+    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
+              (interaction.guild.id, playlist_name, interaction.user.id))
+    pl = c.fetchone()
+    
+    if not pl:
+        await interaction.response.send_message(f"❌ Playlist `{playlist_name}` not found. Use `/playlistcreate` first.")
+        return
+    
+    playlist_id = pl[0]
+    track = player.current
+    
+    c.execute("SELECT MAX(position) FROM music_playlist_tracks WHERE playlist_id=?", (playlist_id,))
+    max_pos = c.fetchone()[0] or 0
+    
+    c.execute("INSERT INTO music_playlist_tracks (playlist_id, title, url, position, added_at) VALUES (?, ?, ?, ?, ?)",
+              (playlist_id, track.get('title', 'Unknown'), track.get('url', ''), max_pos + 1, datetime.now().isoformat()))
+    conn.commit()
+    
+    await interaction.response.send_message(f"➕ **Added to `{playlist_name}`:** {track.get('title', 'Unknown')}")
+
+
+@bot.tree.command(name="playlists", description="📁 Show your playlists")
+async def playlists_show(interaction: discord.Interaction):
+    """Display all your playlists."""
+    c.execute("SELECT id, name, created_at FROM music_playlists WHERE guild_id=? AND user_id=? ORDER BY id DESC",
+              (interaction.guild.id, interaction.user.id))
+    playlists = c.fetchall()
+    
+    if not playlists:
+        await interaction.response.send_message("📁 You don't have any playlists. Use `/playlistcreate` to make one!")
+        return
+    
+    embed = discord.Embed(
+        title=f"📁 {interaction.user.display_name}'s Playlists",
+        color=discord.Color.blue()
+    )
+    
+    for pl_id, name, created_at in playlists:
+        c.execute("SELECT COUNT(*) FROM music_playlist_tracks WHERE playlist_id=?", (pl_id,))
+        track_count = c.fetchone()[0]
+        date_only = created_at[:10] if created_at else 'Unknown'
+        embed.add_field(name=f"📁 {name}", value=f"{track_count} tracks • Created {date_only}", inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="playlistplay", description="▶️ Play all songs from a playlist")
+async def playlist_play(interaction: discord.Interaction, name: str):
+    """Play all songs from one of your playlists."""
+    if not interaction.user.voice:
+        await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
+        return
+    
+    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
+              (interaction.guild.id, name, interaction.user.id))
+    pl = c.fetchone()
+    
+    if not pl:
+        await interaction.response.send_message(f"❌ Playlist `{name}` not found.")
+        return
+    
+    c.execute("SELECT title, url FROM music_playlist_tracks WHERE playlist_id=? ORDER BY position",
+              (pl[0],))
+    tracks = c.fetchall()
+    
+    if not tracks:
+        await interaction.response.send_message(f"❌ Playlist `{name}` is empty!")
+        return
+    
+    await interaction.response.defer()
+    
+    player = get_music_player(interaction.guild.id)
+    connected = await player.connect_voice(interaction.user.voice.channel)
+    if not connected:
+        await interaction.response.send_message("❌ Could not connect to voice channel.")
+        return
+    
+    for title, url in tracks:
+        track_data = {
+            'title': title,
+            'url': url,
+            'duration': 0,
+            'thumbnail': '',
+            'channel': '',
+            'channel_url': '',
+            'uploader': '',
+            'views': 0,
+        }
+        await player.add_to_queue(track_data)
+    
+    embed = discord.Embed(
+        title="📁 Playlist Started",
+        description=f"**{name}**",
+        color=discord.Color.green()
+    )
+    embed.add_field(name="Tracks", value=f"{len(tracks)} songs added to queue", inline=False)
+    
+    await interaction.response.send_message(embed=embed)
+    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST_PLAY", f"Playing playlist: {name} ({len(tracks)} tracks)")
+
+
+@bot.tree.command(name="playlistdelete", description="🗑️ Delete a playlist")
+async def playlist_delete(interaction: discord.Interaction, name: str):
+    """Delete one of your playlists."""
+    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
+              (interaction.guild.id, name, interaction.user.id))
+    pl = c.fetchone()
+    
+    if not pl:
+        await interaction.response.send_message(f"❌ Playlist `{name}` not found.")
+        return
+    
+    playlist_id = pl[0]
+    c.execute("DELETE FROM music_playlist_tracks WHERE playlist_id=?", (playlist_id,))
+    c.execute("DELETE FROM music_playlists WHERE id=?", (playlist_id,))
+    conn.commit()
+    
+    await interaction.response.send_message(f"🗑️ **Deleted playlist:** `{name}`")
+
 
 # =========================
 # RUN
