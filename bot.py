@@ -3718,7 +3718,7 @@ async def skip_music(interaction: discord.Interaction):
     add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SKIP", f"Skipped: {current_title}")
 
 
-@bot.tree(command="previous", description="⏮️ Go back to the previous song")
+@bot.tree.command(name="previous", description="⏮️ Go back to the previous song")
 async def previous_music(interaction: discord.Interaction):
     """Go back to the previous song."""
     player = get_music_player(interaction.guild.id)
