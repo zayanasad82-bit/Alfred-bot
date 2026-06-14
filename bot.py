@@ -17,6 +17,7 @@ from google import genai
 from pypdf import PdfReader
 from docx import Document
 from discord.utils import utcnow
+from discord.ext import commands
 
 # =========================
 # 🔥 MUSIC SYSTEM IMPORTS (REPLACED with wavelink)
@@ -1840,7 +1841,7 @@ async def get_music_player(guild: discord.Guild, voice_channel: discord.VoiceCha
     return player
 
 
-class Music(discord.Cog, name="music"):
+class Music(commands.Cog, name="music"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.queue = {}  # guild_id: list of wavelink.Track
@@ -2254,7 +2255,7 @@ class Music(discord.Cog, name="music"):
 
 # ─── EVENTS COG ───────────────────────────────────────────────────────────────
 
-class Events(discord.Cog):
+class Events(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -2380,7 +2381,7 @@ class Events(discord.Cog):
 
 # ─── FUN COG ─────────────────────────────────────────────────────────────────
 
-class Fun(discord.Cog, name="fun"):
+class Fun(commands.Cog, name="fun"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -2455,7 +2456,7 @@ class Fun(discord.Cog, name="fun"):
 
 # ─── ECONOMY COG ─────────────────────────────────────────────────────────────
 
-class Economy(discord.Cog, name="economy"):
+class Economy(commands.Cog, name="economy"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.daily_cooldowns = {}
@@ -2606,7 +2607,7 @@ class GiveawayView(discord.ui.View):
         await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
 
 
-class Giveaway(discord.Cog, name="giveaway"):
+class Giveaway(commands.Cog, name="giveaway"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.bot.loop.create_task(self.check_giveaways())
@@ -2810,7 +2811,7 @@ class TicketCloseView(discord.ui.View):
         await interaction.channel.delete()
 
 
-class Ticket(discord.Cog, name="ticket"):
+class Ticket(commands.Cog, name="ticket"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -2849,7 +2850,7 @@ class Ticket(discord.Cog, name="ticket"):
 
 # ─── LEVELING COG ────────────────────────────────────────────────────────────
 
-class Leveling(discord.Cog, name="leveling"):
+class Leveling(commands.Cog, name="leveling"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -2917,7 +2918,7 @@ class Leveling(discord.Cog, name="leveling"):
 
 # ─── AI COG ──────────────────────────────────────────────────────────────────
 
-class AI(discord.Cog, name="ai"):
+class AI(commands.Cog, name="ai"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.ai_client = OpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
@@ -2977,7 +2978,7 @@ class AI(discord.Cog, name="ai"):
 
 # ─── HELP COG ────────────────────────────────────────────────────────────────
 
-class Help(discord.Cog, name="help"):
+class Help(commands.Cog, name="help"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -3045,7 +3046,7 @@ class Help(discord.Cog, name="help"):
 # The groups are defined here for the tree to register properly.
 # Note: The actual command implementations are in their respective cogs.
 
-class GroupCog(discord.Cog):
+class GroupCog(commands.Cog):
     """Container cog for command groups that don't need their own cog."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -3053,7 +3054,7 @@ class GroupCog(discord.Cog):
 
 # ─── ERROR HANDLER ───────────────────────────────────────────────────────────
 
-class CommandErrorHandler(discord.Cog):
+class CommandErrorHandler(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
