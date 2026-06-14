@@ -10,6 +10,10 @@ import io
 import json
 import asyncio
 import aiohttp
+import time
+import uuid
+import logging
+import traceback
 from collections import defaultdict, deque
 from typing import Optional, List
 
@@ -17,28 +21,44 @@ from google import genai
 from pypdf import PdfReader
 from docx import Document
 from discord.utils import utcnow
-from discord.ext import commands
 
 # =========================
-# 🔥 MUSIC SYSTEM IMPORTS (REPLACED with wavelink)
+# 🔥 MUSIC SYSTEM IMPORTS
 # =========================
 import wavelink
-import urllib.parse
-import urllib.request
-import math
 
+# =========================
+# LOGGING CONFIGURATION
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("HackerBot")
+
+# =========================
+# ENVIRONMENT CONFIGURATION
+# =========================
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OWNER_ID = int(os.getenv("OWNER_ID"))
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 
-# Lavalink configuration
+# Lavalink configuration via environment variables
 LAVALINK_HOST = os.getenv("LAVALINK_HOST", "localhost")
 LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
 LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
+LAVALINK_URI = os.getenv("LAVALINK_URI", f"http://{LAVALINK_HOST}:{LAVALINK_PORT}")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-3.5-flash"
+# Gemini client
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+MODEL_NAME = "gemini-1.5-flash"
 
+# =========================
+# DISCORD BOT SETUP
+# =========================
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -47,493 +67,490 @@ intents.presences = True
 intents.voice_states = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 START_TIME = datetime.now()
 
 # =========================
-# DATABASE
+# ASYNC DATABASE WRAPPER
 # =========================
-conn = sqlite3.connect("moderation.db")
-c = conn.cursor()
+class AsyncDatabase:
+    """Thread-safe async database wrapper to prevent 'database is locked' errors."""
+    
+    def __init__(self, db_path: str = "moderation.db"):
+        self.db_path = db_path
+        self._lock = asyncio.Lock()
+        self._conn = None
+        self._loop = None
+    
+    async def connect(self):
+        """Initialize the database connection."""
+        self._conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
+        self._conn.execute("PRAGMA journal_mode=WAL;")
+        self._conn.execute("PRAGMA busy_timeout=5000;")
+        self._conn.execute("PRAGMA synchronous=NORMAL;")
+        self._loop = asyncio.get_event_loop()
+        await self._create_tables()
+        logger.info("✅ Database connected (WAL mode)")
+    
+    async def _create_tables(self):
+        """Create all required tables."""
+        queries = [
+            """CREATE TABLE IF NOT EXISTS warnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER, guild_id INTEGER,
+                reason TEXT, moderator TEXT, timestamp TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS memory (
+                user_id INTEGER PRIMARY KEY, user_name TEXT, bot_name TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS tickets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, user_id INTEGER,
+                channel_id INTEGER, status TEXT DEFAULT 'open', created_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS giveaways (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, channel_id INTEGER,
+                prize TEXT, winner_count INTEGER,
+                end_time TEXT, host_id INTEGER, message_id INTEGER
+            )""",
+            """CREATE TABLE IF NOT EXISTS reaction_roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, channel_id INTEGER,
+                message_id INTEGER, emoji TEXT, role_id INTEGER
+            )""",
+            """CREATE TABLE IF NOT EXISTS leveling (
+                user_id INTEGER, guild_id INTEGER,
+                xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
+                PRIMARY KEY (user_id, guild_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS economy (
+                user_id INTEGER, guild_id INTEGER,
+                balance INTEGER DEFAULT 0, bank INTEGER DEFAULT 0,
+                daily_streak INTEGER DEFAULT 0, last_daily TEXT,
+                PRIMARY KEY (user_id, guild_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS custom_commands (
+                guild_id INTEGER, name TEXT, response TEXT,
+                PRIMARY KEY (guild_id, name)
+            )""",
+            """CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, name TEXT, url TEXT, added_by INTEGER
+            )""",
+            """CREATE TABLE IF NOT EXISTS birthdays (
+                user_id INTEGER PRIMARY KEY, guild_id INTEGER,
+                date TEXT, year INTEGER
+            )""",
+            """CREATE TABLE IF NOT EXISTS polls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, channel_id INTEGER,
+                question TEXT, options TEXT, votes TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, user_id INTEGER, username TEXT,
+                event_type TEXT, details TEXT, timestamp TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS daily_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, date TEXT, summary TEXT,
+                total_messages INTEGER, most_active_user_id INTEGER,
+                top_topic TEXT, generated_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS message_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, channel_id INTEGER, user_id INTEGER,
+                date TEXT, count INTEGER DEFAULT 0, topics TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS ai_conversations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, channel_id INTEGER, user_id INTEGER,
+                role TEXT, content TEXT, timestamp TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS ai_memories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, user_id INTEGER, key TEXT, value TEXT,
+                importance INTEGER DEFAULT 1, created_at TEXT, last_accessed TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS ai_personality (
+                guild_id INTEGER, user_id INTEGER,
+                trait TEXT, value TEXT,
+                PRIMARY KEY (guild_id, user_id, trait)
+            )""",
+            """CREATE TABLE IF NOT EXISTS music_favorites (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER, guild_id INTEGER,
+                title TEXT, url TEXT, added_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS music_playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER, name TEXT, user_id INTEGER, created_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS music_playlist_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER, title TEXT, url TEXT,
+                position INTEGER, added_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS levels (
+                user_id INTEGER, guild_id INTEGER,
+                xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
+                total_messages INTEGER DEFAULT 0, last_message INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id)
+            )""",
+        ]
+        for query in queries:
+            self._conn.execute(query)
+        self._conn.commit()
+    
+    async def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Execute a query with the async lock."""
+        async with self._lock:
+            return await self._loop.run_in_executor(None, lambda: self._conn.execute(query, params))
+    
+    async def commit(self):
+        """Commit with the async lock."""
+        async with self._lock:
+            await self._loop.run_in_executor(None, self._conn.commit)
+    
+    async def fetchone(self, query: str, params: tuple = ()):
+        """Fetch one row."""
+        cursor = await self.execute(query, params)
+        return cursor.fetchone()
+    
+    async def fetchall(self, query: str, params: tuple = ()):
+        """Fetch all rows."""
+        cursor = await self.execute(query, params)
+        return cursor.fetchall()
+    
+    async def close(self):
+        """Close the connection."""
+        if self._conn:
+            self._conn.close()
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS warnings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    guild_id INTEGER,
-    reason TEXT,
-    moderator TEXT,
-    timestamp TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS memory (
-    user_id INTEGER PRIMARY KEY,
-    user_name TEXT,
-    bot_name TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS tickets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    user_id INTEGER,
-    channel_id INTEGER,
-    status TEXT DEFAULT 'open',
-    created_at TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS giveaways (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    channel_id INTEGER,
-    prize TEXT,
-    winner_count INTEGER,
-    end_time TEXT,
-    host_id INTEGER,
-    message_id INTEGER
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS reaction_roles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    channel_id INTEGER,
-    message_id INTEGER,
-    emoji TEXT,
-    role_id INTEGER
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS leveling (
-    user_id INTEGER,
-    guild_id INTEGER,
-    xp INTEGER DEFAULT 0,
-    level INTEGER DEFAULT 1,
-    PRIMARY KEY (user_id, guild_id)
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS economy (
-    user_id INTEGER,
-    guild_id INTEGER,
-    balance INTEGER DEFAULT 0,
-    bank INTEGER DEFAULT 0,
-    daily_streak INTEGER DEFAULT 0,
-    last_daily TEXT,
-    PRIMARY KEY (user_id, guild_id)
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS custom_commands (
-    guild_id INTEGER,
-    name TEXT,
-    response TEXT,
-    PRIMARY KEY (guild_id, name)
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS playlists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    name TEXT,
-    url TEXT,
-    added_by INTEGER
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS birthdays (
-    user_id INTEGER PRIMARY KEY,
-    guild_id INTEGER,
-    date TEXT,
-    year INTEGER
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS polls (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    channel_id INTEGER,
-    question TEXT,
-    options TEXT,
-    votes TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    user_id INTEGER,
-    username TEXT,
-    event_type TEXT,
-    details TEXT,
-    timestamp TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS daily_summaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    date TEXT,
-    summary TEXT,
-    total_messages INTEGER,
-    most_active_user_id INTEGER,
-    top_topic TEXT,
-    generated_at TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS message_stats (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    channel_id INTEGER,
-    user_id INTEGER,
-    date TEXT,
-    count INTEGER DEFAULT 0,
-    topics TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS ai_conversations (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    channel_id INTEGER,
-    user_id INTEGER,
-    role TEXT,
-    content TEXT,
-    timestamp TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS ai_memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    user_id INTEGER,
-    key TEXT,
-    value TEXT,
-    importance INTEGER DEFAULT 1,
-    created_at TEXT,
-    last_accessed TEXT
-)
-""")
-
-c.execute("""
-CREATE TABLE IF NOT EXISTS ai_personality (
-    guild_id INTEGER,
-    user_id INTEGER,
-    trait TEXT,
-    value TEXT,
-    PRIMARY KEY (guild_id, user_id, trait)
-)
-""")
+db = AsyncDatabase()
 
 # =========================
-# 🎵 MUSIC SYSTEM TABLES
+# DATABASE HELPER FUNCTIONS (async)
 # =========================
-c.execute("""
-CREATE TABLE IF NOT EXISTS music_favorites (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    guild_id INTEGER,
-    title TEXT,
-    url TEXT,
-    added_at TEXT
-)
-""")
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS music_playlists (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER,
-    name TEXT,
-    user_id INTEGER,
-    created_at TEXT
-)
-""")
+async def add_warning(user_id, guild_id, reason, moderator=None):
+    await db.execute(
+        "INSERT INTO warnings (user_id, guild_id, reason, moderator, timestamp) VALUES (?, ?, ?, ?, ?)",
+        (user_id, guild_id, reason, moderator, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    await db.commit()
 
-c.execute("""
-CREATE TABLE IF NOT EXISTS music_playlist_tracks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    playlist_id INTEGER,
-    title TEXT,
-    url TEXT,
-    position INTEGER,
-    added_at TEXT
-)
-""")
+async def get_warnings(user_id, guild_id):
+    return await db.fetchall(
+        "SELECT id, reason, timestamp FROM warnings WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
 
-conn.commit()
+async def remove_warning(warning_id):
+    await db.execute("DELETE FROM warnings WHERE id=?", (warning_id,))
+    await db.commit()
 
-# =========================
-# HISTORY FUNCTIONS
-# =========================
-def add_history(guild_id, user_id, username, event_type, details):
-    c.execute("""
-    INSERT INTO history (guild_id, user_id, username, event_type, details, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        guild_id,
-        user_id,
-        username,
-        event_type,
-        details,
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ))
-    conn.commit()
+async def add_history(guild_id, user_id, username, event_type, details):
+    await db.execute(
+        """INSERT INTO history (guild_id, user_id, username, event_type, details, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (guild_id, user_id, username, event_type, details,
+         datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    )
+    await db.commit()
 
-def get_user_history(user_id, guild_id, limit=20):
-    c.execute("""
-    SELECT event_type, details, timestamp
-    FROM history
-    WHERE user_id=? AND guild_id=?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (user_id, guild_id, limit))
-    return c.fetchall()
+async def get_user_history(user_id, guild_id, limit=20):
+    return await db.fetchall(
+        """SELECT event_type, details, timestamp FROM history
+           WHERE user_id=? AND guild_id=? ORDER BY id DESC LIMIT ?""",
+        (user_id, guild_id, limit)
+    )
 
-def get_guild_history_by_date(guild_id, date_str, limit=50):
-    c.execute("""
-    SELECT event_type, details, timestamp, username, user_id
-    FROM history
-    WHERE guild_id=? AND timestamp LIKE ?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (guild_id, f"{date_str}%", limit))
-    return c.fetchall()
+async def get_guild_history_by_date(guild_id, date_str, limit=50):
+    return await db.fetchall(
+        """SELECT event_type, details, timestamp, username, user_id FROM history
+           WHERE guild_id=? AND timestamp LIKE ? ORDER BY id DESC LIMIT ?""",
+        (guild_id, f"{date_str}%", limit)
+    )
 
-def get_guild_history_by_type(guild_id, event_type, limit=20):
-    c.execute("""
-    SELECT event_type, details, timestamp, username, user_id
-    FROM history
-    WHERE guild_id=? AND event_type=?
-    ORDER BY id DESC
-    LIMIT ?
-    """, (guild_id, event_type, limit))
-    return c.fetchall()
+async def get_guild_history_by_type(guild_id, event_type, limit=20):
+    return await db.fetchall(
+        """SELECT event_type, details, timestamp, username, user_id FROM history
+           WHERE guild_id=? AND event_type=? ORDER BY id DESC LIMIT ?""",
+        (guild_id, event_type, limit)
+    )
 
-def get_history_search(guild_id, search_term, limit=20):
-    c.execute("""
-    SELECT event_type, details, timestamp, username, user_id
-    FROM history
-    WHERE guild_id=? AND (details LIKE ? OR username LIKE ?)
-    ORDER BY id DESC
-    LIMIT ?
-    """, (guild_id, f"%{search_term}%", f"%{search_term}%", limit))
-    return c.fetchall()
+async def get_history_search(guild_id, search_term, limit=20):
+    return await db.fetchall(
+        """SELECT event_type, details, timestamp, username, user_id FROM history
+           WHERE guild_id=? AND (details LIKE ? OR username LIKE ?)
+           ORDER BY id DESC LIMIT ?""",
+        (guild_id, f"%{search_term}%", f"%{search_term}%", limit)
+    )
 
-# =========================
-# MESSAGE STATS FUNCTIONS
-# =========================
-def log_message(guild_id, channel_id, user_id, content):
+async def log_message(guild_id, channel_id, user_id, content):
     today = datetime.now().strftime("%Y-%m-%d")
-    c.execute("""
-    INSERT INTO message_stats (guild_id, channel_id, user_id, date, count, topics)
-    VALUES (?, ?, ?, ?, 1, ?)
-    ON CONFLICT(guild_id, channel_id, user_id, date)
-    DO UPDATE SET count = count + 1
-    """, (guild_id, channel_id, user_id, today, ""))
-    conn.commit()
+    await db.execute(
+        """INSERT INTO message_stats (guild_id, channel_id, user_id, date, count, topics)
+           VALUES (?, ?, ?, ?, 1, '')
+           ON CONFLICT(guild_id, channel_id, user_id, date)
+           DO UPDATE SET count = count + 1""",
+        (guild_id, channel_id, user_id, today)
+    )
+    await db.commit()
 
-def get_channel_stats(guild_id, channel_id, days=7):
+async def get_channel_stats(guild_id, channel_id, days=7):
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    c.execute("""
-    SELECT date, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=? AND channel_id=? AND date BETWEEN ? AND ?
-    GROUP BY date
-    ORDER BY date
-    """, (guild_id, channel_id, start_date, end_date))
-    return c.fetchall()
+    return await db.fetchall(
+        """SELECT date, SUM(count) as total FROM message_stats
+           WHERE guild_id=? AND channel_id=? AND date BETWEEN ? AND ?
+           GROUP BY date ORDER BY date""",
+        (guild_id, channel_id, start_date, end_date)
+    )
 
-def get_top_channels(guild_id, days=7):
+async def get_top_channels(guild_id, days=7):
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    c.execute("""
-    SELECT channel_id, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=? AND date BETWEEN ? AND ?
-    GROUP BY channel_id
-    ORDER BY total DESC
-    LIMIT 5
-    """, (guild_id, start_date, end_date))
-    return c.fetchall()
+    return await db.fetchall(
+        """SELECT channel_id, SUM(count) as total FROM message_stats
+           WHERE guild_id=? AND date BETWEEN ? AND ?
+           GROUP BY channel_id ORDER BY total DESC LIMIT 5""",
+        (guild_id, start_date, end_date)
+    )
 
-def get_most_active_user(guild_id, days=7):
+async def get_most_active_user(guild_id, days=7):
     end_date = datetime.now().strftime("%Y-%m-%d")
     start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    c.execute("""
-    SELECT user_id, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=? AND date BETWEEN ? AND ?
-    GROUP BY user_id
-    ORDER BY total DESC
-    LIMIT 1
-    """, (guild_id, start_date, end_date))
-    return c.fetchone()
+    return await db.fetchone(
+        """SELECT user_id, SUM(count) as total FROM message_stats
+           WHERE guild_id=? AND date BETWEEN ? AND ?
+           GROUP BY user_id ORDER BY total DESC LIMIT 1""",
+        (guild_id, start_date, end_date)
+    )
 
-def get_busiest_day(guild_id):
-    c.execute("""
-    SELECT date, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=?
-    GROUP BY date
-    ORDER BY total DESC
-    LIMIT 1
-    """, (guild_id,))
-    return c.fetchone()
+async def get_busiest_day(guild_id):
+    return await db.fetchone(
+        """SELECT date, SUM(count) as total FROM message_stats
+           WHERE guild_id=? GROUP BY date ORDER BY total DESC LIMIT 1""",
+        (guild_id,)
+    )
 
-def get_topic_for_date(guild_id, date_str, channel_id=None):
+async def get_topic_for_date(guild_id, date_str, channel_id=None):
     if channel_id:
-        c.execute("""
-        SELECT details FROM history
-        WHERE guild_id=? AND timestamp LIKE ? AND event_type IN ('MESSAGE', 'TOPIC')
-        ORDER BY id DESC LIMIT 20
-        """, (guild_id, f"{date_str}%"))
+        return await db.fetchall(
+            """SELECT details FROM history WHERE guild_id=? AND timestamp LIKE ?
+               AND event_type IN ('MESSAGE', 'TOPIC') ORDER BY id DESC LIMIT 20""",
+            (guild_id, f"{date_str}%")
+        )
     else:
-        c.execute("""
-        SELECT details FROM history
-        WHERE guild_id=? AND timestamp LIKE ? AND event_type IN ('MESSAGE', 'TOPIC')
-        ORDER BY id DESC LIMIT 50
-        """, (guild_id, f"{date_str}%"))
-    return c.fetchall()
+        return await db.fetchall(
+            """SELECT details FROM history WHERE guild_id=? AND timestamp LIKE ?
+               AND event_type IN ('MESSAGE', 'TOPIC') ORDER BY id DESC LIMIT 50""",
+            (guild_id, f"{date_str}%")
+        )
 
-def count_events_for_date(guild_id, date_str, event_type):
-    c.execute("""
-    SELECT COUNT(*) FROM history
-    WHERE guild_id=? AND timestamp LIKE ? AND event_type=?
-    """, (guild_id, f"{date_str}%", event_type))
-    return c.fetchone()[0]
+async def count_events_for_date(guild_id, date_str, event_type):
+    result = await db.fetchone(
+        "SELECT COUNT(*) FROM history WHERE guild_id=? AND timestamp LIKE ? AND event_type=?",
+        (guild_id, f"{date_str}%", event_type)
+    )
+    return result[0] if result else 0
 
-# =========================
-# MEMORY FUNCTIONS
-# =========================
-def get_memory(user_id):
-    c.execute("SELECT user_name, bot_name FROM memory WHERE user_id=?", (user_id,))
-    return c.fetchone()
+async def get_memory(user_id):
+    return await db.fetchone("SELECT user_name, bot_name FROM memory WHERE user_id=?", (user_id,))
 
-def save_memory(user_id, user_name=None, bot_name=None):
-    existing = get_memory(user_id)
+async def save_memory(user_id, user_name=None, bot_name=None):
+    existing = await get_memory(user_id)
     if existing:
         user_name = user_name or existing[0]
         bot_name = bot_name or existing[1]
-        c.execute("UPDATE memory SET user_name=?, bot_name=? WHERE user_id=?", (user_name, bot_name, user_id))
+        await db.execute("UPDATE memory SET user_name=?, bot_name=? WHERE user_id=?", (user_name, bot_name, user_id))
     else:
-        c.execute("INSERT INTO memory (user_id, user_name, bot_name) VALUES (?, ?, ?)", (user_id, user_name, bot_name))
-    conn.commit()
+        await db.execute("INSERT INTO memory (user_id, user_name, bot_name) VALUES (?, ?, ?)", (user_id, user_name, bot_name))
+    await db.commit()
 
-def save_ai_memory(guild_id, user_id, key, value, importance=1):
-    c.execute("""
-    INSERT INTO ai_memories (guild_id, user_id, key, value, importance, created_at, last_accessed)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(guild_id, user_id, key)
-    DO UPDATE SET value=excluded.value, importance=excluded.importance, last_accessed=excluded.last_accessed
-    """, (guild_id, user_id, key, value, importance, datetime.now().isoformat(), datetime.now().isoformat()))
-    conn.commit()
+async def save_ai_memory(guild_id, user_id, key, value, importance=1):
+    await db.execute(
+        """INSERT INTO ai_memories (guild_id, user_id, key, value, importance, created_at, last_accessed)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(guild_id, user_id, key)
+           DO UPDATE SET value=excluded.value, importance=excluded.importance, last_accessed=excluded.last_accessed""",
+        (guild_id, user_id, key, value, importance, datetime.now().isoformat(), datetime.now().isoformat())
+    )
+    await db.commit()
 
-def get_ai_memories(guild_id, user_id, limit=20):
-    c.execute("""
-    SELECT key, value, importance, created_at, last_accessed
-    FROM ai_memories
-    WHERE guild_id=? AND user_id=?
-    ORDER BY importance DESC, last_accessed DESC
-    LIMIT ?
-    """, (guild_id, user_id, limit))
-    memories = c.fetchall()
-    c.execute("""
-    UPDATE ai_memories SET last_accessed=? WHERE guild_id=? AND user_id=?
-    """, (datetime.now().isoformat(), guild_id, user_id))
-    conn.commit()
+async def get_ai_memories(guild_id, user_id, limit=20):
+    memories = await db.fetchall(
+        """SELECT key, value, importance, created_at, last_accessed FROM ai_memories
+           WHERE guild_id=? AND user_id=? ORDER BY importance DESC, last_accessed DESC LIMIT ?""",
+        (guild_id, user_id, limit)
+    )
+    await db.execute(
+        "UPDATE ai_memories SET last_accessed=? WHERE guild_id=? AND user_id=?",
+        (datetime.now().isoformat(), guild_id, user_id)
+    )
+    await db.commit()
     return memories
 
-def get_all_guild_memories(guild_id, limit=50):
-    c.execute("""
-    SELECT user_id, key, value, importance
-    FROM ai_memories
-    WHERE guild_id=?
-    ORDER BY importance DESC, last_accessed DESC
-    LIMIT ?
-    """, (guild_id, limit))
-    return c.fetchall()
+async def get_all_guild_memories(guild_id, limit=50):
+    return await db.fetchall(
+        """SELECT user_id, key, value, importance FROM ai_memories
+           WHERE guild_id=? ORDER BY importance DESC, last_accessed DESC LIMIT ?""",
+        (guild_id, limit)
+    )
 
-def save_conversation(guild_id, channel_id, user_id, role, content):
-    c.execute("""
-    INSERT INTO ai_conversations (guild_id, channel_id, user_id, role, content, timestamp)
-    VALUES (?, ?, ?, ?, ?, ?)
-    """, (guild_id, channel_id, user_id, role, content[:1000], datetime.now().isoformat()))
-    conn.commit()
+async def save_conversation(guild_id, channel_id, user_id, role, content):
+    await db.execute(
+        "INSERT INTO ai_conversations (guild_id, channel_id, user_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+        (guild_id, channel_id, user_id, role, content[:1000], datetime.now().isoformat())
+    )
+    await db.commit()
 
-def get_recent_conversation(guild_id, channel_id, user_id=None, limit=15):
+async def get_recent_conversation(guild_id, channel_id, user_id=None, limit=15):
     if user_id:
-        c.execute("""
-        SELECT role, content, timestamp, user_id
-        FROM ai_conversations
-        WHERE guild_id=? AND channel_id=? AND user_id=?
-        ORDER BY id DESC LIMIT ?
-        """, (guild_id, channel_id, user_id, limit))
+        results = await db.fetchall(
+            """SELECT role, content, timestamp, user_id FROM ai_conversations
+               WHERE guild_id=? AND channel_id=? AND user_id=? ORDER BY id DESC LIMIT ?""",
+            (guild_id, channel_id, user_id, limit)
+        )
     else:
-        c.execute("""
-        SELECT role, content, timestamp, user_id
-        FROM ai_conversations
-        WHERE guild_id=? AND channel_id=?
-        ORDER BY id DESC LIMIT ?
-        """, (guild_id, channel_id, limit))
-    return list(reversed(c.fetchall()))
+        results = await db.fetchall(
+            """SELECT role, content, timestamp, user_id FROM ai_conversations
+               WHERE guild_id=? AND channel_id=? ORDER BY id DESC LIMIT ?""",
+            (guild_id, channel_id, limit)
+        )
+    return list(reversed(results))
 
-def save_personality_trait(guild_id, user_id, trait, value):
-    c.execute("""
-    INSERT INTO ai_personality (guild_id, user_id, trait, value)
-    VALUES (?, ?, ?, ?)
-    ON CONFLICT(guild_id, user_id, trait)
-    DO UPDATE SET value=excluded.value
-    """, (guild_id, user_id, trait, value))
-    conn.commit()
+async def save_personality_trait(guild_id, user_id, trait, value):
+    await db.execute(
+        """INSERT INTO ai_personality (guild_id, user_id, trait, value)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(guild_id, user_id, trait)
+           DO UPDATE SET value=excluded.value""",
+        (guild_id, user_id, trait, value)
+    )
+    await db.commit()
 
-def get_user_personality(guild_id, user_id):
-    c.execute("""
-    SELECT trait, value FROM ai_personality
-    WHERE guild_id=? AND user_id=?
-    """, (guild_id, user_id))
-    return c.fetchall()
+async def get_user_personality(guild_id, user_id):
+    return await db.fetchall(
+        "SELECT trait, value FROM ai_personality WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id)
+    )
 
+async def get_balance_db(user_id, guild_id):
+    result = await db.fetchone(
+        "SELECT balance, bank FROM economy WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
+    if result:
+        return {'wallet': result[0], 'bank': result[1]}
+    await db.execute(
+        "INSERT INTO economy (user_id, guild_id, balance, bank) VALUES (?, ?, 0, 0)",
+        (user_id, guild_id)
+    )
+    await db.commit()
+    return {'wallet': 0, 'bank': 0}
+
+async def update_balance_db(user_id, guild_id, amount, account='wallet'):
+    await db.execute(
+        f"UPDATE economy SET {account} = {account} + ? WHERE user_id=? AND guild_id=?",
+        (amount, user_id, guild_id)
+    )
+    await db.commit()
+
+async def get_balance_simple(user_id):
+    result = await db.fetchone(
+        "SELECT wallet, bank FROM economy WHERE user_id=?",
+        (user_id,)
+    )
+    if result:
+        return result
+    await db.execute(
+        "INSERT INTO economy (user_id, wallet, bank) VALUES (?, 0, 0)",
+        (user_id,)
+    )
+    await db.commit()
+    return (0, 0)
+
+async def add_xp_db(user_id, guild_id, xp_gain, now_ts):
+    result = await db.fetchone(
+        "SELECT xp, level, total_messages, last_message FROM levels WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
+    if result:
+        xp, level, total_messages, last_message = result
+        if now_ts - last_message < 60:
+            return None
+        xp += xp_gain
+        total_messages += 1
+        needed = 100 + (level * 50)
+        if xp >= needed:
+            level += 1
+            xp = 0
+            await db.execute(
+                "UPDATE levels SET xp=?, level=?, total_messages=?, last_message=? WHERE user_id=? AND guild_id=?",
+                (xp, level, total_messages, now_ts, user_id, guild_id)
+            )
+            await db.commit()
+            return level
+        else:
+            await db.execute(
+                "UPDATE levels SET xp=?, total_messages=?, last_message=? WHERE user_id=? AND guild_id=?",
+                (xp, total_messages, now_ts, user_id, guild_id)
+            )
+            await db.commit()
+            return None
+    else:
+        await db.execute(
+            "INSERT INTO levels (user_id, guild_id, xp, level, total_messages, last_message) VALUES (?, ?, ?, 1, 1, ?)",
+            (user_id, guild_id, xp_gain, now_ts)
+        )
+        await db.commit()
+        return None
+
+# =========================
+# LOG FUNCTION
+# =========================
+async def log_to_channel(guild, embed_or_text):
+    channel = discord.utils.get(guild.text_channels, name="mod-logs")
+    if channel:
+        if isinstance(embed_or_text, discord.Embed):
+            await channel.send(embed=embed_or_text)
+        else:
+            await channel.send(f"📜 {embed_or_text}")
+
+async def log(guild, text):
+    await log_to_channel(guild, text)
+
+# =========================
+# AI CONTEXT BUILDING
+# =========================
 async def build_ai_context(guild_id, channel_id, user_id, username, message_content):
-    mem = get_memory(user_id)
+    mem = await get_memory(user_id)
     user_name = mem[0] if mem else username
     bot_name = mem[1] if mem else "AI Bot"
     
-    ai_memories = get_ai_memories(guild_id, user_id)
-    traits = get_user_personality(guild_id, user_id)
-    recent_msgs = get_recent_conversation(guild_id, channel_id, limit=10)
-    user_events = get_user_history(user_id, guild_id, limit=5)
+    ai_memories = await get_ai_memories(guild_id, user_id)
+    traits = await get_user_personality(guild_id, user_id)
+    recent_msgs = await get_recent_conversation(guild_id, channel_id, limit=10)
+    user_events = await get_user_history(user_id, guild_id, limit=5)
     
-    c.execute("SELECT level FROM leveling WHERE user_id=? AND guild_id=?", (user_id, guild_id))
-    level_row = c.fetchone()
-    level = level_row[0] if level_row else 0
+    result = await db.fetchone(
+        "SELECT level FROM leveling WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
+    level = result[0] if result else 0
     
-    bal = get_balance(user_id, guild_id)
+    bal = await get_balance_db(user_id, guild_id)
     
     await extract_memory_facts(guild_id, user_id, message_content)
     
     context_parts = []
     context_parts.append(f"User's name: {user_name}")
     context_parts.append(f"Bot's name: {bot_name}")
-    context_parts.append(f"Server: {bot.get_guild(guild_id).name if bot.get_guild(guild_id) else 'Unknown'}")
+    guild_obj = bot.get_guild(guild_id)
+    context_parts.append(f"Server: {guild_obj.name if guild_obj else 'Unknown'}")
     context_parts.append(f"User's Level: {level}")
     context_parts.append(f"User's Wallet Balance: ${bal['wallet']:,}")
     context_parts.append(f"User's Bank Balance: ${bal['bank']:,}")
@@ -572,16 +589,16 @@ async def extract_memory_facts(guild_id, user_id, message):
     for pattern, key in name_patterns:
         m = re.search(pattern, msg_lower)
         if m and m.group(1).lower() not in ("a", "the", "an", "just", "not", "going", "trying"):
-            save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=5)
+            await save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=5)
             break
     
     age_m = re.search(r"i(?:')?m (\d+) (?:years old|yr old|yo)", msg_lower)
     if age_m:
-        save_ai_memory(guild_id, user_id, "age", age_m.group(1), importance=4)
+        await save_ai_memory(guild_id, user_id, "age", age_m.group(1), importance=4)
     
     loc_m = re.search(r"i(?:')?m (?:from|in) (\w+(?:\s+\w+)?)", msg_lower)
     if loc_m:
-        save_ai_memory(guild_id, user_id, "location", loc_m.group(1).title(), importance=3)
+        await save_ai_memory(guild_id, user_id, "location", loc_m.group(1).title(), importance=3)
     
     hobby_patterns = [
         (r"i (?:like|love|enjoy) (\w+(?: \w+)?)", "hobby"),
@@ -591,12 +608,12 @@ async def extract_memory_facts(guild_id, user_id, message):
     for pattern, key in hobby_patterns:
         m = re.search(pattern, msg_lower)
         if m:
-            save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=2)
+            await save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=2)
     
     mood_m = re.search(r"i(?:')?m (?:feeling|so|very|really) (\w+)", msg_lower)
     if mood_m:
-        save_ai_memory(guild_id, user_id, "current_mood", mood_m.group(1), importance=1)
-        save_personality_trait(guild_id, user_id, "recent_mood", mood_m.group(1))
+        await save_ai_memory(guild_id, user_id, "current_mood", mood_m.group(1), importance=1)
+        await save_personality_trait(guild_id, user_id, "recent_mood", mood_m.group(1))
     
     pref_patterns = [
         (r"i (?:don't|do not) like (\w+(?: \w+)?)", "dislikes"),
@@ -605,16 +622,19 @@ async def extract_memory_facts(guild_id, user_id, message):
     for pattern, default_key in pref_patterns:
         m = re.search(pattern, msg_lower)
         if m:
-            save_ai_memory(guild_id, user_id, default_key, m.group(1).title(), importance=2)
+            await save_ai_memory(guild_id, user_id, default_key, m.group(1).title(), importance=2)
     
     work_m = re.search(r"i (?:work|study) (?:at|in|as) (\w+(?: \w+)?)", msg_lower)
     if work_m:
-        save_ai_memory(guild_id, user_id, "occupation", work_m.group(1).title(), importance=3)
+        await save_ai_memory(guild_id, user_id, "occupation", work_m.group(1).title(), importance=3)
 
 _ai_response_cache = {}
 _ai_rate_limit = defaultdict(float)
 
 async def get_ai_response(prompt, temperature=0.7, max_retries=2):
+    if not client:
+        return "⚠️ AI is not configured (missing GEMINI_API_KEY)."
+    
     cache_key = hash(prompt[:500])
     
     if cache_key in _ai_response_cache:
@@ -628,10 +648,7 @@ async def get_ai_response(prompt, temperature=0.7, max_retries=2):
             response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=prompt,
-                config={
-                    "temperature": temperature,
-                    "max_output_tokens": 500,
-                }
+                config={"temperature": temperature, "max_output_tokens": 500}
             )
             reply = response.text
             
@@ -645,6 +662,7 @@ async def get_ai_response(prompt, temperature=0.7, max_retries=2):
             
         except Exception as e:
             last_error = e
+            logger.error(f"AI response attempt {attempt+1} failed: {e}")
             await asyncio.sleep(0.5 * (attempt + 1))
     
     return f"⚠️ AI Error: {last_error}"
@@ -652,6 +670,9 @@ async def get_ai_response(prompt, temperature=0.7, max_retries=2):
 async def summarize_conversation(conversation_text):
     if len(conversation_text) < 500:
         return conversation_text
+    
+    if not client:
+        return conversation_text[-500:]
     
     prompt = f"""Summarize this conversation concisely, keeping key facts, preferences, and topics discussed:
 
@@ -663,40 +684,30 @@ Summary:"""
         response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
         return response.text[:500]
     except Exception as e:
+        logger.error(f"Summarize error: {e}")
         return conversation_text[-500:]
 
-def add_warning(user_id, guild_id, reason, moderator=None):
-    c.execute("INSERT INTO warnings (user_id, guild_id, reason, moderator, timestamp) VALUES (?, ?, ?, ?, ?)",
-              (user_id, guild_id, reason, moderator, datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
-    conn.commit()
-
-def get_warnings(user_id, guild_id):
-    c.execute("SELECT id, reason, timestamp FROM warnings WHERE user_id=? AND guild_id=?", (user_id, guild_id))
-    return c.fetchall()
-
-def remove_warning(warning_id):
-    c.execute("DELETE FROM warnings WHERE id=?", (warning_id,))
-    conn.commit()
-
 # =========================
-# LEVELING SYSTEM
+# XP SYSTEM
 # =========================
 XP_COOLDOWN = {}
 
 async def add_xp(user_id, guild_id):
     if guild_id is None:
-        return
+        return None
     key = f"{user_id}-{guild_id}"
     now = datetime.now()
     if key in XP_COOLDOWN:
         if (now - XP_COOLDOWN[key]).seconds < 60:
-            return
+            return None
     XP_COOLDOWN[key] = now
     
     xp_gain = random.randint(15, 25)
     
-    c.execute("SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?", (user_id, guild_id))
-    result = c.fetchone()
+    result = await db.fetchone(
+        "SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
     
     if result:
         xp, level = result
@@ -705,53 +716,46 @@ async def add_xp(user_id, guild_id):
         if xp >= xp_needed:
             level += 1
             xp = 0
-            c.execute("UPDATE leveling SET xp=?, level=? WHERE user_id=? AND guild_id=?", (xp, level, user_id, guild_id))
-            conn.commit()
+            await db.execute(
+                "UPDATE leveling SET xp=?, level=? WHERE user_id=? AND guild_id=?",
+                (xp, level, user_id, guild_id)
+            )
+            await db.commit()
             return level
         else:
-            c.execute("UPDATE leveling SET xp=? WHERE user_id=? AND guild_id=?", (xp, user_id, guild_id))
+            await db.execute(
+                "UPDATE leveling SET xp=? WHERE user_id=? AND guild_id=?",
+                (xp, user_id, guild_id)
+            )
     else:
-        c.execute("INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, ?, 1)", (user_id, guild_id, xp_gain))
+        await db.execute(
+            "INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, ?, 1)",
+            (user_id, guild_id, xp_gain)
+        )
     
-    conn.commit()
+    await db.commit()
     return None
 
-# =========================
-# ECONOMY SYSTEM
-# =========================
-def get_balance(user_id, guild_id):
-    c.execute("SELECT balance, bank FROM economy WHERE user_id=? AND guild_id=?", (user_id, guild_id))
-    result = c.fetchone()
+async def get_balance(user_id, guild_id):
+    result = await db.fetchone(
+        "SELECT balance, bank FROM economy WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
     if result:
         return {'wallet': result[0], 'bank': result[1]}
-    c.execute("INSERT INTO economy (user_id, guild_id, balance, bank) VALUES (?, ?, 0, 0)", (user_id, guild_id))
-    conn.commit()
+    await db.execute(
+        "INSERT INTO economy (user_id, guild_id, balance, bank) VALUES (?, ?, 0, 0)",
+        (user_id, guild_id)
+    )
+    await db.commit()
     return {'wallet': 0, 'bank': 0}
 
-def update_balance(user_id, guild_id, amount, account='wallet'):
-    c.execute("UPDATE economy SET " + account + " = " + account + " + ? WHERE user_id=? AND guild_id=?", (amount, user_id, guild_id))
-    conn.commit()
-
-# =========================
-# LOG SYSTEM
-# =========================
-async def log(guild, text):
-    channel = discord.utils.get(guild.text_channels, name="mod-logs")
-    if channel:
-        await channel.send(f"📜 {text}")
-
-async def log_to_channel(guild, embed):
-    channel = discord.utils.get(guild.text_channels, name="mod-logs")
-    if channel:
-        await channel.send(embed=embed)
-
-# =========================
-# DM MEMORY
-# =========================
-dm_memory = {}
-
-BAD_WORDS = ["badword1", "badword2"]
-INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
+async def update_balance(user_id, guild_id, amount, account='wallet'):
+    await db.execute(
+        f"UPDATE economy SET {account} = {account} + ? WHERE user_id=? AND guild_id=?",
+        (amount, user_id, guild_id)
+    )
+    await db.commit()
 
 # =========================
 # OWNER CHECK
@@ -765,1025 +769,248 @@ def is_owner():
     return app_commands.check(predicate)
 
 # =========================
-# TICKET SYSTEM
+# HELPER FUNCTIONS
 # =========================
-ticket_configs = {}
-
-class TicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    
-    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.green, custom_id="create_ticket")
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        user = interaction.user
-        
-        c.execute("SELECT channel_id FROM tickets WHERE guild_id=? AND user_id=? AND status='open'", (guild.id, user.id))
-        existing = c.fetchone()
-        if existing:
-            channel = guild.get_channel(existing[0])
-            if channel:
-                await interaction.response.send_message(f"You already have an open ticket: {channel.mention}", ephemeral=True)
-                return
-        
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        }
-        
-        staff_roles = [role for role in guild.roles if role.permissions.administrator or role.permissions.manage_channels]
-        for role in staff_roles[:5]:
-            overwrites[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        
-        channel = await guild.create_text_channel(f"ticket-{user.name}", overwrites=overwrites, category=interaction.channel.category)
-        
-        c.execute("INSERT INTO tickets (guild_id, user_id, channel_id, status, created_at) VALUES (?, ?, ?, 'open', ?)",
-                  (guild.id, user.id, channel.id, datetime.now().isoformat()))
-        conn.commit()
-        
-        add_history(guild.id, user.id, str(user), "TICKET_CREATE", f"Created ticket #{channel.name}")
-        
-        embed = discord.Embed(title="🎫 New Ticket", description=f"Ticket created by {user.mention}\nPlease describe your issue.", color=discord.Color.green())
-        await channel.send(embed=embed, view=TicketCloseView(user.id))
-        await interaction.response.send_message(f"Ticket created: {channel.mention}", ephemeral=True)
-
-class TicketCloseView(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=None)
-        self.user_id = user_id
-    
-    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.red, custom_id="close_ticket")
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Only the ticket creator or an admin can close this.", ephemeral=True)
-            return
-        
-        await interaction.response.send_message("Closing ticket in 5 seconds...")
-        await asyncio.sleep(5)
-        
-        c.execute("UPDATE tickets SET status='closed' WHERE channel_id=?", (interaction.channel.id,))
-        conn.commit()
-        
-        await interaction.channel.delete()
-
-# =========================
-# GIVEAWAY SYSTEM
-# =========================
-class GiveawayView(discord.ui.View):
-    def __init__(self, giveaway_id, end_time, winner_count):
-        super().__init__(timeout=None)
-        self.giveaway_id = giveaway_id
-        self.end_time = end_time
-        self.winner_count = winner_count
-        self.entries = []
-    
-    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.blurple, custom_id="enter_giveaway")
-    async def enter_giveaway(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id in self.entries:
-            await interaction.response.send_message("You're already entered!", ephemeral=True)
-            return
-        
-        self.entries.append(interaction.user.id)
-        await interaction.response.send_message("✅ You've entered the giveaway!", ephemeral=True)
-
-# =========================
-# POLL SYSTEM
-# =========================
-class PollView(discord.ui.View):
-    def __init__(self, poll_id, options):
-        super().__init__(timeout=None)
-        self.poll_id = poll_id
-        self.votes = {i: [] for i in range(len(options))}
-        
-        for i, option in enumerate(options):
-            button = discord.ui.Button(label=f"{self._get_emoji(i)} {option}", style=discord.ButtonStyle.secondary, custom_id=f"poll_vote_{poll_id}_{i}")
-            button.callback = self.make_callback(i)
-            self.add_item(button)
-    
-    def _get_emoji(self, index):
-        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-        return emojis[index] if index < len(emojis) else f"{index+1}."
-    
-    def make_callback(self, option_index):
-        async def callback(interaction: discord.Interaction):
-            user_id = interaction.user.id
+async def query_ai(prompt: str) -> str:
+    """Query the AI API for a response."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful Discord bot assistant. Keep responses concise and friendly."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
             
-            for idx in self.votes:
-                if user_id in self.votes[idx]:
-                    self.votes[idx].remove(user_id)
-            
-            self.votes[option_index].append(user_id)
-            
-            c.execute("SELECT votes FROM polls WHERE id=?", (self.poll_id,))
-            result = c.fetchone()
-            if result:
-                votes_data = json.loads(result[0])
-                for idx in votes_data:
-                    if user_id in votes_data[idx]:
-                        votes_data[idx].remove(user_id)
-                votes_data[option_index].append(user_id)
-                c.execute("UPDATE polls SET votes=? WHERE id=?", (json.dumps(votes_data), self.poll_id))
-                conn.commit()
-            
-            await interaction.response.send_message(f"✅ You voted for option {option_index + 1}!", ephemeral=True)
-        
-        return callback
+            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"AI API error: {resp.status} - {error_text}")
+                    return f"AI service returned status {resp.status}"
+    except Exception as e:
+        logger.error(f"AI query error: {e}")
+        return f"AI error: {str(e)}"
+
+def format_duration(ms: int) -> str:
+    """Format milliseconds to a time string."""
+    if ms <= 0:
+        return "Live"
+    seconds = ms // 1000
+    minutes, secs = divmod(seconds, 60)
+    hours, mins = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
 
 # =========================
-# 🎯 BACKGROUND TASKS
+# DM MEMORY
+# =========================
+dm_memory = {}
+
+BAD_WORDS = ["badword1", "badword2"]
+INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
+
+# =========================
+# WELCOME CONFIG
+# =========================
+welcome_configs = {}
+
+# =========================
+# GIVEAWAY TRACKING (in-memory)
+# =========================
+active_giveaways = {}  # guild_id -> list of giveaway dicts
+
+# =========================
+# MUSIC SYSTEM (WAVELINK ONLY - no old MusicPlayer)
+# =========================
+URL_REGEX = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/\S+")
+
+# =========================
+# BACKGROUND TASKS
 # =========================
 @tasks.loop(minutes=1)
 async def check_giveaways():
-    now = datetime.now()
-    c.execute("SELECT * FROM giveaways WHERE end_time < ?", (now.isoformat(),))
-    ended = c.fetchall()
-    for gw in ended:
-        g_id, guild_id, channel_id, prize, winner_count, end_time, host_id, message_id = gw
-        channel = bot.get_channel(channel_id)
-        if channel:
-            try:
-                message = await channel.fetch_message(message_id)
-                if message:
-                    reactions = message.reactions
-                    all_users = []
-                    for reaction in reactions:
-                        async for user in reaction.users():
-                            if user != bot.user:
-                                all_users.append(user)
-                    
-                    if all_users and winner_count > 0:
-                        winners = random.sample(all_users, min(winner_count, len(all_users)))
-                        winner_mentions = ", ".join(w.mention for w in winners)
-                        await channel.send(f"🎉 **Giveaway Ended!**\nPrize: {prize}\nWinners: {winner_mentions}")
-                        
-                        for winner in winners:
-                            try:
-                                await winner.send(f"🎉 You won **{prize}** in {channel.guild.name}!")
-                                add_history(guild_id, winner.id, str(winner), "GIVEAWAY_WIN", f"Won {prize}")
-                            except Exception as e:
-                                pass
-                    else:
-                        await channel.send(f"❌ Giveaway ended but no one entered for **{prize}**")
-            except Exception as e:
-                pass
+    """Check and end expired giveaways."""
+    now_ts = time.time()
+    
+    for guild_id, giveaways in list(active_giveaways.items()):
+        for g in giveaways[:]:
+            if now_ts >= g.get("end_time", 0) and not g.get("ended"):
+                g["ended"] = True
+                try:
+                    await end_giveaway(guild_id, g)
+                except Exception as e:
+                    logger.error(f"Error ending giveaway in guild {guild_id}: {e}")
+
+async def end_giveaway(guild_id: int, g: dict):
+    """End a giveaway and announce winners."""
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return
+    
+    channel = guild.get_channel(g["channel_id"])
+    if not channel:
+        return
+    
+    try:
+        msg = await channel.fetch_message(g["message_id"])
+    except Exception as e:
+        logger.error(f"Could not fetch giveaway message {g['message_id']}: {e}")
+        return
+    
+    entries = g.get("entries", [])
+    
+    if not entries:
+        try:
+            embed = msg.embeds[0]
+            embed.title = "🎉 Giveaway Ended - No Winners"
+            embed.color = discord.Color.red()
+            await msg.edit(embed=embed, view=None)
+        except Exception as e:
+            logger.error(f"Error updating giveaway message: {e}")
+        return
+    
+    winners_count = min(g["winners"], len(entries))
+    winners = random.sample(entries, winners_count)
+    
+    try:
+        embed = msg.embeds[0]
+        embed.title = "🎉 Giveaway Ended"
+        embed.color = discord.Color.red()
+        embed.clear_fields()
+        embed.add_field(name="Winner(s)", value=", ".join(f"<@{w}>" for w in winners), inline=False)
+        embed.add_field(name="Prize", value=g["prize"], inline=False)
+        await msg.edit(embed=embed, view=None)
         
-        c.execute("DELETE FROM giveaways WHERE id=?", (g_id,))
-        conn.commit()
+        await channel.send(f"🎉 Congratulations {' '.join(f'<@{w}>' for w in winners)}! You won **{g['prize']}**!")
+        
+        for winner_id in winners:
+            try:
+                winner = guild.get_member(winner_id)
+                if winner:
+                    await add_history(guild_id, winner_id, str(winner), "GIVEAWAY_WIN", f"Won {g['prize']}")
+            except Exception as e:
+                logger.error(f"Error logging giveaway win for {winner_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error during giveaway conclusion: {e}")
+    
+    # Remove from active list
+    for gid, giveaways in active_giveaways.items():
+        if g in giveaways:
+            giveaways.remove(g)
 
 @tasks.loop(minutes=5)
 async def check_birthdays():
+    """Check for birthdays and announce them."""
     today = datetime.now().strftime("%m-%d")
-    c.execute("SELECT user_id, guild_id FROM birthdays WHERE date=?", (today,))
-    results = c.fetchall()
+    results = await db.fetchall(
+        "SELECT user_id, guild_id FROM birthdays WHERE date=?",
+        (today,)
+    )
     for user_id, guild_id in results:
         guild = bot.get_guild(guild_id)
         if guild:
             channel = discord.utils.get(guild.text_channels, name="general")
             if channel:
-                await channel.send(f"🎂 Happy Birthday <@{user_id}>! 🎉")
-                add_history(guild_id, user_id, str(user_id), "BIRTHDAY", "Birthday announced")
+                try:
+                    await channel.send(f"🎂 Happy Birthday <@{user_id}>! 🎉")
+                    await add_history(guild_id, user_id, str(user_id), "BIRTHDAY", "Birthday announced")
+                except Exception as e:
+                    logger.error(f"Birthday announcement error: {e}")
 
 @tasks.loop(hours=24)
 async def generate_daily_summary():
+    """Generate and post daily server summary."""
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
     
     for guild in bot.guilds:
-        busiest = get_busiest_day(guild.id)
-        most_active = get_most_active_user(guild.id)
-        
-        joins = count_events_for_date(guild.id, yesterday, "JOIN")
-        leaves = count_events_for_date(guild.id, yesterday, "LEAVE")
-        warns = count_events_for_date(guild.id, yesterday, "WARN")
-        deletes = count_events_for_date(guild.id, yesterday, "DELETE")
-        kicks = count_events_for_date(guild.id, yesterday, "KICK")
-        bans = count_events_for_date(guild.id, yesterday, "BAN")
-        
-        c.execute("""
-        SELECT SUM(count) FROM message_stats
-        WHERE guild_id=? AND date=?
-        """, (guild.id, yesterday))
-        total_msgs = c.fetchone()[0] or 0
-        
-        most_active_name = "No one"
-        if most_active:
-            user = guild.get_member(most_active[0])
-            if user:
-                most_active_name = user.display_name
-        
-        summary = (
-            f"📊 **Daily Summary - {yesterday}**\n"
-            f"📝 Total Messages: {total_msgs:,}\n"
-            f"👋 Joins: {joins} | 👋 Leaves: {leaves}\n"
-            f"⚠️ Warnings: {warns} | 🗑️ Deleted: {deletes}\n"
-            f"👢 Kicks: {kicks} | 🔨 Bans: {bans}\n"
-            f"🏆 Most Active: {most_active_name}"
-        )
-        
-        c.execute("""
-        INSERT INTO daily_summaries (guild_id, date, summary, total_messages, most_active_user_id, top_topic, generated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (guild.id, yesterday, summary, total_msgs, most_active[0] if most_active else 0, "", datetime.now().isoformat()))
-        conn.commit()
-        
-        channel = discord.utils.get(guild.text_channels, name="mod-logs")
-        if channel and total_msgs > 0:
-            await channel.send(summary)
+        try:
+            busiest = await get_busiest_day(guild.id)
+            most_active = await get_most_active_user(guild.id)
+            
+            joins = await count_events_for_date(guild.id, yesterday, "JOIN")
+            leaves = await count_events_for_date(guild.id, yesterday, "LEAVE")
+            warns = await count_events_for_date(guild.id, yesterday, "WARN")
+            deletes = await count_events_for_date(guild.id, yesterday, "DELETE")
+            kicks = await count_events_for_date(guild.id, yesterday, "KICK")
+            bans = await count_events_for_date(guild.id, yesterday, "BAN")
+            
+            result = await db.fetchone(
+                "SELECT SUM(count) FROM message_stats WHERE guild_id=? AND date=?",
+                (guild.id, yesterday)
+            )
+            total_msgs = result[0] or 0
+            
+            most_active_name = "No one"
+            if most_active:
+                user = guild.get_member(most_active[0])
+                if user:
+                    most_active_name = user.display_name
+            
+            summary = (
+                f"📊 **Daily Summary - {yesterday}**\n"
+                f"📝 Total Messages: {total_msgs:,}\n"
+                f"👋 Joins: {joins} | 👋 Leaves: {leaves}\n"
+                f"⚠️ Warnings: {warns} | 🗑️ Deleted: {deletes}\n"
+                f"👢 Kicks: {kicks} | 🔨 Bans: {bans}\n"
+                f"🏆 Most Active: {most_active_name}"
+            )
+            
+            await db.execute(
+                """INSERT INTO daily_summaries (guild_id, date, summary, total_messages, most_active_user_id, top_topic, generated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (guild.id, yesterday, summary, total_msgs, most_active[0] if most_active else 0, "", datetime.now().isoformat())
+            )
+            await db.commit()
+            
+            channel = discord.utils.get(guild.text_channels, name="mod-logs")
+            if channel and total_msgs > 0:
+                await channel.send(summary)
+        except Exception as e:
+            logger.error(f"Error generating daily summary for {guild.id}: {e}")
 
 @tasks.loop(hours=6)
 async def consolidate_memories():
+    """Clean up old, low-importance memories."""
     cutoff = (datetime.now() - timedelta(days=30)).isoformat()
-    c.execute("""
-    DELETE FROM ai_memories
-    WHERE importance <= 1 AND last_accessed < ?
-    """, (cutoff,))
-    deleted = c.rowcount
-    conn.commit()
+    await db.execute(
+        "DELETE FROM ai_memories WHERE importance <= 1 AND last_accessed < ?",
+        (cutoff,)
+    )
+    deleted = db._conn.total_changes if db._conn else 0
+    await db.commit()
     if deleted > 0:
-        print(f"🧹 Consolidated {deleted} old memories")
+        logger.info(f"🧹 Consolidated old memories")
 
-# =========================
-# 🎵 MUSIC BACKGROUND TASKS - UPDATED for wavelink
-# =========================
 @tasks.loop(minutes=5)
 async def clean_inactive_players():
-    for guild_id, player in list(music_players.items()):
+    """Disconnect from empty voice channels."""
+    for voice_client in bot.voice_clients:
         try:
-            vc = player.voice_client
-            if not vc or not vc.is_connected():
-                continue
-
-            channel = vc.channel
-            if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
-                if not vc.is_playing() and not vc.is_paused():
-                    await player.disconnect_voice()
-                    music_players.pop(guild_id, None)
-
+            if isinstance(voice_client, wavelink.Player):
+                channel = voice_client.channel
+                if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
+                    if not voice_client.playing and not voice_client.paused:
+                        await voice_client.disconnect()
+                        logger.info(f"Disconnected from empty voice channel in {voice_client.guild.id}")
         except Exception as e:
-            print(f"[clean task error] {e}")
+            logger.error(f"Clean inactive players error: {e}")
 
 # =========================
-# 🎵 LAVALINK / WAVELINK MUSIC SYSTEM (REPLACED yt-dlp)
+# MUSIC CONTROLS VIEW
 # =========================
-
-URL_REGEX = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/\S+")
-
-class LavalinkVoiceClient(discord.VoiceProtocol):
-    """Custom VoiceProtocol that connects discord voice to Lavalink via wavelink."""
-    
-    def __init__(self, client: discord.Client, channel: discord.abc.Connectable):
-        self.client = client
-        self.channel = channel
-        self._voice_server_update_data = {}
-    
-    async def on_voice_server_update(self, data):
-        self._voice_server_update_data.update(data)
-        wavelink_node = wavelink.NodePool.get_node()
-        if wavelink_node:
-            await wavelink_node.update_voice_state(self.channel.guild.id, self.channel.id, self._voice_server_update_data)
-    
-    async def on_voice_state_update(self, data):
-        wavelink_node = wavelink.NodePool.get_node()
-        if wavelink_node:
-            await wavelink_node.update_voice_state(self.channel.guild.id, self.channel.id, data)
-    
-    async def connect(self, *, timeout: float = 20.0, reconnect: bool = False, self_deaf: bool = False, self_mute: bool = False) -> None:
-        guild = self.channel.guild
-        ws = guild._state.ws
-        await ws.voice_state(str(guild.id), str(self.channel.id), self_deaf=self_deaf, self_mute=self_mute)
-    
-    async def disconnect(self, *, force: bool = False) -> None:
-        guild = self.channel.guild
-        ws = guild._state.ws
-        await ws.voice_state(str(guild.id), None)
-        
-        wavelink_node = wavelink.NodePool.get_node()
-        if wavelink_node:
-            await wavelink_node.update_voice_state(guild.id, None, {})
-        
-        self.cleanup()
-
-
-class MusicPlayer:
-    """Manages music playback for a single guild using Lavalink/wavelink."""
-    
-    def __init__(self, bot: commands.Bot, guild_id: int):
-        self.bot = bot
-        self.guild_id = guild_id
-        self.queue = asyncio.Queue()
-        self.queue_history = []
-        self.current = None  # wavelink.Track object
-        self.voice_client = None  # wavelink.Player
-        self.loop_mode = "none"
-        self.volume = 0.5
-        self.is_paused = False
-        self._task = None
-        self.text_channel = None
-
-    async def connect_voice(self, channel: discord.VoiceChannel) -> bool:
-        """Connect to a voice channel using Lavalink."""
-        try:
-            guild = channel.guild
-            
-            # Try to get existing wavelink player for this guild
-            vc = guild.voice_client
-            
-            if vc and hasattr(vc, 'is_connected') and vc.is_connected():
-                if vc.channel.id != channel.id:
-                    await vc.move_to(channel)
-                self.voice_client = vc
-                return True
-            
-            # Connect using LavalinkVoiceClient
-            vc = await channel.connect(cls=LavalinkVoiceClient)
-            # Get the wavelink Player for this guild
-            self.voice_client = guild.voice_client
-            return True
-
-        except Exception as e:
-            print(f"Voice connect error: {e}")
-            return False
-
-    async def disconnect_voice(self):
-        """Disconnect from voice channel."""
-        if self.voice_client:
-            try:
-                await self.voice_client.disconnect()
-            except:
-                pass
-
-        self.voice_client = None
-        self.queue = asyncio.Queue()
-        self.queue_history.clear()
-        self.current = None
-        self.is_paused = False
-        self.loop_mode = "none"
-        self._task = None
-
-    async def add_to_queue(self, track):
-        """Add a wavelink.Track to the queue."""
-        await self.queue.put(track)
-
-        if not self.is_playing() and not self.is_paused:
-            if self._task is None or self._task.done():
-                self._task = asyncio.create_task(self._playback_loop())
-
-    async def _playback_loop(self):
-        """Main playback loop - pulls from queue and plays via Lavalink."""
-        while True:
-            try:
-                track = await self.queue.get()
-            except Exception:
-                break
-
-            if not track:
-                continue
-
-            self.current = track
-            self.queue_history.append(track)
-            if len(self.queue_history) > 50:
-                self.queue_history.pop(0)
-
-            await self._play_track(track)
-
-            # Wait for track to finish
-            while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-                await asyncio.sleep(1)
-
-            if self.loop_mode == "one":
-                await self.queue.put(track)
-            
-            if self.queue.empty() and self.loop_mode != "all":
-                self.current = None
-                break
-
-    async def _play_track(self, track):
-        """Play a wavelink.Track via Lavalink."""
-        if not self.voice_client:
-            return
-
-        try:
-            self.is_paused = False
-            await self.voice_client.play(track)
-        except Exception as e:
-            print(f"Play error: {e}")
-
-    def is_playing(self):
-        return self.voice_client and self.voice_client.is_playing()
-
-    def pause(self):
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.pause()
-            self.is_paused = True
-
-    def resume(self):
-        if self.voice_client and self.voice_client.is_paused():
-            self.voice_client.resume()
-            self.is_paused = False
-
-    def stop(self):
-        if self.voice_client:
-            self.voice_client.stop()
-
-        self.queue = asyncio.Queue()
-        self.current = None
-        self.is_paused = False
-
-    def skip(self) -> bool:
-        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-            self.voice_client.stop()
-            return True
-        return False
-
-    def previous(self) -> bool:
-        if len(self.queue_history) >= 2:
-            self.queue_history.pop()
-            prev = self.queue_history.pop()
-            old_queue = []
-            while not self.queue.empty():
-                try:
-                    old_queue.append(self.queue.get_nowait())
-                except:
-                    break
-            for item in old_queue:
-                self.queue.put_nowait(item)
-            self.queue.put_nowait(prev)
-
-            if self.voice_client:
-                self.voice_client.stop()
-            return True
-        return False
-
-    def shuffle(self):
-        items = []
-        while not self.queue.empty():
-            try:
-                items.append(self.queue.get_nowait())
-            except:
-                break
-
-        random.shuffle(items)
-
-        self.queue = asyncio.Queue()
-        for item in items:
-            self.queue.put_nowait(item)
-
-    def clear_queue(self):
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except:
-                break
-        self.queue = asyncio.Queue()
-
-    def remove_from_queue(self, index: int) -> Optional[dict]:
-        items = []
-        while not self.queue.empty():
-            try:
-                items.append(self.queue.get_nowait())
-            except:
-                break
-
-        if index < 1 or index > len(items):
-            return None
-
-        removed = items.pop(index - 1)
-
-        self.queue = asyncio.Queue()
-        for item in items:
-            self.queue.put_nowait(item)
-
-        return {
-            'title': removed.title if hasattr(removed, 'title') else 'Unknown',
-            'url': str(removed.uri) if hasattr(removed, 'uri') else '',
-            'duration': removed.duration if hasattr(removed, 'duration') else 0,
-        }
-
-    def get_queue_list(self) -> list:
-        items = []
-        while not self.queue.empty():
-            try:
-                items.append(self.queue.get_nowait())
-            except:
-                break
-
-        self.queue = asyncio.Queue()
-        for item in items:
-            self.queue.put_nowait(item)
-
-        return items
-
-    def set_volume(self, vol: float):
-        self.volume = max(0.0, min(1.0, vol))
-        if self.voice_client:
-            try:
-                self.voice_client.set_volume(int(self.volume * 100))
-            except:
-                pass
-
-    @staticmethod
-    def _format_duration(seconds: int) -> str:
-        if not seconds:
-            return "Live"
-        h, remainder = divmod(seconds, 3600)
-        m, s = divmod(remainder, 60)
-        if h:
-            return f"{h}:{m:02d}:{s:02d}"
-        return f"{m}:{s:02d}"
-
-
-# Guild music players cache
-music_players: dict[int, MusicPlayer] = {}
-
-
-def get_music_player(guild_id: int) -> MusicPlayer:
-    if guild_id not in music_players:
-        music_players[guild_id] = MusicPlayer(bot, guild_id)
-    return music_players[guild_id]
-
-
-# =========================
-# LAVALINK NODE CONNECTION
-# =========================
-@bot.event
-async def on_wavelink_node_ready(node: wavelink.Node):
-    print(f"✅ Lavalink node {node.identifier} ready!")
-
-@bot.event
-async def on_wavelink_track_end(player, track, reason):
-    """Handle track end events."""
-    pass  # The playback loop handles this
-
-# =========================
-# EVENTS
-# =========================
-@bot.event
-async def on_member_join(member):
-    add_history(member.guild.id, member.id, str(member), "JOIN", "Joined the server")
-    
-    config = welcome_configs.get(member.guild.id)
-    if config:
-        channel = member.guild.get_channel(config.get('channel_id'))
-        if channel:
-            msg = config.get('message', "Welcome {user} to {server}!").format(user=member.mention, server=member.guild.name)
-            await channel.send(msg)
-    
-    c.execute("SELECT role_id FROM reaction_roles WHERE guild_id=? AND emoji='AUTO_ROLE'", (member.guild.id,))
-    roles = c.fetchall()
-    for (role_id,) in roles:
-        role = member.guild.get_role(role_id)
-        if role:
-            await member.add_roles(role)
-            add_history(member.guild.id, member.id, str(member), "ROLE_ADD", f"Auto-assigned role: {role.name}")
-
-@bot.event
-async def on_member_remove(member):
-    add_history(member.guild.id, member.id, str(member), "LEAVE", "Left the server")
-    await log(member.guild, f"👋 {member} left the server")
-
-@bot.event
-async def on_message_delete(message):
-    if message.author.bot:
-        return
-    add_history(
-        message.guild.id,
-        message.author.id,
-        str(message.author),
-        "DELETE",
-        message.content[:500] if message.content else "[Attachment/Embed]"
-    )
-
-@bot.event
-async def on_message_edit(before, after):
-    if before.author.bot:
-        return
-    if before.content == after.content:
-        return
-    add_history(
-        before.guild.id,
-        before.author.id,
-        str(before.author),
-        "EDIT",
-        f"{before.content[:200]} -> {after.content[:200]}"
-    )
-
-@bot.event
-async def on_guild_channel_create(channel):
-    add_history(
-        channel.guild.id,
-        0,
-        "System",
-        "CHANNEL_CREATE",
-        f"Channel created: #{channel.name} ({channel.type})"
-    )
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    add_history(
-        channel.guild.id,
-        0,
-        "System",
-        "CHANNEL_DELETE",
-        f"Channel deleted: #{channel.name}"
-    )
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    if before.channel != after.channel:
-        if after.channel:
-            add_history(member.guild.id, member.id, str(member), "VOICE_JOIN", f"Joined {after.channel.name}")
-            await log(member.guild, f"🔊 {member} joined {after.channel.name}")
-        elif before.channel:
-            add_history(member.guild.id, member.id, str(member), "VOICE_LEAVE", f"Left {before.channel.name}")
-            await log(member.guild, f"🔇 {member} left {before.channel.name}")
-
-@bot.event
-async def on_member_update(before, after):
-    if before.nick != after.nick:
-        add_history(
-            after.guild.id,
-            after.id,
-            str(after),
-            "NICK_CHANGE",
-            f"{before.nick or before.name} -> {after.nick or after.name}"
-        )
-    
-    added_roles = set(after.roles) - set(before.roles)
-    removed_roles = set(before.roles) - set(after.roles)
-    
-    for role in added_roles:
-        if role.name != "@everyone":
-            add_history(after.guild.id, after.id, str(after), "ROLE_ADD", f"Role added: {role.name}")
-    
-    for role in removed_roles:
-        if role.name != "@everyone":
-            add_history(after.guild.id, after.id, str(after), "ROLE_REMOVE", f"Role removed: {role.name}")
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-    
-    if message.guild:
-        log_message(message.guild.id, message.channel.id, message.author.id, message.content)
-    
-    # =========================
-    # DM AI
-    # =========================
-    if isinstance(message.channel, discord.DMChannel):
-        if message.author.id != OWNER_ID:
-            await message.channel.send("👋 Only owner can use AI.")
-            return
-        
-        user_id = message.author.id
-        key = str(user_id)
-        
-        if key not in dm_memory:
-            dm_memory[key] = ""
-        
-        mem = get_memory(user_id)
-        if not mem:
-            save_memory(user_id, user_name=message.author.name, bot_name="AI Bot")
-        
-        dm_memory[key] += f"User: {message.content}\n"
-        
-        await extract_memory_facts(0, user_id, message.content)
-        
-        msg = message.content.lower()
-        m1 = re.search(r"my name is (.+)", msg)
-        if m1:
-            save_memory(user_id, user_name=m1.group(1).strip().title())
-        
-        m2 = re.search(r"your name is (.+)", msg)
-        if m2:
-            save_memory(user_id, bot_name=m2.group(1).strip().title())
-        
-        mem = get_memory(user_id)
-        user_name, bot_name = mem if mem else (None, None)
-        
-        ai_mems = get_ai_memories(0, user_id, limit=15)
-        memory_context = ""
-        if ai_mems:
-            facts = [f"- {k}: {v}" for k, v, imp, _, _ in ai_mems if imp >= 2]
-            if facts:
-                memory_context = "Things I remember about you:\n" + "\n".join(facts) + "\n"
-        
-        prompt = f"""
-You are a Discord AI bot. You have persistent memory and learn about the user over time.
-
-User name: {user_name or "unknown"}
-Bot name: {bot_name or "AI Bot"}
-
-{memory_context}
-
-Recent conversation:
-{dm_memory[key][-2000:]}
-
-Respond naturally and conversationally. If the user mentions something new about themselves, remember it for next time.
-"""
-        
-        try:
-            if message.attachments:
-                attachment = message.attachments[0]
-                
-                if attachment.content_type and attachment.content_type.startswith("image/"):
-                    img = await attachment.read()
-                    uploaded = client.files.upload(file=img, config={"mime_type": attachment.content_type})
-                    response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, uploaded])
-                    reply = response.text
-                
-                elif attachment.filename.endswith(".pdf"):
-                    pdf_data = await attachment.read()
-                    pdf = PdfReader(io.BytesIO(pdf_data))
-                    text = ""
-                    for page in pdf.pages:
-                        t = page.extract_text()
-                        if t:
-                            text += t + "\n"
-                    response = client.models.generate_content(model=MODEL_NAME, contents=f"{prompt}\nPDF:\n{text}")
-                    reply = response.text
-                
-                elif attachment.filename.endswith(".docx"):
-                    doc_data = await attachment.read()
-                    doc = Document(io.BytesIO(doc_data))
-                    text = "\n".join(p.text for p in doc.paragraphs)
-                    response = client.models.generate_content(model=MODEL_NAME, contents=f"{prompt}\nDOCX:\n{text}")
-                    reply = response.text
-                
-                elif attachment.filename.endswith(".txt"):
-                    txt = await attachment.read()
-                    text = txt.decode("utf-8", errors="ignore")
-                    response = client.models.generate_content(model=MODEL_NAME, contents=f"{prompt}\nTXT:\n{text}")
-                    reply = response.text
-                
-                else:
-                    reply = await get_ai_response(prompt)
-            
-            else:
-                reply = await get_ai_response(prompt)
-        
-        except Exception as e:
-            reply = f"⚠️ AI error: {e}"
-        
-        save_conversation(0, 0, user_id, "user", message.content)
-        save_conversation(0, 0, user_id, "assistant", reply)
-        
-        dm_memory[key] += f"Bot: {reply}\n"
-        dm_memory[key] = dm_memory[key][-8000:]
-        
-        while len(reply) > 1900:
-            await message.channel.send(reply[:1900])
-            reply = reply[1900:]
-        
-        await message.channel.send(reply)
-        return
-    
-    # =========================
-    # LEVELING SYSTEM
-    # =========================
-    if message.guild:
-        new_level = await add_xp(message.author.id, message.guild.id)
-        if new_level:
-            await message.channel.send(f"🎉 {message.author.mention} leveled up to **Level {new_level}**!")
-            add_history(message.guild.id, message.author.id, str(message.author), "LEVEL_UP", f"Reached level {new_level}")
-        
-        for word in BAD_WORDS:
-            if word in message.content.lower():
-                await message.delete()
-                await message.channel.send(f"{message.author.mention} Watch your language!", delete_after=5)
-                add_warning(message.author.id, message.guild.id, f"Bad word: {word}", "AutoMod")
-                add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", f"Bad word filter: {word}")
-                break
-        
-        if re.search(INVITE_REGEX, message.content.lower()):
-            await message.delete()
-            await message.channel.send(f"{message.author.mention} No invite links!", delete_after=5)
-            add_warning(message.author.id, message.guild.id, "Invite link", "AutoMod")
-            add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", "Invite link filtered")
-        
-        if message.content.startswith('?'):
-            cmd_name = message.content[1:].lower().split()[0]
-            c.execute("SELECT response FROM custom_commands WHERE guild_id=? AND name=?", (message.guild.id, cmd_name))
-            result = c.fetchone()
-            if result:
-                await message.channel.send(result[0])
-    
-    await bot.process_commands(message)
-
-# =========================
-# on_ready with duplicate task prevention + Lavalink connect
-# =========================
-_tasks_started = False
-
-@bot.event
-async def on_ready():
-    global _tasks_started
-    if not _tasks_started:
-        _tasks_started = True
-        
-        # Connect to Lavalink
-        try:
-            await wavelink.NodePool.create_node(
-                bot=bot,
-                host=LAVALINK_HOST,
-                port=LAVALINK_PORT,
-                password=LAVALINK_PASSWORD,
-                identifier="default-node",
-                region="us_central",
-            )
-            print("✅ Connected to Lavalink node!")
-        except Exception as e:
-            print(f"❌ Failed to connect to Lavalink: {e}")
-        
-        check_giveaways.start()
-        check_birthdays.start()
-        generate_daily_summary.start()
-        consolidate_memories.start()
-        clean_inactive_players.start()
-    
-    await bot.tree.sync()
-    print(f"✅ ULTIMATE BOT ONLINE: {bot.user}")
-    print(f"   Servers: {len(bot.guilds)}")
-    print(f"   Commands: {len(bot.tree.get_commands())}")
-
-# =========================
-# WELCOME SYSTEM
-# =========================
-welcome_configs = {}
-
-# =========================
-# 🎮 MODERATION COMMANDS
-# =========================
-
-# Create a moderation command group
-mod_group = app_commands.Group(name="mod", description="Moderation commands")
-
-@mod_group.command(name="clear", description="Delete messages")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_messages=True)
-async def mod_clear(interaction: discord.Interaction, amount: int):
-    await interaction.response.defer(ephemeral=True)
-    deleted = await interaction.channel.purge(limit=amount)
-    await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages", ephemeral=True)
-    await log(interaction.guild, f"CLEAR | {len(deleted)}")
-
-@mod_group.command(name="clearall", description="Wipe channel")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_messages=True)
-async def mod_clearall(interaction: discord.Interaction):
-    await interaction.response.defer(ephemeral=True)
-    total = 0
-    while True:
-        deleted = await interaction.channel.purge(limit=100)
-        total += len(deleted)
-        if not deleted:
-            break
-    await interaction.followup.send(f"Cleared {total}", ephemeral=True)
-    await log(interaction.guild, f"CLEARALL | {total}")
-
-@mod_group.command(name="ban", description="Ban member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(ban_members=True)
-async def mod_ban(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
-    await interaction.response.defer()
-    await member.ban(reason=reason)
-    add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
-    await interaction.followup.send(f"🔨 Banned {member}")
-    await log(interaction.guild, f"BAN | {member} | {reason}")
-
-@mod_group.command(name="softban", description="Ban and immediately unban to clear messages")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(ban_members=True)
-async def mod_softban(interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
-    await interaction.response.defer()
-    await member.ban(reason=reason)
-    await member.unban(reason="Softban complete")
-    add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
-    await interaction.followup.send(f"🧹 Softbanned {member}")
-    await log(interaction.guild, f"SOFTBAN | {member}")
-
-@mod_group.command(name="mute", description="Timeout member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mod_mute(interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
-    await interaction.response.defer()
-    await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
-    add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
-    await interaction.followup.send(f"🔇 Muted {member.mention} for {minutes} minutes")
-    await log(interaction.guild, f"MUTE | {member} | {minutes}min | {reason}")
-
-@mod_group.command(name="unmute", description="Unmute member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mod_unmute(interaction: discord.Interaction, member: discord.Member):
-    await interaction.response.defer()
-    await member.timeout(None)
-    add_history(interaction.guild.id, member.id, str(member), "UNMUTE", f"Unmuted by {interaction.user}")
-    await interaction.followup.send(f"🔊 Unmuted {member.mention}")
-    await log(interaction.guild, f"UNMUTE | {member}")
-
-@mod_group.command(name="warn", description="Warn a member")
-@app_commands.describe(member="Member to warn", reason="Reason for the warning")
-async def mod_warn(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-        await interaction.response.defer(ephemeral=True)
-        
-        if not interaction.user.guild_permissions.moderate_members:
-            return await interaction.followup.send("❌ You don't have permission to warn members.", ephemeral=True)
-        
-        if member.top_role >= interaction.user.top_role:
-            return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
-        
-        # Add warning to database
-        add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
-        add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
-        
-        # Try to DM the user
-        try:
-            dm_embed = discord.Embed(
-                title=f"You were warned in {interaction.guild.name}",
-                description=f"**Reason:** {reason}",
-                color=discord.Color.orange()
-            )
-            await member.send(embed=dm_embed)
-        except:
-            pass
-        
-        # Channel confirmation embed
-        embed = discord.Embed(title="⚠️ Warned User", color=discord.Color.orange())
-        embed.add_field(name="User", value=member.mention, inline=True)
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.set_footer(text=f"User ID: {member.id}")
-        
-        await interaction.followup.send(embed=embed)
-
-@mod_group.command(name="kick", description="Kick a member from the server")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(kick_members=True)
-@app_commands.describe(member="Member to kick", reason="Reason for kicking")
-async def mod_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-    await interaction.response.defer(ephemeral=True)
-
-    if member.top_role >= interaction.user.top_role:
-        return await interaction.followup.send(
-            "❌ You cannot kick this member (role hierarchy).",
-            ephemeral=True
-        )
-
-    try:
-        await member.kick(reason=reason)
-
-        embed = discord.Embed(
-            title="👢 Kicked User",
-            color=discord.Color.red()
-        )
-        embed.add_field(name="User", value=member.mention, inline=True)
-        embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-        embed.add_field(name="Reason", value=reason, inline=False)
-
-        await interaction.followup.send(embed=embed)
-
-        add_history(
-            interaction.guild.id,
-            member.id,
-            str(member),
-            "KICK",
-            f"Kicked by {interaction.user}: {reason}"
-        )
-
-        await log(
-            interaction.guild,
-            f"KICK | {member} | {reason}"
-        )
-
-    except discord.Forbidden:
-        await interaction.followup.send(
-            "❌ I don't have permission to kick that member.",
-            ephemeral=True
-        )
-
-@mod_group.command(name="clean", description="Clean a number of messages from a channel")
-@app_commands.describe(amount="Number of messages to delete", member="Only delete messages from this member (optional)")
-async def mod_clean(interaction: discord.Interaction, amount: int, member: discord.Member = None):
-    await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.manage_messages:
-        return await interaction.followup.send("❌ You don't have permission to manage messages.", ephemeral=True)
-    
-    amount = min(amount, 100)
-    
-    def check(msg):
-        return True if member is None else msg.author.id == member.id
-    
-    try:
-        deleted = await interaction.channel.purge(limit=amount, check=check)
-        await interaction.followup.send(f"✅ Deleted {len(deleted)} messages.", ephemeral=True)
-    except:
-        await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
-
-# ─── MUSIC COG ────────────────────────────────────────────────────────────────
-
 class MusicControls(discord.ui.View):
+    """Interactive music controls view."""
     def __init__(self, music_cog, track):
         super().__init__(timeout=600)
         self.music_cog = music_cog
@@ -1825,6 +1052,764 @@ class MusicControls(discord.ui.View):
         await player.disconnect()
         await interaction.response.send_message("⏹️ Stopped and disconnected.", ephemeral=True)
 
+# =========================
+# SEARCH SELECT VIEW
+# =========================
+class SearchSelect(discord.ui.View):
+    """Dropdown view for selecting a track from search results."""
+    def __init__(self, tracks, music_cog):
+        super().__init__(timeout=30)
+        self.tracks = tracks
+        self.music_cog = music_cog
+        
+        options = [
+            discord.SelectOption(label=f"{t.title[:50]}", value=str(i), description=t.author[:50])
+            for i, t in enumerate(tracks)
+        ]
+        
+        select = discord.ui.Select(placeholder="Choose a track...", options=options)
+        
+        async def select_callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+            idx = int(select.values[0])
+            track = self.tracks[idx]
+            
+            if not interaction.user.voice or not interaction.user.voice.channel:
+                return await interaction.followup.send("❌ You must be in a voice channel.", ephemeral=True)
+            
+            voice_channel = interaction.user.voice.channel
+            guild = interaction.guild
+            
+            player = guild.voice_client
+            if player and isinstance(player, wavelink.Player):
+                if player.channel != voice_channel:
+                    await player.move_to(voice_channel)
+            else:
+                if player:
+                    await player.disconnect()
+                player = await voice_channel.connect(cls=wavelink.Player)
+            
+            queue = self.music_cog.get_queue(guild.id)
+            
+            if not player.playing:
+                self.music_cog.current[guild.id] = track
+                await player.play(track)
+                embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+                embed.add_field(name="Title", value=track.title, inline=False)
+                embed.add_field(name="Artist", value=track.author, inline=True)
+                embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
+                if track.artwork:
+                    embed.set_thumbnail(url=track.artwork)
+                view = MusicControls(self.music_cog, track)
+                await interaction.followup.send(embed=embed, view=view)
+            else:
+                queue.append(track)
+                await interaction.followup.send(f"✅ Added **{track.title}** to the queue (position #{len(queue)})")
+            
+            try:
+                await interaction.message.delete()
+            except:
+                pass
+        
+        select.callback = select_callback
+        self.add_item(select)
+
+# =========================
+# TICKET VIEWS
+# =========================
+class TicketCloseView(discord.ui.View):
+    """View with close button for tickets."""
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.channel.name.startswith("ticket-"):
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="🔒 Closing Ticket",
+            description="This ticket will be closed in 5 seconds...",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+        await asyncio.sleep(5)
+        try:
+            await interaction.channel.delete()
+        except Exception as e:
+            logger.error(f"Error deleting ticket channel: {e}")
+
+class TicketPanelView(discord.ui.View):
+    """View with create ticket button."""
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.primary, custom_id="create_ticket")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        user = interaction.user
+        
+        # Check if user already has an open ticket
+        existing = discord.utils.get(guild.text_channels, name=f"ticket-{user.name.lower().replace(' ', '-')}")
+        if existing:
+            return await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
+        
+        # Create ticket channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        }
+        
+        admin_role = discord.utils.get(guild.roles, name="Admin")
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        
+        mod_role = discord.utils.get(guild.roles, name="Moderator")
+        if mod_role:
+            overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        
+        try:
+            channel = await guild.create_text_channel(
+                name=f"ticket-{user.name.lower().replace(' ', '-')}",
+                topic=f"Support ticket for {user.name} ({user.id})",
+                overwrites=overwrites
+            )
+            
+            embed = discord.Embed(
+                title="🎫 Ticket Created",
+                description=f"Hello {user.mention}! Support will be with you shortly.\n\nType your issue below.",
+                color=discord.Color.green()
+            )
+            
+            close_view = TicketCloseView()
+            await channel.send(embed=embed, view=close_view)
+            await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+            
+            await db.execute(
+                "INSERT INTO tickets (guild_id, user_id, channel_id, status, created_at) VALUES (?, ?, ?, 'open', ?)",
+                (guild.id, user.id, channel.id, datetime.now().isoformat())
+            )
+            await db.commit()
+            
+        except Exception as e:
+            logger.error(f"Error creating ticket: {e}")
+            await interaction.response.send_message("❌ Failed to create ticket. Check my permissions.", ephemeral=True)
+
+# =========================
+# GIVEAWAY VIEWS (UNIFIED)
+# =========================
+class GiveawayView(discord.ui.View):
+    """View for entering a giveaway."""
+    def __init__(self, giveaway_id: str):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+
+    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.primary, custom_id="giveaway_enter")
+    async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for guild_id, giveaways in active_giveaways.items():
+            for g in giveaways:
+                if g["id"] == self.giveaway_id:
+                    if g.get("ended"):
+                        return await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
+                    
+                    if interaction.user.id in g["entries"]:
+                        return await interaction.response.send_message("⚠️ You already entered!", ephemeral=True)
+
+                    g["entries"].append(interaction.user.id)
+
+                    try:
+                        embed = interaction.message.embeds[0]
+                        # Update the entries field (usually field index 0 or 1)
+                        for i, field in enumerate(embed.fields):
+                            if field.name == "Entries":
+                                embed.set_field_at(i, name="Entries", value=str(len(g["entries"])), inline=True)
+                                break
+                        await interaction.message.edit(embed=embed)
+                    except Exception as e:
+                        logger.error(f"Error updating giveaway embed: {e}")
+
+                    return await interaction.response.send_message("✅ You entered the giveaway!", ephemeral=True)
+
+        await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
+
+
+# =========================
+# POLL VIEW
+# =========================
+class PollView(discord.ui.View):
+    def __init__(self, poll_id, options):
+        super().__init__(timeout=None)
+        self.poll_id = poll_id
+        self.votes = {i: [] for i in range(len(options))}
+        
+        for i, option in enumerate(options):
+            button = discord.ui.Button(
+                label=f"{self._get_emoji(i)} {option}",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"poll_vote_{poll_id}_{i}"
+            )
+            button.callback = self.make_callback(i)
+            self.add_item(button)
+    
+    def _get_emoji(self, index):
+        emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        return emojis[index] if index < len(emojis) else f"{index+1}."
+    
+    def make_callback(self, option_index):
+        async def callback(interaction: discord.Interaction):
+            user_id = interaction.user.id
+            
+            for idx in self.votes:
+                if user_id in self.votes[idx]:
+                    self.votes[idx].remove(user_id)
+            
+            self.votes[option_index].append(user_id)
+            
+            result = await db.fetchone("SELECT votes FROM polls WHERE id=?", (self.poll_id,))
+            if result:
+                votes_data = json.loads(result[0])
+                for idx in votes_data:
+                    if user_id in votes_data[idx]:
+                        votes_data[idx].remove(user_id)
+                votes_data[option_index].append(user_id)
+                await db.execute("UPDATE polls SET votes=? WHERE id=?", (json.dumps(votes_data), self.poll_id))
+                await db.commit()
+            
+            await interaction.response.send_message(f"✅ You voted for option {option_index + 1}!", ephemeral=True)
+        
+        return callback
+
+# =========================
+# BOT EVENTS
+# =========================
+@bot.event
+async def on_wavelink_node_ready(node: wavelink.Node):
+    logger.info(f"✅ Lavalink node {node.identifier} ready!")
+
+@bot.event
+async def on_member_join(member):
+    try:
+        await add_history(member.guild.id, member.id, str(member), "JOIN", "Joined the server")
+        
+        config = welcome_configs.get(member.guild.id)
+        if config:
+            channel = member.guild.get_channel(config.get('channel_id'))
+            if channel:
+                msg = config.get('message', "Welcome {user} to {server}!").format(
+                    user=member.mention, server=member.guild.name
+                )
+                await channel.send(msg)
+        
+        results = await db.fetchall(
+            "SELECT role_id FROM reaction_roles WHERE guild_id=? AND emoji='AUTO_ROLE'",
+            (member.guild.id,)
+        )
+        for (role_id,) in results:
+            role = member.guild.get_role(role_id)
+            if role:
+                await member.add_roles(role)
+                await add_history(member.guild.id, member.id, str(member), "ROLE_ADD", f"Auto-assigned role: {role.name}")
+    except Exception as e:
+        logger.error(f"on_member_join error: {e}")
+
+@bot.event
+async def on_member_remove(member):
+    try:
+        await add_history(member.guild.id, member.id, str(member), "LEAVE", "Left the server")
+        await log(member.guild, f"👋 {member} left the server")
+    except Exception as e:
+        logger.error(f"on_member_remove error: {e}")
+
+@bot.event
+async def on_message_delete(message):
+    if message.author.bot:
+        return
+    try:
+        await add_history(
+            message.guild.id,
+            message.author.id,
+            str(message.author),
+            "DELETE",
+            message.content[:500] if message.content else "[Attachment/Embed]"
+        )
+    except Exception as e:
+        logger.error(f"on_message_delete error: {e}")
+
+@bot.event
+async def on_message_edit(before, after):
+    if before.author.bot:
+        return
+    if before.content == after.content:
+        return
+    try:
+        await add_history(
+            before.guild.id,
+            before.author.id,
+            str(before.author),
+            "EDIT",
+            f"{before.content[:200]} -> {after.content[:200]}"
+        )
+    except Exception as e:
+        logger.error(f"on_message_edit error: {e}")
+
+@bot.event
+async def on_guild_channel_create(channel):
+    try:
+        await add_history(
+            channel.guild.id, 0, "System", "CHANNEL_CREATE",
+            f"Channel created: #{channel.name} ({channel.type})"
+        )
+    except Exception as e:
+        logger.error(f"on_guild_channel_create error: {e}")
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    try:
+        await add_history(
+            channel.guild.id, 0, "System", "CHANNEL_DELETE",
+            f"Channel deleted: #{channel.name}"
+        )
+    except Exception as e:
+        logger.error(f"on_guild_channel_delete error: {e}")
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    try:
+        if before.channel != after.channel:
+            if after.channel:
+                await add_history(member.guild.id, member.id, str(member), "VOICE_JOIN", f"Joined {after.channel.name}")
+                await log(member.guild, f"🔊 {member} joined {after.channel.name}")
+            elif before.channel:
+                await add_history(member.guild.id, member.id, str(member), "VOICE_LEAVE", f"Left {before.channel.name}")
+                await log(member.guild, f"🔇 {member} left {before.channel.name}")
+    except Exception as e:
+        logger.error(f"on_voice_state_update error: {e}")
+
+@bot.event
+async def on_member_update(before, after):
+    try:
+        if before.nick != after.nick:
+            await add_history(
+                after.guild.id, after.id, str(after), "NICK_CHANGE",
+                f"{before.nick or before.name} -> {after.nick or after.name}"
+            )
+        
+        added_roles = set(after.roles) - set(before.roles)
+        removed_roles = set(before.roles) - set(after.roles)
+        
+        for role in added_roles:
+            if role.name != "@everyone":
+                await add_history(after.guild.id, after.id, str(after), "ROLE_ADD", f"Role added: {role.name}")
+        
+        for role in removed_roles:
+            if role.name != "@everyone":
+                await add_history(after.guild.id, after.id, str(after), "ROLE_REMOVE", f"Role removed: {role.name}")
+    except Exception as e:
+        logger.error(f"on_member_update error: {e}")
+
+# =========================
+# MAIN on_message (UNIFIED - only one listener)
+# =========================
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    
+    try:
+        if message.guild:
+            await log_message(message.guild.id, message.channel.id, message.author.id, message.content)
+        
+        # =========================
+        # DM AI
+        # =========================
+        if isinstance(message.channel, discord.DMChannel):
+            if message.author.id != OWNER_ID:
+                await message.channel.send("👋 Only owner can use AI.")
+                return
+            
+            user_id = message.author.id
+            key = str(user_id)
+            
+            if key not in dm_memory:
+                dm_memory[key] = ""
+            
+            mem = await get_memory(user_id)
+            if not mem:
+                await save_memory(user_id, user_name=message.author.name, bot_name="AI Bot")
+            
+            dm_memory[key] += f"User: {message.content}\n"
+            
+            await extract_memory_facts(0, user_id, message.content)
+            
+            msg = message.content.lower()
+            m1 = re.search(r"my name is (.+)", msg)
+            if m1:
+                await save_memory(user_id, user_name=m1.group(1).strip().title())
+            
+            m2 = re.search(r"your name is (.+)", msg)
+            if m2:
+                await save_memory(user_id, bot_name=m2.group(1).strip().title())
+            
+            mem = await get_memory(user_id)
+            user_name, bot_name = mem if mem else (None, None)
+            
+            ai_mems = await get_ai_memories(0, user_id, limit=15)
+            memory_context = ""
+            if ai_mems:
+                facts = [f"- {k}: {v}" for k, v, imp, _, _ in ai_mems if imp >= 2]
+                if facts:
+                    memory_context = "Things I remember about you:\n" + "\n".join(facts) + "\n"
+            
+            prompt = f"""
+You are a Discord AI bot. You have persistent memory and learn about the user over time.
+
+User name: {user_name or "unknown"}
+Bot name: {bot_name or "AI Bot"}
+
+{memory_context}
+
+Recent conversation:
+{dm_memory[key][-2000:]}
+
+Respond naturally and conversationally. If the user mentions something new about themselves, remember it for next time.
+"""
+            
+            try:
+                if message.attachments:
+                    attachment = message.attachments[0]
+                    
+                    if attachment.content_type and attachment.content_type.startswith("image/"):
+                        if client:
+                            img = await attachment.read()
+                            uploaded = client.files.upload(file=img, config={"mime_type": attachment.content_type})
+                            response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, uploaded])
+                            reply = response.text
+                        else:
+                            reply = "⚠️ AI not configured for image analysis."
+                    
+                    elif attachment.filename.endswith(".pdf"):
+                        pdf_data = await attachment.read()
+                        pdf = PdfReader(io.BytesIO(pdf_data))
+                        text = ""
+                        for page in pdf.pages:
+                            t = page.extract_text()
+                            if t:
+                                text += t + "\n"
+                        reply = await get_ai_response(f"{prompt}\nPDF:\n{text}")
+                    
+                    elif attachment.filename.endswith(".docx"):
+                        doc_data = await attachment.read()
+                        doc = Document(io.BytesIO(doc_data))
+                        text = "\n".join(p.text for p in doc.paragraphs)
+                        reply = await get_ai_response(f"{prompt}\nDOCX:\n{text}")
+                    
+                    elif attachment.filename.endswith(".txt"):
+                        txt = await attachment.read()
+                        text = txt.decode("utf-8", errors="ignore")
+                        reply = await get_ai_response(f"{prompt}\nTXT:\n{text}")
+                    
+                    else:
+                        reply = await get_ai_response(prompt)
+                
+                else:
+                    reply = await get_ai_response(prompt)
+            
+            except Exception as e:
+                logger.error(f"DM AI error: {e}")
+                reply = f"⚠️ AI error: {e}"
+            
+            await save_conversation(0, 0, user_id, "user", message.content)
+            await save_conversation(0, 0, user_id, "assistant", reply)
+            
+            dm_memory[key] += f"Bot: {reply}\n"
+            dm_memory[key] = dm_memory[key][-8000:]
+            
+            while len(reply) > 1900:
+                await message.channel.send(reply[:1900])
+                reply = reply[1900:]
+            
+            await message.channel.send(reply)
+            return
+        
+        # =========================
+        # GUILD MESSAGE HANDLING
+        # =========================
+        if message.guild:
+            # Leveling
+            new_level = await add_xp(message.author.id, message.guild.id)
+            if new_level:
+                await message.channel.send(f"🎉 {message.author.mention} leveled up to **Level {new_level}**!")
+                await add_history(message.guild.id, message.author.id, str(message.author), "LEVEL_UP", f"Reached level {new_level}")
+            
+            # Bad words filter
+            for word in BAD_WORDS:
+                if word in message.content.lower():
+                    await message.delete()
+                    await message.channel.send(f"{message.author.mention} Watch your language!", delete_after=5)
+                    await add_warning(message.author.id, message.guild.id, f"Bad word: {word}", "AutoMod")
+                    await add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", f"Bad word filter: {word}")
+                    break
+            
+            # Invite link filter
+            if re.search(INVITE_REGEX, message.content.lower()):
+                await message.delete()
+                await message.channel.send(f"{message.author.mention} No invite links!", delete_after=5)
+                await add_warning(message.author.id, message.guild.id, "Invite link", "AutoMod")
+                await add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", "Invite link filtered")
+            
+            # Custom commands
+            if message.content.startswith('?'):
+                cmd_name = message.content[1:].lower().split()[0]
+                result = await db.fetchone(
+                    "SELECT response FROM custom_commands WHERE guild_id=? AND name=?",
+                    (message.guild.id, cmd_name)
+                )
+                if result:
+                    await message.channel.send(result[0])
+    
+    except Exception as e:
+        logger.error(f"on_message error: {e}")
+    
+    await bot.process_commands(message)
+
+# =========================
+# on_ready
+# =========================
+_tasks_started = False
+
+@bot.event
+async def on_ready():
+    global _tasks_started
+    if not _tasks_started:
+        _tasks_started = True
+        
+        # Connect to Lavalink
+        try:
+            lava_node = wavelink.Node(
+                uri=LAVALINK_URI,
+                password=LAVALINK_PASSWORD
+            )
+            await wavelink.Pool.connect(client=bot, nodes=[lava_node])
+            logger.info("✅ Connected to Lavalink node!")
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Lavalink: {e}")
+        
+        # Start background tasks
+        check_giveaways.start()
+        check_birthdays.start()
+        generate_daily_summary.start()
+        consolidate_memories.start()
+        clean_inactive_players.start()
+    
+    await bot.tree.sync()
+    logger.info(f"✅ ULTIMATE BOT ONLINE: {bot.user}")
+    logger.info(f"   Servers: {len(bot.guilds)}")
+    logger.info(f"   Commands: {len(bot.tree.get_commands())}")
+
+# =========================
+# 🎮 MODERATION COG
+# =========================
+
+class Moderation(commands.Cog, name="moderation"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    mod_group = app_commands.Group(name="mod", description="Moderation commands")
+
+    @mod_group.command(name="clear", description="Delete messages")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def mod_clear(self, interaction: discord.Interaction, amount: int):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await interaction.channel.purge(limit=amount)
+            await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages", ephemeral=True)
+            await log(interaction.guild, f"CLEAR | {len(deleted)}")
+        except Exception as e:
+            logger.error(f"Clear error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="clearall", description="Wipe channel")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def mod_clearall(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        total = 0
+        try:
+            while True:
+                deleted = await interaction.channel.purge(limit=100)
+                total += len(deleted)
+                if not deleted:
+                    break
+            await interaction.followup.send(f"Cleared {total}", ephemeral=True)
+            await log(interaction.guild, f"CLEARALL | {total}")
+        except Exception as e:
+            logger.error(f"Clearall error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="ban", description="Ban member")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def mod_ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+        await interaction.response.defer()
+        try:
+            await member.ban(reason=reason)
+            await add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
+            await interaction.followup.send(f"🔨 Banned {member}")
+            await log(interaction.guild, f"BAN | {member} | {reason}")
+        except Exception as e:
+            logger.error(f"Ban error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @mod_group.command(name="softban", description="Ban and immediately unban to clear messages")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def mod_softban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
+        await interaction.response.defer()
+        try:
+            await member.ban(reason=reason)
+            await member.unban(reason="Softban complete")
+            await add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
+            await interaction.followup.send(f"🧹 Softbanned {member}")
+            await log(interaction.guild, f"SOFTBAN | {member}")
+        except Exception as e:
+            logger.error(f"Softban error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @mod_group.command(name="mute", description="Timeout member")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def mod_mute(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
+        await interaction.response.defer()
+        try:
+            await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
+            await add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
+            await interaction.followup.send(f"🔇 Muted {member.mention} for {minutes} minutes")
+            await log(interaction.guild, f"MUTE | {member} | {minutes}min | {reason}")
+        except Exception as e:
+            logger.error(f"Mute error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @mod_group.command(name="unmute", description="Unmute member")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def mod_unmute(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer()
+        try:
+            await member.timeout(None)
+            await add_history(interaction.guild.id, member.id, str(member), "UNMUTE", f"Unmuted by {interaction.user}")
+            await interaction.followup.send(f"🔊 Unmuted {member.mention}")
+            await log(interaction.guild, f"UNMUTE | {member}")
+        except Exception as e:
+            logger.error(f"Unmute error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @mod_group.command(name="warn", description="Warn a member")
+    @app_commands.describe(member="Member to warn", reason="Reason for the warning")
+    async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+        await interaction.response.defer(ephemeral=True)
+        
+        if not interaction.user.guild_permissions.moderate_members:
+            return await interaction.followup.send("❌ You don't have permission to warn members.", ephemeral=True)
+        
+        if member.top_role >= interaction.user.top_role:
+            return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
+        
+        try:
+            await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
+            await add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
+            
+            try:
+                dm_embed = discord.Embed(
+                    title=f"You were warned in {interaction.guild.name}",
+                    description=f"**Reason:** {reason}",
+                    color=discord.Color.orange()
+                )
+                await member.send(embed=dm_embed)
+            except:
+                pass
+            
+            embed = discord.Embed(title="⚠️ Warned User", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.set_footer(text=f"User ID: {member.id}")
+            
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Warn error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="kick", description="Kick a member from the server")
+    @app_commands.check(owner_check)
+    @app_commands.checks.has_permissions(kick_members=True)
+    @app_commands.describe(member="Member to kick", reason="Reason for kicking")
+    async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+        await interaction.response.defer(ephemeral=True)
+
+        if member.top_role >= interaction.user.top_role:
+            return await interaction.followup.send(
+                "❌ You cannot kick this member (role hierarchy).",
+                ephemeral=True
+            )
+
+        try:
+            await member.kick(reason=reason)
+
+            embed = discord.Embed(
+                title="👢 Kicked User",
+                color=discord.Color.red()
+            )
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+
+            await interaction.followup.send(embed=embed)
+
+            await add_history(
+                interaction.guild.id,
+                member.id,
+                str(member),
+                "KICK",
+                f"Kicked by {interaction.user}: {reason}"
+            )
+
+            await log(interaction.guild, f"KICK | {member} | {reason}")
+
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "❌ I don't have permission to kick that member.",
+                ephemeral=True
+            )
+        except Exception as e:
+            logger.error(f"Kick error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="clean", description="Clean a number of messages from a channel")
+    @app_commands.describe(amount="Number of messages to delete", member="Only delete messages from this member (optional)")
+    async def mod_clean(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
+        await interaction.response.defer(ephemeral=True)
+        
+        if not interaction.user.guild_permissions.manage_messages:
+            return await interaction.followup.send("❌ You don't have permission to manage messages.", ephemeral=True)
+        
+        amount = min(amount, 100)
+        
+        def check(msg):
+            return True if member is None else msg.author.id == member.id
+        
+        try:
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await interaction.followup.send(f"✅ Deleted {len(deleted)} messages.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Clean error: {e}")
+            await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
+
+
+# =========================
+# 🎵 MUSIC COG
+# =========================
 
 async def get_music_player(guild: discord.Guild, voice_channel: discord.VoiceChannel) -> Optional[wavelink.Player]:
     """Get or create a wavelink player for a guild."""
@@ -1846,7 +1831,7 @@ class Music(commands.Cog, name="music"):
         self.bot = bot
         self.queue = {}  # guild_id: list of wavelink.Track
         self.current = {}  # guild_id: wavelink.Track
-        self.history = {}  # guild_id: list of wavelink.Track (for previous)
+        self.history = {}  # guild_id: list of wavelink.Track
         self.loop = {}  # guild_id: bool
         self.volume = {}  # guild_id: int
     
@@ -1870,10 +1855,7 @@ class Music(commands.Cog, name="music"):
             return False
         return True
 
-    music_group = app_commands.Group(
-    name="music",
-    description="Music commands"
-)
+    music_group = app_commands.Group(name="music", description="Music commands")
     
     @music_group.command(name="play", description="Play a song from a query or URL")
     @app_commands.describe(query="Song name or URL to play")
@@ -1889,7 +1871,7 @@ class Music(commands.Cog, name="music"):
         try:
             player = await get_music_player(guild, voice_channel)
             
-            # Search for tracks
+            # Search for tracks using wavelink
             tracks = await wavelink.Playable.search(query)
             if not tracks:
                 return await interaction.followup.send("❌ No results found.")
@@ -1908,12 +1890,14 @@ class Music(commands.Cog, name="music"):
                     embed.add_field(name="Title", value=playlist_tracks[0].title, inline=False)
                     embed.add_field(name="Duration", value=format_duration(playlist_tracks[0].length), inline=True)
                     embed.add_field(name="Tracks in Playlist", value=len(playlist_tracks), inline=True)
+                    if playlist_tracks[0].artwork:
+                        embed.set_thumbnail(url=playlist_tracks[0].artwork)
                     view = MusicControls(self, playlist_tracks[0])
                     await interaction.followup.send(embed=embed, view=view)
                 else:
                     embed = discord.Embed(title="📋 Added to Queue", color=discord.Color.blue())
                     embed.add_field(name="Playlist", value=track.name, inline=False)
-                    embed.add_field(name="Tracks Added", value=len(playlist_tracks[1:]) + 1, inline=True)
+                    embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
                     await interaction.followup.send(embed=embed)
             else:
                 queue = self.get_queue(guild.id)
@@ -1925,7 +1909,8 @@ class Music(commands.Cog, name="music"):
                     embed.add_field(name="Title", value=track.title, inline=False)
                     embed.add_field(name="Artist", value=track.author, inline=True)
                     embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
-                    embed.set_thumbnail(url=track.artwork)
+                    if track.artwork:
+                        embed.set_thumbnail(url=track.artwork)
                     view = MusicControls(self, track)
                     await interaction.followup.send(embed=embed, view=view)
                 else:
@@ -1938,6 +1923,7 @@ class Music(commands.Cog, name="music"):
                     await interaction.followup.send(embed=embed)
         
         except Exception as e:
+            logger.error(f"Music play error: {e}")
             await interaction.followup.send(f"❌ An error occurred: {str(e)}")
     
     @music_group.command(name="search", description="Search for a song and select from results")
@@ -1963,51 +1949,11 @@ class Music(commands.Cog, name="music"):
                     inline=False
                 )
             
-            class SearchSelect(discord.ui.View):
-                def __init__(self, tracks, music_cog):
-                    super().__init__(timeout=30)
-                    self.tracks = tracks
-                    self.music_cog = music_cog
-                    options = [
-                        discord.SelectOption(label=f"{t.title[:50]}", value=str(i), description=t.author[:50])
-                        for i, t in enumerate(tracks)
-                    ]
-                    select = discord.ui.Select(placeholder="Choose a track...", options=options)
-                    
-                    async def select_callback(interaction: discord.Interaction):
-                        await interaction.response.defer()
-                        idx = int(select.values[0])
-                        track = self.tracks[idx]
-                        
-                        voice_channel = interaction.user.voice.channel
-                        guild = interaction.guild
-                        player = await get_music_player(guild, voice_channel)
-                        
-                        queue = self.music_cog.get_queue(guild.id)
-                        
-                        if not player.playing:
-                            self.music_cog.current[guild.id] = track
-                            await player.play(track)
-                            embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
-                            embed.add_field(name="Title", value=track.title, inline=False)
-                            embed.add_field(name="Artist", value=track.author, inline=True)
-                            embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
-                            embed.set_thumbnail(url=track.artwork)
-                            view = MusicControls(self.music_cog, track)
-                            await interaction.followup.send(embed=embed, view=view)
-                        else:
-                            queue.append(track)
-                            await interaction.followup.send(f"✅ Added **{track.title}** to the queue (position #{len(queue)})")
-                        
-                        await interaction.message.delete()
-                    
-                    select.callback = select_callback
-                    self.add_item(select)
-            
             view = SearchSelect(tracks, self)
             await interaction.followup.send(embed=embed, view=view)
         
         except Exception as e:
+            logger.error(f"Music search error: {e}")
             await interaction.followup.send(f"❌ An error occurred: {str(e)}")
     
     @music_group.command(name="pause", description="Pause the current track")
@@ -2039,7 +1985,6 @@ class Music(commands.Cog, name="music"):
         if not player or not isinstance(player, wavelink.Player) or not player.playing:
             return await interaction.followup.send("❌ Nothing to skip.")
         
-        # Save to history before skipping
         if interaction.guild.id in self.current:
             history = self.get_history(interaction.guild.id)
             history.append(self.current[interaction.guild.id])
@@ -2087,7 +2032,6 @@ class Music(commands.Cog, name="music"):
             
             embed.set_footer(text=f"Total: {total_tracks} tracks | Duration: {format_duration(total_duration)}")
             
-            # Show first 15 tracks
             show = queue[:15]
             for i, track in enumerate(show, 1):
                 embed.add_field(
@@ -2124,7 +2068,8 @@ class Music(commands.Cog, name="music"):
             bar = "█" * filled + "░" * (bar_length - filled)
             embed.add_field(name="Progress", value=f"`{format_duration(elapsed)}` {bar} `{format_duration(total)}`", inline=False)
         
-        embed.set_thumbnail(url=current.artwork)
+        if current.artwork:
+            embed.set_thumbnail(url=current.artwork)
         view = MusicControls(self, current)
         await interaction.followup.send(embed=embed, view=view)
     
@@ -2163,7 +2108,6 @@ class Music(commands.Cog, name="music"):
         
         prev_track = history.pop()
         
-        # Push current to front of queue
         current = self.current.get(guild.id)
         if current:
             queue = self.get_queue(guild.id)
@@ -2176,7 +2120,8 @@ class Music(commands.Cog, name="music"):
         embed.add_field(name="Title", value=prev_track.title, inline=False)
         embed.add_field(name="Artist", value=prev_track.author, inline=True)
         embed.add_field(name="Duration", value=format_duration(prev_track.length), inline=True)
-        embed.set_thumbnail(url=prev_track.artwork)
+        if prev_track.artwork:
+            embed.set_thumbnail(url=prev_track.artwork)
         view = MusicControls(self, prev_track)
         await interaction.followup.send(embed=embed, view=view)
     
@@ -2241,7 +2186,6 @@ class Music(commands.Cog, name="music"):
                     embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
                     await interaction.followup.send(embed=embed)
             else:
-                # Single track result from playlist command
                 queue = self.get_queue(guild.id)
                 if not player.playing:
                     self.current[guild.id] = tracks[0]
@@ -2255,31 +2199,18 @@ class Music(commands.Cog, name="music"):
                     await interaction.followup.send(f"✅ Added **{tracks[0].title}** to the queue.")
         
         except Exception as e:
+            logger.error(f"Music playlist error: {e}")
             await interaction.followup.send(f"❌ Error: {str(e)}")
 
 
-# ─── EVENTS COG ───────────────────────────────────────────────────────────────
+# =========================
+# 🎵 WAVELINK EVENTS COG
+# =========================
 
-class Events(commands.Cog):
+class WavelinkEvents(commands.Cog):
+    """Handles wavelink track lifecycle events."""
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-    
-    @commands.Cog.listener()
-    async def on_ready(self):
-        print(f"✅ Logged in as {self.bot.user}")
-        print(f"🌐 Connected to {len(self.bot.guilds)} guild(s)")
-        
-        # Connect to Lavalink
-        try:
-            lava_node: wavelink.Node = wavelink.Node(
-                uri="http://localhost:2333",
-                password="youshallnotpass"
-            )
-            await wavelink.Pool.connect(client=self.bot, nodes=[lava_node])
-            print("✅ Connected to Lavalink")
-        except Exception as e:
-            print(f"⚠️ Failed to connect to Lavalink: {e}")
-            print("Music features will be unavailable. Start Lavalink server at http://localhost:2333")
     
     @commands.Cog.listener()
     async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
@@ -2287,7 +2218,7 @@ class Events(commands.Cog):
         if not guild:
             return
         
-        music_cog = self.bot.get_cog("Music")
+        music_cog = self.bot.get_cog("music")
         if music_cog:
             track = payload.track
             music_cog.current[guild.id] = track
@@ -2298,7 +2229,7 @@ class Events(commands.Cog):
         if not guild:
             return
         
-        music_cog = self.bot.get_cog("Music")
+        music_cog = self.bot.get_cog("music")
         if not music_cog:
             return
         
@@ -2325,73 +2256,16 @@ class Events(commands.Cog):
             music_cog.current[guild.id] = None
     
     @commands.Cog.listener()
-    async def on_message(self, message):
-        if message.author.bot:
-            return
-        
-        # XP system
-        if message.guild:
-            await self.handle_xp(message)
-        
-        # Auto-response to "good morning/night" etc.
-        content = message.content.lower()
-        if any(greeting in content for greeting in ["good morning", "gm", "good night", "gn", "good afternoon", "good evening"]):
-            async with message.channel.typing():
-                response = await query_ai(f"The user said: '{message.content}'. Respond naturally to their greeting in a friendly way. Keep it short.")
-                await message.reply(response, mention_author=False)
-    
-    async def handle_xp(self, message):
-        user_id = message.author.id
-        guild_id = message.guild.id
-        now = int(time.time())
-        
-        cur = conn.cursor()
-        
-        # Check cooldown (60 seconds)
-        cur.execute("SELECT last_message FROM levels WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        row = cur.fetchone()
-        
-        if row:
-            if now - row[0] < 60:
-                return
-            xp_gain = random.randint(10, 25)
-            cur.execute("UPDATE levels SET xp = xp + ?, total_messages = total_messages + 1, last_message = ? WHERE user_id = ? AND guild_id = ?",
-                       (xp_gain, now, user_id, guild_id))
-        else:
-            xp_gain = random.randint(10, 25)
-            cur.execute("INSERT INTO levels (user_id, guild_id, xp, level, total_messages, last_message) VALUES (?, ?, ?, 1, 1, ?)",
-                       (user_id, guild_id, xp_gain, now))
-        
-        conn.commit()
-        
-        # Check level up
-        cur.execute("SELECT xp, level FROM levels WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
-        row = cur.fetchone()
-        if row:
-            xp, level = row
-            needed = 100 + (level * 50)
-            if xp >= needed:
-                new_level = level + 1
-                cur.execute("UPDATE levels SET xp = 0, level = ? WHERE user_id = ? AND guild_id = ?", (new_level, user_id, guild_id))
-                conn.commit()
-                
-                # Level up message
-                embed = discord.Embed(
-                    title="🎉 Level Up!",
-                    description=f"{message.author.mention} reached **level {new_level}**!",
-                    color=discord.Color.gold()
-                )
-                await message.channel.send(embed=embed)
+    async def on_wavelink_node_ready(self, node: wavelink.Node):
+        logger.info(f"✅ Wavelink node {node.identifier} is ready!")
 
 
-# ─── FUN COG ─────────────────────────────────────────────────────────────────
+# =========================
+# 🎮 FUN COG
+# =========================
 
 class Fun(commands.Cog, name="fun"):
-
-    fun_group = app_commands.Group(
-        name="fun",
-        description="Fun commands"
-    )
+    fun_group = app_commands.Group(name="fun", description="Fun commands")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -2412,10 +2286,8 @@ class Fun(commands.Cog, name="fun"):
             title="🎱 Magic 8Ball",
             color=discord.Color.purple()
         )
-
         embed.add_field(name="Question", value=question, inline=False)
         embed.add_field(name="Answer", value=random.choice(responses), inline=False)
-
         await interaction.response.send_message(embed=embed)
     
     @fun_group.command(name="dice", description="Roll a dice")
@@ -2442,7 +2314,8 @@ class Fun(commands.Cog, name="fun"):
                     embed.set_image(url=data.get("url"))
                     embed.set_footer(text=f"From r/{data.get('subreddit', 'unknown')} | 👍 {data.get('ups', 0)}")
                     await interaction.followup.send(embed=embed)
-        except:
+        except Exception as e:
+            logger.error(f"Meme error: {e}")
             await interaction.followup.send("❌ Failed to fetch meme. Try again later.")
     
     @fun_group.command(name="rps", description="Play rock-paper-scissors")
@@ -2472,40 +2345,25 @@ class Fun(commands.Cog, name="fun"):
         await interaction.response.send_message(embed=embed)
 
 
-# ─── ECONOMY COG ─────────────────────────────────────────────────────────────
+# =========================
+# 💰 ECONOMY COG
+# =========================
 
 class Economy(commands.Cog, name="economy"):
-
-    economy_group = app_commands.Group(
-        name="economy",
-        description="Economy commands"
-    )
+    economy_group = app_commands.Group(name="economy", description="Economy commands")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.daily_cooldowns = {}
 
-    def get_balance(self, user_id: int) -> tuple:
-        cur = conn.cursor()
-        cur.execute("SELECT wallet, bank FROM economy WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-
-        if row:
-            return row
-
-        cur.execute(
-            "INSERT INTO economy (user_id, wallet, bank) VALUES (?, 0, 0)",
-            (user_id,)
-        )
-        conn.commit()
-
-        return (0, 0)
+    async def get_balance(self, user_id: int) -> tuple:
+        return await get_balance_simple(user_id)
     
     @economy_group.command(name="balance", description="Check your or another user's balance")
     @app_commands.describe(member="Member to check (optional)")
     async def economy_balance(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
-        wallet, bank = self.get_balance(target.id)
+        wallet, bank = await self.get_balance(target.id)
         embed = discord.Embed(title=f"💰 {target.display_name}'s Balance", color=discord.Color.gold())
         embed.add_field(name="Wallet", value=f"${wallet:,}", inline=True)
         embed.add_field(name="Bank", value=f"${bank:,}", inline=True)
@@ -2526,11 +2384,12 @@ class Economy(commands.Cog, name="economy"):
                     f"⏰ You already claimed your daily! Come back in {int(hours)}h {int(minutes)}m.", ephemeral=True)
         
         amount = random.randint(100, 500)
-        cur = conn.cursor()
-        cur.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id = ?", (amount, user_id))
-        if cur.rowcount == 0:
-            cur.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (user_id, amount))
-        conn.commit()
+        result = await db.fetchone("SELECT wallet FROM economy WHERE user_id=?", (user_id,))
+        if result:
+            await db.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id=?", (amount, user_id))
+        else:
+            await db.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (user_id, amount))
+        await db.commit()
         
         self.daily_cooldowns[user_id] = now
         embed = discord.Embed(title="📅 Daily Reward", description=f"You received **${amount:,}**!", color=discord.Color.green())
@@ -2544,16 +2403,16 @@ class Economy(commands.Cog, name="economy"):
         if member.id == interaction.user.id:
             return await interaction.response.send_message("❌ You can't pay yourself.", ephemeral=True)
         
-        sender_wallet, _ = self.get_balance(interaction.user.id)
+        sender_result = await db.fetchone("SELECT wallet FROM economy WHERE user_id=?", (interaction.user.id,))
+        sender_wallet = sender_result[0] if sender_result else 0
         if sender_wallet < amount:
             return await interaction.response.send_message("❌ Insufficient funds in wallet.", ephemeral=True)
         
-        cur = conn.cursor()
-        cur.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id = ?", (amount, interaction.user.id))
-        cur.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id = ?", (amount, member.id))
-        if cur.rowcount == 0:
-            cur.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (member.id, amount))
-        conn.commit()
+        await db.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id=?", (amount, interaction.user.id))
+        await db.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id=?", (amount, member.id))
+        if db._conn.total_changes == 0:
+            await db.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (member.id, amount))
+        await db.commit()
         
         embed = discord.Embed(title="💸 Payment Sent", color=discord.Color.green())
         embed.add_field(name="From", value=interaction.user.mention, inline=True)
@@ -2567,30 +2426,29 @@ class Economy(commands.Cog, name="economy"):
         if amount <= 0:
             return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
         
-        wallet, _ = self.get_balance(interaction.user.id)
+        result = await db.fetchone("SELECT wallet FROM economy WHERE user_id=?", (interaction.user.id,))
+        wallet = result[0] if result else 0
         if wallet < amount:
             return await interaction.response.send_message("❌ Insufficient funds.", ephemeral=True)
         
         win = random.random() < 0.45
         if win:
             winnings = int(amount * random.uniform(1.5, 3.0))
-            cur = conn.cursor()
-            cur.execute("UPDATE economy SET wallet = wallet - ? + ? WHERE user_id = ?", (amount, winnings, interaction.user.id))
-            conn.commit()
+            await db.execute("UPDATE economy SET wallet = wallet - ? + ? WHERE user_id=?", (amount, winnings, interaction.user.id))
+            await db.commit()
             embed = discord.Embed(title="🎰 You Won!", description=f"You gambled ${amount:,} and won **${winnings:,}**!", color=discord.Color.green())
         else:
-            cur = conn.cursor()
-            cur.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id = ?", (amount, interaction.user.id))
-            conn.commit()
+            await db.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id=?", (amount, interaction.user.id))
+            await db.commit()
             embed = discord.Embed(title="🎰 You Lost!", description=f"You gambled ${amount:,} and lost it all.", color=discord.Color.red())
         
         await interaction.response.send_message(embed=embed)
     
     @economy_group.command(name="leaderboard", description="View the economy leaderboard")
     async def economy_leaderboard(self, interaction: discord.Interaction):
-        cur = conn.cursor()
-        cur.execute("SELECT user_id, wallet, bank FROM economy ORDER BY (wallet + bank) DESC LIMIT 10")
-        rows = cur.fetchall()
+        rows = await db.fetchall(
+            "SELECT user_id, wallet, bank FROM economy ORDER BY (wallet + bank) DESC LIMIT 10"
+        )
         
         embed = discord.Embed(title="🏆 Economy Leaderboard", color=discord.Color.gold())
         
@@ -2608,119 +2466,18 @@ class Economy(commands.Cog, name="economy"):
         await interaction.response.send_message(embed=embed)
 
 
-# ─── GIVEAWAY COG ─────────────────────────────────────────────────────────────
-
-# Store active giveaways: guild_id -> list of giveaway dicts
-active_giveaways = {}
-
-class GiveawayView(discord.ui.View):
-    def __init__(self, giveaway_id: str):
-        super().__init__(timeout=None)
-        self.giveaway_id = giveaway_id
-
-    @discord.ui.button(
-        label="🎉 Enter Giveaway",
-        style=discord.ButtonStyle.primary,
-        custom_id="giveaway_enter"
-    )
-    async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-
-        for guild_id, giveaways in active_giveaways.items():
-            for g in giveaways:
-                if g["id"] == self.giveaway_id:
-
-                    if interaction.user.id in g["entries"]:
-                        return await interaction.response.send_message(
-                            "⚠️ You already entered!",
-                            ephemeral=True
-                        )
-
-                    g["entries"].append(interaction.user.id)
-
-                    embed = interaction.message.embeds[0]
-                    embed.set_field_at(
-                        0,
-                        name="Entries",
-                        value=str(len(g["entries"])),
-                        inline=True
-                    )
-
-                    await interaction.message.edit(embed=embed)
-
-                    return await interaction.response.send_message(
-                        "✅ You entered the giveaway!",
-                        ephemeral=True
-                    )
-
-        await interaction.response.send_message(
-            "❌ This giveaway has ended.",
-            ephemeral=True
-        )
-
+# =========================
+# 🎉 GIVEAWAY COG (UNIFIED)
+# =========================
 
 class Giveaway(commands.Cog, name="giveaway"):
+    giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        # DO NOT create another asyncio.create_task for check_giveaways here
+        # The global @tasks.loop handles it already
 
-        # safer than loop.create_task in Railway
-        asyncio.create_task(self.check_giveaways())
-
-    async def check_giveaways(self):
-        await self.bot.wait_until_ready()
-
-        while not self.bot.is_closed():
-            now = time.time()
-
-            for guild_id, giveaways in list(active_giveaways.items()):
-                for g in giveaways[:]:
-                    if now >= g.get("end_time", 0) and not g.get("ended"):
-                        g["ended"] = True
-                        await self.end_giveaway(guild_id, g)
-
-            await asyncio.sleep(30)
-
-    async def end_giveaway(self, guild_id: int, g: dict):
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            return
-
-        channel = guild.get_channel(g["channel_id"])
-        if not channel:
-            return
-
-        try:
-            msg = await channel.fetch_message(g["message_id"])
-        except:
-            return
-
-        entries = g.get("entries", [])
-
-        if not entries:
-            embed = msg.embeds[0]
-            embed.title = "🎉 Giveaway Ended - No Winners"
-            embed.color = discord.Color.red()
-            await msg.edit(embed=embed, view=None)
-            return
-        
-        winners_count = min(g["winners"], len(entries))
-        winners = random.sample(entries, winners_count)
-        
-        embed = msg.embeds[0]
-        embed.title = "🎉 Giveaway Ended"
-        embed.color = discord.Color.red()
-        embed.clear_fields()
-        embed.add_field(name="Winner(s)", value=", ".join(f"<@{w}>" for w in winners), inline=False)
-        embed.add_field(name="Prize", value=g["prize"], inline=False)
-        await msg.edit(embed=embed, view=None)
-        
-        await channel.send(f"🎉 Congratulations {' '.join(f'<@{w}>' for w in winners)}! You won **{g['prize']}**!")
-        
-        # Remove from active
-        for guild_id2, giveaways in active_giveaways.items():
-            if g in giveaways:
-                giveaways.remove(g)
-    
     @giveaway_group.command(name="start", description="Start a giveaway")
     @app_commands.describe(
         prize="The prize to give away",
@@ -2764,6 +2521,8 @@ class Giveaway(commands.Cog, name="giveaway"):
         if interaction.guild_id not in active_giveaways:
             active_giveaways[interaction.guild_id] = []
         active_giveaways[interaction.guild_id].append(g_entry)
+        
+        logger.info(f"Giveaway started: {prize} in {interaction.guild_id}")
     
     @giveaway_group.command(name="reroll", description="Reroll a giveaway winner")
     @app_commands.describe(message_id="ID of the giveaway message")
@@ -2777,7 +2536,6 @@ class Giveaway(commands.Cog, name="giveaway"):
         except:
             return await interaction.response.send_message("❌ Message not found.", ephemeral=True)
         
-        # Find the giveaway
         for guild_id, giveaways in active_giveaways.items():
             for g in giveaways:
                 if g["message_id"] == msg_id and g.get("ended"):
@@ -2797,79 +2555,13 @@ class Giveaway(commands.Cog, name="giveaway"):
         await interaction.response.send_message("❌ Could not find that giveaway or it hasn't ended yet.", ephemeral=True)
 
 
-# ─── TICKET COG ──────────────────────────────────────────────────────────────
-
-class TicketView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    
-    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.primary, custom_id="create_ticket")
-    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        guild = interaction.guild
-        user = interaction.user
-        
-        # Check if user already has an open ticket
-        existing = discord.utils.get(guild.text_channels, name=f"ticket-{user.name.lower().replace(' ', '-')}")
-        if existing:
-            return await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
-        
-        # Create ticket channel
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=False),
-            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
-            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        }
-        
-        # Add admin role if exists
-        admin_role = discord.utils.get(guild.roles, name="Admin")
-        if admin_role:
-            overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        
-        mod_role = discord.utils.get(guild.roles, name="Moderator")
-        if mod_role:
-            overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
-        
-        try:
-            channel = await guild.create_text_channel(
-                name=f"ticket-{user.name.lower().replace(' ', '-')}",
-                topic=f"Support ticket for {user.name} ({user.id})",
-                overwrites=overwrites,
-                category=None
-            )
-            
-            embed = discord.Embed(
-                title="🎫 Ticket Created",
-                description=f"Hello {user.mention}! Support will be with you shortly.\n\nType your issue below.",
-                color=discord.Color.green()
-            )
-            
-            close_view = TicketCloseView()
-            await channel.send(embed=embed, view=close_view)
-            await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
-        except:
-            await interaction.response.send_message("❌ Failed to create ticket. Check my permissions.", ephemeral=True)
-
-
-class TicketCloseView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-    
-    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
-    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not interaction.channel.name.startswith("ticket-"):
-            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
-        
-        embed = discord.Embed(
-            title="🔒 Closing Ticket",
-            description="This ticket will be closed in 5 seconds...",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-        await asyncio.sleep(5)
-        await interaction.channel.delete()
-
+# =========================
+# 🎫 TICKET COG
+# =========================
 
 class Ticket(commands.Cog, name="ticket"):
+    ticket_group = app_commands.Group(name="ticket", description="Ticket commands")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -2884,7 +2576,7 @@ class Ticket(commands.Cog, name="ticket"):
             color=discord.Color.blue()
         )
         
-        view = TicketView()
+        view = TicketPanelView()
         await interaction.response.send_message(embed=embed, view=view)
     
     @ticket_group.command(name="add", description="Add a user to a ticket")
@@ -2893,8 +2585,12 @@ class Ticket(commands.Cog, name="ticket"):
         if not interaction.channel.name.startswith("ticket-"):
             return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
         
-        await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
-        await interaction.response.send_message(f"✅ Added {member.mention} to this ticket.")
+        try:
+            await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+            await interaction.response.send_message(f"✅ Added {member.mention} to this ticket.")
+        except Exception as e:
+            logger.error(f"Ticket add error: {e}")
+            await interaction.response.send_message(f"❌ Error: {e}")
     
     @ticket_group.command(name="remove", description="Remove a user from a ticket")
     @app_commands.describe(member="Member to remove")
@@ -2902,13 +2598,21 @@ class Ticket(commands.Cog, name="ticket"):
         if not interaction.channel.name.startswith("ticket-"):
             return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
         
-        await interaction.channel.set_permissions(member, overwrite=None)
-        await interaction.response.send_message(f"✅ Removed {member.mention} from this ticket.")
+        try:
+            await interaction.channel.set_permissions(member, overwrite=None)
+            await interaction.response.send_message(f"✅ Removed {member.mention} from this ticket.")
+        except Exception as e:
+            logger.error(f"Ticket remove error: {e}")
+            await interaction.response.send_message(f"❌ Error: {e}")
 
 
-# ─── LEVELING COG ────────────────────────────────────────────────────────────
+# =========================
+# 📊 LEVELING COG
+# =========================
 
 class Leveling(commands.Cog, name="leveling"):
+    leveling_group = app_commands.Group(name="leveling", description="Leveling commands")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
@@ -2917,24 +2621,24 @@ class Leveling(commands.Cog, name="leveling"):
     async def leveling_rank(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
         
-        cur = conn.cursor()
-        cur.execute("SELECT xp, level, total_messages FROM levels WHERE user_id = ? AND guild_id = ?", (target.id, interaction.guild.id))
-        row = cur.fetchone()
+        row = await db.fetchone(
+            "SELECT xp, level, total_messages FROM levels WHERE user_id=? AND guild_id=?",
+            (target.id, interaction.guild.id)
+        )
         
         if not row:
             return await interaction.response.send_message(f"{target.mention} has no XP yet.", ephemeral=True)
         
         xp, level, total_messages = row
         
-        # Get rank
-        cur.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND (xp + (level * (100 + (level - 1) * 50))) > ?",
-                   (interaction.guild.id, xp + (level * (100 + (level - 1) * 50))))
-        rank_row = cur.fetchone()
-        rank = (rank_row[0] if rank_row else 0) + 1
+        rank_result = await db.fetchone(
+            "SELECT COUNT(*) FROM levels WHERE guild_id=? AND (xp + (level * (100 + (level - 1) * 50))) > (SELECT xp + (level * (100 + (level - 1) * 50)) FROM levels WHERE user_id=? AND guild_id=?)",
+            (interaction.guild.id, target.id, interaction.guild.id)
+        )
+        rank = (rank_result[0] if rank_result else 0) + 1
         
-        # Get total users
-        cur.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ?", (interaction.guild.id,))
-        total_users = cur.fetchone()[0]
+        total_users_result = await db.fetchone("SELECT COUNT(*) FROM levels WHERE guild_id=?", (interaction.guild.id,))
+        total_users = total_users_result[0] if total_users_result else 0
         
         needed = 100 + (level * 50)
         
@@ -2944,7 +2648,6 @@ class Leveling(commands.Cog, name="leveling"):
         embed.add_field(name="XP", value=f"{xp}/{needed}", inline=False)
         embed.add_field(name="Total Messages", value=str(total_messages), inline=True)
         
-        # Progress bar
         progress = min(xp / needed, 1.0) if needed > 0 else 0
         bar_length = 15
         filled = int(progress * bar_length)
@@ -2955,9 +2658,10 @@ class Leveling(commands.Cog, name="leveling"):
     
     @leveling_group.command(name="leaderboard", description="View the leveling leaderboard")
     async def leveling_leaderboard(self, interaction: discord.Interaction):
-        cur = conn.cursor()
-        cur.execute("SELECT user_id, level, xp FROM levels WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT 10", (interaction.guild.id,))
-        rows = cur.fetchall()
+        rows = await db.fetchall(
+            "SELECT user_id, level, xp FROM levels WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10",
+            (interaction.guild.id,)
+        )
         
         embed = discord.Embed(title=f"🏆 Leveling Leaderboard - {interaction.guild.name}", color=discord.Color.gold())
         
@@ -2974,13 +2678,16 @@ class Leveling(commands.Cog, name="leveling"):
         await interaction.response.send_message(embed=embed)
 
 
-# ─── AI COG ──────────────────────────────────────────────────────────────────
+# =========================
+# 🤖 AI COG
+# =========================
 
 class AI(commands.Cog, name="ai"):
+    ai_group = app_commands.Group(name="ai", description="AI commands")
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.ai_client = OpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
-        self.conversation_history = {}  # channel_id or user_id -> list of messages
+        self.conversation_history = {}
     
     def get_history(self, channel_id: int) -> list:
         if channel_id not in self.conversation_history:
@@ -2995,7 +2702,6 @@ class AI(commands.Cog, name="ai"):
         history = self.get_history(interaction.channel_id)
         history.append({"role": "user", "content": f"[{interaction.user.display_name}] {message}"})
         
-        # Keep history manageable
         if len(history) > 20:
             history = history[-20:]
             self.conversation_history[interaction.channel_id] = history
@@ -3011,6 +2717,7 @@ class AI(commands.Cog, name="ai"):
             else:
                 await interaction.followup.send(response)
         except Exception as e:
+            logger.error(f"AI chat error: {e}")
             await interaction.followup.send(f"❌ AI Error: {str(e)}")
     
     @ai_group.command(name="reset", description="Reset the AI conversation history")
@@ -3031,10 +2738,56 @@ class AI(commands.Cog, name="ai"):
             else:
                 await interaction.followup.send(response)
         except Exception as e:
+            logger.error(f"AI ask error: {e}")
             await interaction.followup.send(f"❌ AI Error: {str(e)}")
 
 
-# ─── HELP COG ────────────────────────────────────────────────────────────────
+# =========================
+# 📋 UTILITY COMMANDS
+# =========================
+
+class Utility(commands.Cog, name="utility"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @app_commands.command(name="ping", description="Check the bot's latency")
+    async def ping(self, interaction: discord.Interaction):
+        latency = round(self.bot.latency * 1000)
+        await interaction.response.send_message(f"🏓 Pong! `{latency}ms`")
+    
+    @app_commands.command(name="serverinfo", description="Display information about the server")
+    async def serverinfo(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        embed = discord.Embed(title=guild.name, color=discord.Color.blue())
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+        embed.add_field(name="Members", value=guild.member_count, inline=True)
+        embed.add_field(name="Channels", value=len(guild.channels), inline=True)
+        embed.add_field(name="Roles", value=len(guild.roles), inline=True)
+        embed.add_field(name="Created", value=f"<t:{int(guild.created_at.timestamp())}:R>", inline=True)
+        embed.add_field(name="ID", value=guild.id, inline=True)
+        await interaction.response.send_message(embed=embed)
+    
+    @app_commands.command(name="userinfo", description="Display information about a user")
+    @app_commands.describe(member="Member to look up (optional)")
+    async def userinfo(self, interaction: discord.Interaction, member: discord.Member = None):
+        target = member or interaction.user
+        embed = discord.Embed(title=target.display_name, color=target.color or discord.Color.blue())
+        if target.avatar:
+            embed.set_thumbnail(url=target.avatar.url)
+        embed.add_field(name="Username", value=str(target), inline=True)
+        embed.add_field(name="ID", value=target.id, inline=True)
+        embed.add_field(name="Joined", value=f"<t:{int(target.joined_at.timestamp())}:R>" if target.joined_at else "Unknown", inline=True)
+        embed.add_field(name="Created", value=f"<t:{int(target.created_at.timestamp())}:R>", inline=True)
+        embed.add_field(name="Top Role", value=target.top_role.mention if target.top_role else "None", inline=True)
+        embed.add_field(name="Bot", value="Yes" if target.bot else "No", inline=True)
+        await interaction.response.send_message(embed=embed)
+
+
+# =========================
+# 📋 HELP COG
+# =========================
 
 class Help(commands.Cog, name="help"):
     def __init__(self, bot: commands.Bot):
@@ -3050,7 +2803,7 @@ class Help(commands.Cog, name="help"):
         
         embed.add_field(
             name="🛡️ Moderation",
-            value="`/mod ban`, `/mod kick`, `/mod warn`, `/mod mute`, `/mod unmute`, `/mod clean`, `/mod softban`",
+            value="`/mod clear`, `/mod clearall`, `/mod ban`, `/mod softban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod clean`",
             inline=False
         )
         embed.add_field(
@@ -3098,19 +2851,9 @@ class Help(commands.Cog, name="help"):
         await interaction.response.send_message(embed=embed)
 
 
-# ─── COMMAND GROUPS (definitions) ───────────────────────────────────────────
-
-# These were used earlier; the actual commands are in cogs above.
-# The groups are defined here for the tree to register properly.
-# Note: The actual command implementations are in their respective cogs.
-
-class GroupCog(commands.Cog):
-    """Container cog for command groups that don't need their own cog."""
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-
-
-# ─── ERROR HANDLER ───────────────────────────────────────────────────────────
+# =========================
+# ⚠️ ERROR HANDLER
+# =========================
 
 class CommandErrorHandler(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -3118,88 +2861,109 @@ class CommandErrorHandler(commands.Cog):
     
     @commands.Cog.listener()
     async def on_command_error(self, ctx: commands.Context, error):
-        print(f"Command error: {error}")
+        logger.error(f"Command error in {ctx.command}: {error}")
     
     @commands.Cog.listener()
     async def on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
         if isinstance(error, discord.app_commands.CommandOnCooldown):
-            return await interaction.response.send_message(f"⏰ Command on cooldown. Try again in {error.retry_after:.0f}s.", ephemeral=True)
+            return await interaction.response.send_message(
+                f"⏰ Command on cooldown. Try again in {error.retry_after:.0f}s.", ephemeral=True)
         elif isinstance(error, discord.app_commands.MissingPermissions):
             return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         elif isinstance(error, discord.app_commands.BotMissingPermissions):
             return await interaction.response.send_message("❌ I don't have the required permissions.", ephemeral=True)
+        elif isinstance(error, discord.app_commands.CheckFailure):
+            return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
         else:
-            print(f"App command error: {error}")
+            error_details = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+            logger.error(f"App command error: {error}\n{error_details}")
             try:
-                await interaction.response.send_message(f"❌ An error occurred: {str(error)}", ephemeral=True)
+                await interaction.response.send_message(f"❌ An error occurred: {str(error)[:100]}", ephemeral=True)
             except:
                 try:
-                    await interaction.followup.send(f"❌ An error occurred: {str(error)}", ephemeral=True)
+                    await interaction.followup.send(f"❌ An error occurred: {str(error)[:100]}", ephemeral=True)
                 except:
                     pass
 
 
-# ─── HELPER FUNCTIONS ───────────────────────────────────────────────────────
+# =========================
+# 📋 HISTORY COMMANDS
+# =========================
 
-async def query_ai(prompt: str) -> str:
-    """Query the AI API for a response."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "Authorization": f"Bearer {AI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful Discord bot assistant. Keep responses concise and friendly."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            
-            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    return f"AI service returned status {resp.status}"
-    except Exception as e:
-        return f"AI error: {str(e)}"
+class HistoryCommands(commands.Cog, name="history"):
+    history_group = app_commands.Group(name="history", description="View server history")
+
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @history_group.command(name="user", description="View a user's history")
+    @app_commands.describe(member="Member to check")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def history_user(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        events = await get_user_history(member.id, interaction.guild.id)
+        if not events:
+            return await interaction.followup.send("No history found.", ephemeral=True)
+        
+        embed = discord.Embed(title=f"📜 History for {member.display_name}", color=discord.Color.blue())
+        for event_type, details, timestamp in events[:15]:
+            embed.add_field(name=event_type, value=f"{details[:100]}\n{timestamp}", inline=False)
+        
+        await interaction.followup.send(embed=embed)
+    
+    @history_group.command(name="search", description="Search history")
+    @app_commands.describe(query="Search term")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def history_search(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer(ephemeral=True)
+        events = await get_history_search(interaction.guild.id, query)
+        if not events:
+            return await interaction.followup.send("No matching history found.", ephemeral=True)
+        
+        embed = discord.Embed(title=f"🔍 History Search: {query}", color=discord.Color.blue())
+        for event_type, details, timestamp, username, user_id in events[:15]:
+            embed.add_field(name=f"{event_type} - {username}", value=f"{details[:100]}\n{timestamp}", inline=False)
+        
+        await interaction.followup.send(embed=embed)
 
 
-def format_duration(ms: int) -> str:
-    """Format milliseconds to a time string."""
-    seconds = ms // 1000
-    minutes, secs = divmod(seconds, 60)
-    hours, mins = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}:{mins:02d}:{secs:02d}"
-    return f"{mins}:{secs:02d}"
-
-
-# ─── BOT INITIALIZATION ──────────────────────────────────────────────────────
+# =========================
+# 🎵 MAIN BOT INITIALIZATION
+# =========================
 
 async def main():
     async with bot:
+        # Connect database
+        await db.connect()
+        
+        # Register all cogs
         await bot.add_cog(Moderation(bot))
         await bot.add_cog(Music(bot))
-        await bot.add_cog(Events(bot))
+        await bot.add_cog(WavelinkEvents(bot))
         await bot.add_cog(Fun(bot))
         await bot.add_cog(Economy(bot))
         await bot.add_cog(Giveaway(bot))
         await bot.add_cog(Ticket(bot))
         await bot.add_cog(Leveling(bot))
         await bot.add_cog(AI(bot))
+        await bot.add_cog(Utility(bot))
         await bot.add_cog(Help(bot))
-        await bot.add_cog(GroupCog(bot))
         await bot.add_cog(CommandErrorHandler(bot))
+        await bot.add_cog(HistoryCommands(bot))
         
+        # Sync slash commands
         await bot.tree.sync()
-        print("✅ Slash commands synced")
+        logger.info("✅ Slash commands synced")
+        
+        # Start the bot
         await bot.start(TOKEN)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot shut down by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        traceback.print_exc()
