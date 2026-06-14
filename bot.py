@@ -1031,7 +1031,7 @@ YTDLP_OPTIONS = {
     "no_warnings": True,
     "nocheckcertificate": True,
     "extract_flat": False,
-    "default_search": "ytsearch1",  # ✅ IMPORTANT FIX
+    "default_search": "ytsearch",  # ✅ IMPORTANT FIX
 }
 
 FFMPEG_OPTIONS = {
@@ -1066,7 +1066,7 @@ class YTDLSource(PCMVolumeTransformer):
                 search_url = url  # <-- FIX
 
                 if not search_url.startswith(("http://", "https://")):
-                    search_url = f"ytsearch1:{search_url}"
+                    search_url = f"ytsearch:{search_url}"
 
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     return ydl.extract_info(search_url, download=not stream)
