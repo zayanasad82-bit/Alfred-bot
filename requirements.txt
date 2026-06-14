@@ -6,4 +6,4 @@ aiohttp
 discord.py[voice]
 PyNaCl
 davey
-yt-dlp==2025.07.01
+yt-dlp>=2024.12.23
