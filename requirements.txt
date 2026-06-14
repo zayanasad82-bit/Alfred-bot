@@ -1,9 +1,7 @@
-discord.py
+discord.py[voice]
+PyNaCl
+aiohttp
+yt-dlp
 google-genai
 pypdf
 python-docx
-aiohttp
-discord.py[voice]
-PyNaCl
-davey
-yt-dlp
