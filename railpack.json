@@ -1,0 +1,7 @@
+{
+  "steps": {
+    "setup": {
+      "aptPackages": ["ffmpeg"]
+    }
+  }
+}
