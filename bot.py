@@ -1009,8 +1009,8 @@ async def clean_inactive_players():
             if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
                 if not player.is_playing() and not player.is_paused:
                     await player.disconnect_voice()
-                    if guild_id in music_players:
-                        del music_players[guild_id]
+                    music_players.pop(guild_id, None)
+
 
 # =========================
 # 🎵 MUSIC SYSTEM - YT-DLP CONFIGURATION
@@ -1020,19 +1020,14 @@ yt_dlp.utils.bug_reports_message = lambda: ''
 
 YTDLP_OPTIONS = {
     'format': 'bestaudio/best',
-    'extractaudio': True,
-    'audioformat': 'mp3',
-    'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s',
-    'restrictfilenames': True,
     'noplaylist': True,
     'nocheckcertificate': True,
     'ignoreerrors': False,
-    'logtostderr': False,
     'quiet': True,
     'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0',
+    'restrictfilenames': True,
     'extract_flat': False,
+    'source_address': '0.0.0.0',
 }
 
 FFMPEG_OPTIONS = {
@@ -1043,6 +1038,9 @@ FFMPEG_OPTIONS = {
 URL_REGEX = re.compile(r'https?://')
 
 
+# =========================
+# 🎧 YTDL SOURCE
+# =========================
 class YTDLSource(PCMVolumeTransformer):
     def __init__(self, source: discord.FFmpegPCMAudio, *, data: dict, volume: float = 0.5):
         super().__init__(source, volume)
@@ -1051,63 +1049,25 @@ class YTDLSource(PCMVolumeTransformer):
         self.url = data.get('webpage_url', '')
         self.duration = data.get('duration', 0)
         self.thumbnail = data.get('thumbnail', '')
-        self.channel = data.get('channel', '')
-        self.channel_url = data.get('channel_url', '')
-        self.uploader = data.get('uploader', '')
-        self.views = data.get('view_count', 0)
-        self.upload_date = data.get('upload_date', '')
+        self.uploader = data.get('uploader', 'Unknown')
 
     @classmethod
-    async def from_url(cls, url: str, *, loop: asyncio.AbstractEventLoop = None, stream: bool = True):
+    async def from_url(cls, url: str, *, loop=None, stream: bool = True):
         loop = loop or asyncio.get_event_loop()
-
-        if not URL_REGEX.match(url):
-            url = f'ytsearch:{url}'
 
         partial = functools.partial(cls._extract_info, url, stream)
         data = await loop.run_in_executor(None, partial)
 
-        if data is None:
-            raise ValueError("Could not find any matching song.")
+        if not data:
+            raise ValueError("Could not find song.")
 
         if 'entries' in data:
             data = data['entries'][0]
 
         filename = data['url'] if stream else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
 
-        audio_source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
-        return cls(audio_source, data=data)
-
-    @classmethod
-    async def from_playlist(cls, url: str, *, loop: asyncio.AbstractEventLoop = None):
-        loop = loop or asyncio.get_event_loop()
-
-        opts = YTDLP_OPTIONS.copy()
-        opts['noplaylist'] = False
-        opts['extract_flat'] = True
-
-        partial = functools.partial(cls._extract_info, url, True, opts)
-        data = await loop.run_in_executor(None, partial)
-
-        if data is None:
-            raise ValueError("Could not find any matching playlist.")
-
-        tracks = []
-        playlist_title = data.get('title', 'Unknown Playlist')
-
-        if 'entries' in data:
-            for entry in data['entries']:
-                if entry:
-                    tracks.append({
-                        'title': entry.get('title', 'Unknown'),
-                        'url': entry.get('url') or entry.get('webpage_url', ''),
-                        'duration': entry.get('duration', 0),
-                        'thumbnail': entry.get('thumbnail', ''),
-                        'channel': entry.get('channel', ''),
-                        'uploader': entry.get('uploader', ''),
-                    })
-
-        return playlist_title, tracks
+        source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
+        return cls(source, data=data)
 
     @staticmethod
     def _extract_info(url: str, stream: bool, custom_opts: dict = None):
@@ -1117,43 +1077,21 @@ class YTDLSource(PCMVolumeTransformer):
 
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
-                # If it's not a real URL, treat it as a YouTube search
+
+                # ONLY ONE SEARCH SYSTEM (FIXED)
                 if not url.startswith("http"):
                     url = f"ytsearch1:{url}"
 
                 return ydl.extract_info(url, download=not stream)
 
         except Exception as e:
-            print(f"yt-dlp extract error: {e}")
+            print(f"yt-dlp error: {e}")
             return None
-        
-    @classmethod
-    async def search_results(cls, query: str, *, loop: asyncio.AbstractEventLoop = None, max_results: int = 5):
-        loop = loop or asyncio.get_event_loop()
-        
-        search_url = f'ytsearch{max_results}:{query}'
-        opts = YTDLP_OPTIONS.copy()
-        opts['noplaylist'] = True
-        opts['extract_flat'] = True
-        
-        partial = functools.partial(cls._extract_info, search_url, True, opts)
-        data = await loop.run_in_executor(None, partial)
-        
-        results = []
-        if data and 'entries' in data:
-            for entry in data['entries']:
-                if entry:
-                    results.append({
-                        'title': entry.get('title', 'Unknown'),
-                        'url': f"https://www.youtube.com/watch?v={entry.get('id', '')}",
-                        'duration': entry.get('duration', 0),
-                        'thumbnail': entry.get('thumbnail', ''),
-                        'channel': entry.get('channel', ''),
-                        'uploader': entry.get('uploader', ''),
-                    })
-        return results
 
 
+# =========================
+# 🎵 MUSIC PLAYER
+# =========================
 class MusicPlayer:
     def __init__(self, bot: commands.Bot, guild_id: int):
         self.bot = bot
@@ -1165,272 +1103,93 @@ class MusicPlayer:
         self.loop_mode = 'none'
         self.volume = 0.5
         self.is_paused = False
-        self.now_playing_message = None
-        self._play_next_lock = asyncio.Lock()
         self._task = None
-    
-    async def connect_voice(self, channel: discord.VoiceChannel) -> bool:
+
+    async def connect_voice(self, channel: discord.VoiceChannel):
         try:
             if self.voice_client and self.voice_client.is_connected():
                 if self.voice_client.channel.id != channel.id:
                     await self.voice_client.move_to(channel)
                 return True
-            
-            self.voice_client = await channel.connect(timeout=20.0)
+
+            self.voice_client = await channel.connect()
             return True
         except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print(f"Voice connect error: {repr(e)}")
+            print(f"Voice connect error: {e}")
             return False
-    
+
     async def disconnect_voice(self):
         if self.voice_client and self.voice_client.is_connected():
-            self.queue = asyncio.Queue()
-            self.queue_history.clear()
-            self.current = None
-            self.is_paused = False
-            self.loop_mode = 'none'
-            if self._task:
-                self._task.cancel()
-                self._task = None
-            await self.voice_client.disconnect(force=True)
-            self.voice_client = None
-    
-    async def add_to_queue(self, track_data: dict, at_front: bool = False):
-        if at_front:
-            old_queue = []
-            while not self.queue.empty():
-                old_queue.append(await self.queue.get())
-            self.queue.put_nowait(track_data)
-            for item in old_queue:
-                self.queue.put_nowait(item)
-        else:
-            await self.queue.put(track_data)
-        
-        if not self.is_playing() and not self.is_paused:
-            if self._task is None or self._task.done():
-                await self.start_playback()
-    
-    async def start_playback(self):
-        if self._task is not None and not self._task.done():
-            return
-        self._task = asyncio.create_task(self._playback_loop())
-    
-    async def _playback_loop(self):
-        try:
-            while True:
-                if self.loop_mode == 'none':
-                    self.current = await self.queue.get()
-                elif self.loop_mode == 'one':
-                    pass
-                elif self.loop_mode == 'all':
-                    await self.queue.put(self.current)
-                    self.current = await self.queue.get()
-                
-                if self.current:
-                    self.queue_history.append(self.current)
-                    if len(self.queue_history) > 50:
-                        self.queue_history.pop(0)
-                    
-                    await self._play_track(self.current)
-                
-                while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-                    await asyncio.sleep(1)
-                
-                if self.loop_mode == 'one' and self.current:
-                    continue
-                
-                if self.queue.empty() and self.loop_mode != 'all':
-                    self.current = None
-                    break
-        
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            print(f"Playback loop error: {e}")
-    
-    async def _play_track(self, track_data: dict):
-        if not self.voice_client or not self.voice_client.is_connected():
-            return
-        
-        try:
-            source = await YTDLSource.from_url(track_data['url'])
-            source.volume = self.volume
-            
-            self.current = track_data
-            self.is_paused = False
-            
-            self.voice_client.play(source, after=lambda e: print(f"Player error: {e}") if e else None)
-            
-            await self._update_now_playing()
-        
-        except Exception as e:
-            print(f"Play error: {e}")
-    
-    async def _update_now_playing(self):
-        if not self.current or not self.now_playing_message:
-            return
-        
-        try:
-            embed = self._create_now_playing_embed()
-            await self.now_playing_message.edit(embed=embed)
-        except Exception as e:
-            pass
-    
-    def _create_now_playing_embed(self) -> discord.Embed:
-        if not self.current:
-            return discord.Embed(title="🎵 No track playing", color=discord.Color.blue())
-        
-        track = self.current
-        duration_str = self._format_duration(track.get('duration', 0))
-        
-        embed = discord.Embed(
-            title="🎵 Now Playing",
-            description=f"[{track.get('title', 'Unknown')}]({track.get('url', '')})",
-            color=discord.Color.green()
-        )
-        
-        if track.get('thumbnail'):
-            embed.set_thumbnail(url=track['thumbnail'])
-        
-        embed.add_field(name="Duration", value=duration_str, inline=True)
-        embed.add_field(name="Uploader", value=track.get('uploader', 'Unknown'), inline=True)
-        
-        queue_size = self.queue.qsize()
-        embed.add_field(name="Queue", value=f"{queue_size} songs" if queue_size > 0 else "Empty", inline=True)
-        
-        loop_icons = {'none': '➡️', 'one': '🔂', 'all': '🔁'}
-        embed.set_footer(text=f"Volume: {int(self.volume * 100)}% | Loop: {loop_icons.get(self.loop_mode, '➡️')}")
-        
-        return embed
-    
-    def is_playing(self) -> bool:
-        return self.voice_client is not None and self.voice_client.is_playing()
-    
-    def pause(self):
-        if self.voice_client and self.voice_client.is_playing():
-            self.voice_client.pause()
-            self.is_paused = True
-    
-    def resume(self):
-        if self.voice_client and self.voice_client.is_paused():
-            self.voice_client.resume()
-            self.is_paused = False
-    
-    def stop(self):
-        if self.voice_client:
-            self.voice_client.stop()
-        
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except Exception as e:
-                break
-        
+            await self.voice_client.disconnect()
+        self.voice_client = None
+
         self.queue = asyncio.Queue()
         self.queue_history.clear()
         self.current = None
         self.is_paused = False
-    
-    def skip(self) -> bool:
-        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+        self.loop_mode = 'none'
+
+    async def add_to_queue(self, track_data: dict):
+        await self.queue.put(track_data)
+
+        if not self.is_playing() and not self.is_paused:
+            if not self._task or self._task.done():
+                self._task = asyncio.create_task(self._playback_loop())
+
+    async def _playback_loop(self):
+        while True:
+            self.current = await self.queue.get()
+
+            if self.current:
+                self.queue_history.append(self.current)
+
+                await self._play_track(self.current)
+
+                while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+                    await asyncio.sleep(1)
+
+            if self.queue.empty():
+                break
+
+    async def _play_track(self, track):
+        try:
+            source = await YTDLSource.from_url(track['url'])
+            source.volume = self.volume
+
+            self.voice_client.play(source)
+
+        except Exception as e:
+            print(f"Play error: {e}")
+
+    def is_playing(self):
+        return self.voice_client and self.voice_client.is_playing()
+
+    def pause(self):
+        if self.voice_client:
+            self.voice_client.pause()
+            self.is_paused = True
+
+    def resume(self):
+        if self.voice_client:
+            self.voice_client.resume()
+            self.is_paused = False
+
+    def stop(self):
+        if self.voice_client:
             self.voice_client.stop()
-            return True
-        return False
-    
-    def previous(self) -> bool:
-        if len(self.queue_history) >= 2:
-            self.queue_history.pop()
-            prev = self.queue_history.pop()
-            old_queue = []
-            while not self.queue.empty():
-                old_queue.append(self.queue.get_nowait())
-            self.queue.put_nowait(prev)
-            for item in old_queue:
-                self.queue.put_nowait(item)
-            
-            if self.voice_client:
-                self.voice_client.stop()
-            return True
-        return False
-    
-    def shuffle(self):
-        items = []
-        while not self.queue.empty():
-            try:
-                items.append(self.queue.get_nowait())
-            except Exception as e:
-                break
-        
-        random.shuffle(items)
-        
+
         self.queue = asyncio.Queue()
-        for item in items:
-            self.queue.put_nowait(item)
-    
-    def clear_queue(self):
-        while not self.queue.empty():
-            try:
-                self.queue.get_nowait()
-            except Exception as e:
-                break
-        self.queue = asyncio.Queue()
-    
-    def remove_from_queue(self, index: int) -> Optional[dict]:
-        items = []
-        while not self.queue.empty():
-            try:
-                items.append(self.queue.get_nowait())
-            except Exception as e:
-                break
-        
-        if index < 1 or index > len(items):
-            return None
-        
-        removed = items.pop(index - 1)
-        
-        self.queue = asyncio.Queue()
-        for item in items:
-            self.queue.put_nowait(item)
-        
-        return removed
-    
-    def get_queue_list(self) -> list:
-        items = []
-        while not self.queue.empty():
-            try:
-                items.append(self.queue.get_nowait())
-            except Exception as e:
-                break
-        
-        self.queue = asyncio.Queue()
-        for item in items:
-            self.queue.put_nowait(item)
-        
-        return items
-    
-    def set_volume(self, vol: float):
-        self.volume = max(0.0, min(1.0, vol))
-        if self.voice_client and self.voice_client.source:
-            if hasattr(self.voice_client.source, 'volume'):
-                self.voice_client.source.volume = self.volume
-    
-    @staticmethod
-    def _format_duration(seconds: int) -> str:
-        if not seconds:
-            return "Live"
-        h, remainder = divmod(seconds, 3600)
-        m, s = divmod(remainder, 60)
-        if h:
-            return f"{h}:{m:02d}:{s:02d}"
-        return f"{m}:{s:02d}"
+        self.current = None
+        self.is_paused = False
 
 
+# =========================
+# GLOBAL PLAYER STORE
+# =========================
 music_players: dict[int, MusicPlayer] = {}
 
 
-def get_music_player(guild_id: int) -> MusicPlayer:
+def get_music_player(guild_id: int):
     if guild_id not in music_players:
         music_players[guild_id] = MusicPlayer(bot, guild_id)
     return music_players[guild_id]
