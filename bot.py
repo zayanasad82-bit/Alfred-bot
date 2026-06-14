@@ -1783,7 +1783,7 @@ async def mod_clean(interaction: discord.Interaction, amount: int, member: disco
 # ─── MUSIC COG ────────────────────────────────────────────────────────────────
 
 class MusicControls(discord.ui.View):
-    def __init__(self, music_cog, track: wavelink.Track):
+    def __init__(self, music_cog, track):
         super().__init__(timeout=600)
         self.music_cog = music_cog
         self.track = track
