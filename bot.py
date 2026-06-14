@@ -1031,8 +1031,10 @@ YTDLP_OPTIONS = {
     "no_warnings": True,
     "nocheckcertificate": True,
     "default_search": "ytsearch",
-    "cookiefile": "cookies.txt",
+    "cookiefile": os.path.join(os.getcwd(), "cookies.txt"),
     "force_ipv4": True,
+    "extractor_retries": 3,
+    "retries": 5,
 }
 
 FFMPEG_OPTIONS = {
@@ -1061,9 +1063,14 @@ class YTDLSource(PCMVolumeTransformer):
         loop = loop or asyncio.get_event_loop()
 
         def extract():
+            import os  # ensures Railway always has it here
+
             opts = YTDLP_OPTIONS.copy()
 
             try:
+                # ✅ DEBUG (runs every request)
+                print("Using cookies file:", os.path.exists("cookies.txt"))
+
                 search_url = url
 
                 # FIX: proper search handling
@@ -1076,6 +1083,27 @@ class YTDLSource(PCMVolumeTransformer):
             except Exception as e:
                 print(f"[yt-dlp ERROR] {repr(e)}")
                 return None
+
+        data = await loop.run_in_executor(None, extract)
+
+        if not data:
+            raise ValueError("❌ Could not find song (yt-dlp returned nothing)")
+
+        if "entries" in data:
+            if not data["entries"]:
+                raise ValueError("❌ No search results found")
+
+            data = data["entries"][0]
+
+        filename = (
+            data["url"]
+            if stream
+            else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
+        )
+
+        source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
+        return cls(source, data=data)
+
 
         data = await loop.run_in_executor(None, extract)
 
