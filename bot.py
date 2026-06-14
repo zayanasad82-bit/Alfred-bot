@@ -1056,46 +1056,46 @@ class YTDLSource(PCMVolumeTransformer):
         self.uploader = data.get('uploader', '')
         self.views = data.get('view_count', 0)
         self.upload_date = data.get('upload_date', '')
-    
+
     @classmethod
     async def from_url(cls, url: str, *, loop: asyncio.AbstractEventLoop = None, stream: bool = True):
         loop = loop or asyncio.get_event_loop()
-        
+
         if not URL_REGEX.match(url):
             url = f'ytsearch:{url}'
-        
+
         partial = functools.partial(cls._extract_info, url, stream)
         data = await loop.run_in_executor(None, partial)
-        
+
         if data is None:
             raise ValueError("Could not find any matching song.")
-        
+
         if 'entries' in data:
             data = data['entries'][0]
-        
+
         filename = data['url'] if stream else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
-        
+
         audio_source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
         return cls(audio_source, data=data)
-    
+
     @classmethod
     async def from_playlist(cls, url: str, *, loop: asyncio.AbstractEventLoop = None):
         loop = loop or asyncio.get_event_loop()
-        
+
         opts = YTDLP_OPTIONS.copy()
         opts['noplaylist'] = False
         opts['extract_flat'] = True
-        
+
         partial = functools.partial(cls._extract_info, url, True, opts)
         data = await loop.run_in_executor(None, partial)
-        
+
         if data is None:
             raise ValueError("Could not find any matching playlist.")
-        
+
         tracks = []
-        playlist_title = 'Unknown Playlist'
+        playlist_title = data.get('title', 'Unknown Playlist')
+
         if 'entries' in data:
-            playlist_title = data.get('title', 'Unknown Playlist')
             for entry in data['entries']:
                 if entry:
                     tracks.append({
@@ -1106,22 +1106,27 @@ class YTDLSource(PCMVolumeTransformer):
                         'channel': entry.get('channel', ''),
                         'uploader': entry.get('uploader', ''),
                     })
-        
+
         return playlist_title, tracks
-    
+
     @staticmethod
     def _extract_info(url: str, stream: bool, custom_opts: dict = None):
         opts = YTDLP_OPTIONS.copy()
         if custom_opts:
             opts.update(custom_opts)
-        
+
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
+                # If it's not a real URL, treat it as a YouTube search
+                if not url.startswith("http"):
+                    url = f"ytsearch1:{url}"
+
                 return ydl.extract_info(url, download=not stream)
+
         except Exception as e:
             print(f"yt-dlp extract error: {e}")
             return None
-
+        
     @classmethod
     async def search_results(cls, query: str, *, loop: asyncio.AbstractEventLoop = None, max_results: int = 5):
         loop = loop or asyncio.get_event_loop()
