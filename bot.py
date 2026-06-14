@@ -1065,16 +1065,16 @@ class YTDLSource(PCMVolumeTransformer):
             opts = YTDLP_OPTIONS.copy()
 
             try:
+                search_url = url  # <-- FIX
+
+                if not search_url.startswith(("http://", "https://")):
+                    search_url = f"ytsearch1:{search_url}"
+
                 with yt_dlp.YoutubeDL(opts) as ydl:
-
-                    # 🔥 FIX: proper search handling
-                    if not url.startswith("http"):
-                        url = f"ytsearch1:{url}"
-
-                    return ydl.extract_info(url, download=not stream)
+                    return ydl.extract_info(search_url, download=not stream)
 
             except Exception as e:
-                print(f"[yt-dlp ERROR] {e}")
+                print(f"[yt-dlp ERROR] {repr(e)}")
                 return None
 
         data = await loop.run_in_executor(None, extract)
@@ -1083,9 +1083,16 @@ class YTDLSource(PCMVolumeTransformer):
             raise ValueError("❌ Could not find song (yt-dlp returned nothing)")
 
         if "entries" in data:
+            if not data["entries"]:
+                raise ValueError("❌ No search results found")
+
             data = data["entries"][0]
 
-        filename = data["url"] if stream else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
+        filename = (
+            data["url"]
+            if stream
+            else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
+        )
 
         source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
         return cls(source, data=data)
