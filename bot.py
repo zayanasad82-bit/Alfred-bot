@@ -19,18 +19,21 @@ from docx import Document
 from discord.utils import utcnow
 
 # =========================
-# 🔥 MUSIC SYSTEM IMPORTS
+# 🔥 MUSIC SYSTEM IMPORTS (REPLACED with wavelink)
 # =========================
-import yt_dlp
+import wavelink
 import urllib.parse
 import urllib.request
 import math
-import functools
-from discord import PCMVolumeTransformer, FFmpegPCMAudio
 
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID"))
+
+# Lavalink configuration
+LAVALINK_HOST = os.getenv("LAVALINK_HOST", "localhost")
+LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
+LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 MODEL_NAME = "gemini-3.5-flash"
@@ -999,156 +1002,101 @@ async def consolidate_memories():
         print(f"🧹 Consolidated {deleted} old memories")
 
 # =========================
-# 🎵 MUSIC BACKGROUND TASKS
+# 🎵 MUSIC BACKGROUND TASKS - UPDATED for wavelink
 # =========================
 @tasks.loop(minutes=5)
 async def clean_inactive_players():
     for guild_id, player in list(music_players.items()):
         try:
-            if not player.voice_client or not player.voice_client.is_connected():
+            vc = player.voice_client
+            if not vc or not vc.is_connected():
                 continue
 
-            channel = player.voice_client.channel
-
-            # bot is alone in VC → cleanup
+            channel = vc.channel
             if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
-                if not player.is_playing() and not player.is_paused:
+                if not vc.is_playing() and not vc.is_paused():
                     await player.disconnect_voice()
                     music_players.pop(guild_id, None)
 
         except Exception as e:
             print(f"[clean task error] {e}")
 
-
 # =========================
-# 🎵 YT-DLP CONFIG (FIXED)
+# 🎵 LAVALINK / WAVELINK MUSIC SYSTEM (REPLACED yt-dlp)
 # =========================
 
-YTDLP_OPTIONS = {
-    "format": "bestaudio",
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "nocheckcertificate": True,
-    "default_search": "ytsearch",
-    "cookiefile": os.path.join(os.getcwd(), "cookies.txt"),
-    "force_ipv4": True,
-    "extractor_retries": 3,
-    "retries": 5,
-}
+URL_REGEX = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/\S+")
 
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
-}
-
-URL_REGEX = re.compile(r"https?://")
-
-
-# =========================
-# 🎧 YTDL SOURCE
-# =========================
-class YTDLSource(PCMVolumeTransformer):
-    def __init__(self, source, *, data: dict, volume: float = 0.5):
-        super().__init__(source, volume)
-        self.data = data
-        self.title = data.get("title", "Unknown")
-        self.url = data.get("webpage_url", "")
-        self.duration = data.get("duration", 0)
-        self.thumbnail = data.get("thumbnail", "")
-        self.uploader = data.get("uploader", "Unknown")
-
-    @classmethod
-    async def from_url(cls, url: str, *, loop=None, stream: bool = True):
-        loop = loop or asyncio.get_event_loop()
-
-        def extract():
-            import os  # ensures Railway always has it here
-
-            opts = YTDLP_OPTIONS.copy()
-
-            try:
-                # ✅ DEBUG (runs every request)
-                print("Using cookies file:", os.path.exists("cookies.txt"))
-
-                search_url = url
-
-                # FIX: proper search handling
-                if not search_url.startswith(("http://", "https://")):
-                    search_url = f"ytsearch:{search_url}"
-
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    return ydl.extract_info(search_url, download=not stream)
-
-            except Exception as e:
-                print(f"[yt-dlp ERROR] {repr(e)}")
-                return None
-
-        data = await loop.run_in_executor(None, extract)
-
-        if not data:
-            raise ValueError("❌ Could not find song (yt-dlp returned nothing)")
-
-        if "entries" in data:
-            if not data["entries"]:
-                raise ValueError("❌ No search results found")
-
-            data = data["entries"][0]
-
-        filename = (
-            data["url"]
-            if stream
-            else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
-        )
-
-        source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
-        return cls(source, data=data)
+class LavalinkVoiceClient(discord.VoiceProtocol):
+    """Custom VoiceProtocol that connects discord voice to Lavalink via wavelink."""
+    
+    def __init__(self, client: discord.Client, channel: discord.abc.Connectable):
+        self.client = client
+        self.channel = channel
+        self._voice_server_update_data = {}
+    
+    async def on_voice_server_update(self, data):
+        self._voice_server_update_data.update(data)
+        wavelink_node = wavelink.NodePool.get_node()
+        if wavelink_node:
+            await wavelink_node.update_voice_state(self.channel.guild.id, self.channel.id, self._voice_server_update_data)
+    
+    async def on_voice_state_update(self, data):
+        wavelink_node = wavelink.NodePool.get_node()
+        if wavelink_node:
+            await wavelink_node.update_voice_state(self.channel.guild.id, self.channel.id, data)
+    
+    async def connect(self, *, timeout: float = 20.0, reconnect: bool = False, self_deaf: bool = False, self_mute: bool = False) -> None:
+        guild = self.channel.guild
+        ws = guild._state.ws
+        await ws.voice_state(str(guild.id), str(self.channel.id), self_deaf=self_deaf, self_mute=self_mute)
+    
+    async def disconnect(self, *, force: bool = False) -> None:
+        guild = self.channel.guild
+        ws = guild._state.ws
+        await ws.voice_state(str(guild.id), None)
+        
+        wavelink_node = wavelink.NodePool.get_node()
+        if wavelink_node:
+            await wavelink_node.update_voice_state(guild.id, None, {})
+        
+        self.cleanup()
 
 
-        data = await loop.run_in_executor(None, extract)
-
-        if not data:
-            raise ValueError("❌ Could not find song (yt-dlp returned nothing)")
-
-        if "entries" in data:
-            if not data["entries"]:
-                raise ValueError("❌ No search results found")
-
-            data = data["entries"][0]
-
-        filename = (
-            data["url"]
-            if stream
-            else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
-        )
-
-        source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
-        return cls(source, data=data)
-
-
-# =========================
-# 🎵 MUSIC PLAYER
-# =========================
 class MusicPlayer:
+    """Manages music playback for a single guild using Lavalink/wavelink."""
+    
     def __init__(self, bot: commands.Bot, guild_id: int):
         self.bot = bot
         self.guild_id = guild_id
         self.queue = asyncio.Queue()
         self.queue_history = []
-        self.current = None
-        self.voice_client = None
+        self.current = None  # wavelink.Track object
+        self.voice_client = None  # wavelink.Player
         self.loop_mode = "none"
         self.volume = 0.5
         self.is_paused = False
         self._task = None
+        self.text_channel = None
 
-    async def connect_voice(self, channel: discord.VoiceChannel):
+    async def connect_voice(self, channel: discord.VoiceChannel) -> bool:
+        """Connect to a voice channel using Lavalink."""
         try:
-            if self.voice_client and self.voice_client.is_connected():
-                await self.voice_client.move_to(channel)
+            guild = channel.guild
+            
+            # Try to get existing wavelink player for this guild
+            vc = guild.voice_client
+            
+            if vc and hasattr(vc, 'is_connected') and vc.is_connected():
+                if vc.channel.id != channel.id:
+                    await vc.move_to(channel)
+                self.voice_client = vc
                 return True
-
-            self.voice_client = await channel.connect()
+            
+            # Connect using LavalinkVoiceClient
+            vc = await channel.connect(cls=LavalinkVoiceClient)
+            # Get the wavelink Player for this guild
+            self.voice_client = guild.voice_client
             return True
 
         except Exception as e:
@@ -1156,8 +1104,12 @@ class MusicPlayer:
             return False
 
     async def disconnect_voice(self):
-        if self.voice_client and self.voice_client.is_connected():
-            await self.voice_client.disconnect()
+        """Disconnect from voice channel."""
+        if self.voice_client:
+            try:
+                await self.voice_client.disconnect()
+            except:
+                pass
 
         self.voice_client = None
         self.queue = asyncio.Queue()
@@ -1165,43 +1117,53 @@ class MusicPlayer:
         self.current = None
         self.is_paused = False
         self.loop_mode = "none"
+        self._task = None
 
-    async def add_to_queue(self, track_data: dict):
-        await self.queue.put(track_data)
+    async def add_to_queue(self, track):
+        """Add a wavelink.Track to the queue."""
+        await self.queue.put(track)
 
         if not self.is_playing() and not self.is_paused:
-            if not self._task or self._task.done():
+            if self._task is None or self._task.done():
                 self._task = asyncio.create_task(self._playback_loop())
 
     async def _playback_loop(self):
+        """Main playback loop - pulls from queue and plays via Lavalink."""
         while True:
             try:
-                self.current = await self.queue.get()
+                track = await self.queue.get()
             except Exception:
                 break
 
-            if not self.current:
+            if not track:
                 continue
 
-            self.queue_history.append(self.current)
+            self.current = track
+            self.queue_history.append(track)
+            if len(self.queue_history) > 50:
+                self.queue_history.pop(0)
 
-            await self._play_track(self.current)
+            await self._play_track(track)
 
-            while self.voice_client and (
-                self.voice_client.is_playing() or self.voice_client.is_paused()
-            ):
+            # Wait for track to finish
+            while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
                 await asyncio.sleep(1)
 
-            if self.queue.empty():
+            if self.loop_mode == "one":
+                await self.queue.put(track)
+            
+            if self.queue.empty() and self.loop_mode != "all":
+                self.current = None
                 break
 
     async def _play_track(self, track):
+        """Play a wavelink.Track via Lavalink."""
+        if not self.voice_client:
+            return
+
         try:
-            source = await YTDLSource.from_url(track["title"])
-            source.volume = self.volume
-
-            self.voice_client.play(source)
-
+            self.is_paused = False
+            await self.voice_client.play(track)
         except Exception as e:
             print(f"Play error: {e}")
 
@@ -1226,17 +1188,130 @@ class MusicPlayer:
         self.current = None
         self.is_paused = False
 
+    def skip(self) -> bool:
+        if self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
+            self.voice_client.stop()
+            return True
+        return False
 
-# =========================
-# GLOBAL STORE
-# =========================
+    def previous(self) -> bool:
+        if len(self.queue_history) >= 2:
+            self.queue_history.pop()
+            prev = self.queue_history.pop()
+            old_queue = []
+            while not self.queue.empty():
+                try:
+                    old_queue.append(self.queue.get_nowait())
+                except:
+                    break
+            for item in old_queue:
+                self.queue.put_nowait(item)
+            self.queue.put_nowait(prev)
+
+            if self.voice_client:
+                self.voice_client.stop()
+            return True
+        return False
+
+    def shuffle(self):
+        items = []
+        while not self.queue.empty():
+            try:
+                items.append(self.queue.get_nowait())
+            except:
+                break
+
+        random.shuffle(items)
+
+        self.queue = asyncio.Queue()
+        for item in items:
+            self.queue.put_nowait(item)
+
+    def clear_queue(self):
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                break
+        self.queue = asyncio.Queue()
+
+    def remove_from_queue(self, index: int) -> Optional[dict]:
+        items = []
+        while not self.queue.empty():
+            try:
+                items.append(self.queue.get_nowait())
+            except:
+                break
+
+        if index < 1 or index > len(items):
+            return None
+
+        removed = items.pop(index - 1)
+
+        self.queue = asyncio.Queue()
+        for item in items:
+            self.queue.put_nowait(item)
+
+        return {
+            'title': removed.title if hasattr(removed, 'title') else 'Unknown',
+            'url': str(removed.uri) if hasattr(removed, 'uri') else '',
+            'duration': removed.duration if hasattr(removed, 'duration') else 0,
+        }
+
+    def get_queue_list(self) -> list:
+        items = []
+        while not self.queue.empty():
+            try:
+                items.append(self.queue.get_nowait())
+            except:
+                break
+
+        self.queue = asyncio.Queue()
+        for item in items:
+            self.queue.put_nowait(item)
+
+        return items
+
+    def set_volume(self, vol: float):
+        self.volume = max(0.0, min(1.0, vol))
+        if self.voice_client:
+            try:
+                self.voice_client.set_volume(int(self.volume * 100))
+            except:
+                pass
+
+    @staticmethod
+    def _format_duration(seconds: int) -> str:
+        if not seconds:
+            return "Live"
+        h, remainder = divmod(seconds, 3600)
+        m, s = divmod(remainder, 60)
+        if h:
+            return f"{h}:{m:02d}:{s:02d}"
+        return f"{m}:{s:02d}"
+
+
+# Guild music players cache
 music_players: dict[int, MusicPlayer] = {}
 
 
-def get_music_player(guild_id: int):
+def get_music_player(guild_id: int) -> MusicPlayer:
     if guild_id not in music_players:
         music_players[guild_id] = MusicPlayer(bot, guild_id)
     return music_players[guild_id]
+
+
+# =========================
+# LAVALINK NODE CONNECTION
+# =========================
+@bot.event
+async def on_wavelink_node_ready(node: wavelink.Node):
+    print(f"✅ Lavalink node {node.identifier} ready!")
+
+@bot.event
+async def on_wavelink_track_end(player: wavelink.Player, track: wavelink.Track, reason):
+    """Handle track end events."""
+    pass  # The playback loop handles this
 
 # =========================
 # EVENTS
@@ -1495,7 +1570,7 @@ Respond naturally and conversationally. If the user mentions something new about
     await bot.process_commands(message)
 
 # =========================
-# on_ready with duplicate task prevention
+# on_ready with duplicate task prevention + Lavalink connect
 # =========================
 _tasks_started = False
 
@@ -1504,6 +1579,21 @@ async def on_ready():
     global _tasks_started
     if not _tasks_started:
         _tasks_started = True
+        
+        # Connect to Lavalink
+        try:
+            await wavelink.NodePool.create_node(
+                bot=bot,
+                host=LAVALINK_HOST,
+                port=LAVALINK_PORT,
+                password=LAVALINK_PASSWORD,
+                identifier="default-node",
+                region="us_central",
+            )
+            print("✅ Connected to Lavalink node!")
+        except Exception as e:
+            print(f"❌ Failed to connect to Lavalink: {e}")
+        
         check_giveaways.start()
         check_birthdays.start()
         generate_daily_summary.start()
@@ -1602,1653 +1692,1442 @@ async def mod_unmute(interaction: discord.Interaction, member: discord.Member):
     await log(interaction.guild, f"UNMUTE | {member}")
 
 @mod_group.command(name="warn", description="Warn a member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mod_warn(interaction: discord.Interaction, member: discord.Member, reason: str):
-    await interaction.response.defer()
-    add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
-    add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
-    
-    try:
-        embed = discord.Embed(title="⚠️ You have been warned", color=discord.Color.orange(), timestamp=datetime.now(timezone.utc))
-        embed.add_field(name="Server", value=interaction.guild.name, inline=False)
-        embed.add_field(name="Reason", value=reason, inline=False)
-        embed.set_footer(text=f"Moderator: {interaction.user}")
-        await member.send(embed=embed)
-    except discord.Forbidden:
-        pass
-    
-    embed = discord.Embed(title="⚠️ Warning Issued", color=discord.Color.red())
-    embed.add_field(name="User", value=member.mention, inline=True)
-    embed.add_field(name="Reason", value=reason, inline=True)
-    embed.set_footer(text=f"By {interaction.user}")
-    await interaction.followup.send(embed=embed)
-    await log(interaction.guild, f"WARN | {member} | {reason}")
-
-@mod_group.command(name="warnings", description="Show warnings for a member")
-async def mod_warnings(interaction: discord.Interaction, member: discord.Member):
-    warns = get_warnings(member.id, interaction.guild.id)
-    if not warns:
-        await interaction.response.send_message("✅ No warnings.")
-        return
-    
-    await interaction.response.defer()
-    embed = discord.Embed(title=f"⚠️ Warnings for {member.display_name}", color=discord.Color.orange())
-    for warn_id, reason, timestamp in warns:
-        embed.add_field(name=f"Warning #{warn_id}", value=f"Reason: {reason}\nDate: {timestamp}", inline=False)
-    await interaction.followup.send(embed=embed)
-
-@mod_group.command(name="unwarn", description="Remove a specific warning")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mod_unwarn(interaction: discord.Interaction, warning_id: int):
-    remove_warning(warning_id)
-    await interaction.response.send_message(f"✅ Removed warning #{warning_id}")
-
-@mod_group.command(name="clearwarns", description="Remove all warnings from a user")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(moderate_members=True)
-async def mod_clearwarns(interaction: discord.Interaction, member: discord.Member):
-    await interaction.response.defer()
-    c.execute("DELETE FROM warnings WHERE user_id=? AND guild_id=?", (member.id, interaction.guild.id))
-    conn.commit()
-    add_history(interaction.guild.id, member.id, str(member), "CLEAR_WARNS", f"All warnings cleared by {interaction.user}")
-    await interaction.followup.send(f"🧹 Removed all warnings for {member.mention}")
-    await log(interaction.guild, f"CLEARWARNS | {member}")
-
-@mod_group.command(name="lock", description="Lock a channel")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_channels=True)
-async def mod_lock(interaction: discord.Interaction):
-    overwrite = interaction.channel.overwrites_for(interaction.guild.default_role)
-    overwrite.send_messages = False
-    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CHANNEL_LOCK", f"Locked #{interaction.channel.name}")
-    await interaction.response.send_message("🔒 Channel locked.")
-
-@mod_group.command(name="unlock", description="Unlock a channel")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_channels=True)
-async def mod_unlock(interaction: discord.Interaction):
-    overwrite = interaction.channel.overwrites_for(interaction.guild.default_role)
-    overwrite.send_messages = None
-    await interaction.channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CHANNEL_UNLOCK", f"Unlocked #{interaction.channel.name}")
-    await interaction.response.send_message("🔓 Channel unlocked.")
-
-@mod_group.command(name="slowmode", description="Set slowmode delay")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_channels=True)
-async def mod_slowmode(interaction: discord.Interaction, seconds: int):
-    await interaction.channel.edit(slowmode_delay=seconds)
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode to {seconds}s in #{interaction.channel.name}")
-    await interaction.response.send_message(f"🐌 Slowmode set to {seconds} seconds.")
-
-@mod_group.command(name="massban", description="Ban multiple users at once")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(ban_members=True)
-async def mod_massban(interaction: discord.Interaction, members: str, reason: str = "Mass ban"):
-    await interaction.response.defer()
-    ids = re.findall(r'\d+', members)
-    banned = 0
-    for uid in ids[:10]:
+    @app_commands.describe(member="Member to warn", reason="Reason for the warning")
+    async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+        await interaction.response.defer(ephemeral=True)
+        
+        if not interaction.user.guild_permissions.moderate_members:
+            return await interaction.followup.send("❌ You don't have permission to warn members.", ephemeral=True)
+        
+        if member.top_role >= interaction.user.top_role:
+            return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
+        
+        # Add warning to database
+        add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
+        add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
+        
+        # Try to DM the user
         try:
-            await interaction.guild.ban(discord.Object(id=int(uid)), reason=reason)
-            add_history(interaction.guild.id, int(uid), f"User({uid})", "BAN", f"Mass banned by {interaction.user}: {reason}")
-            banned += 1
-        except Exception as e:
-            pass
-    await interaction.followup.send(f"🔨 Banned {banned} users")
-    await log(interaction.guild, f"MASSBAN | {banned} users")
-
-# ===== 🕰️ HISTORY COMMANDS =====
-history_group = app_commands.Group(name="history", description="History and analytics commands")
-
-@history_group.command(name="user", description="Show user history in this server")
-async def history_user(interaction: discord.Interaction, member: discord.Member):
-    rows = get_user_history(member.id, interaction.guild.id, 25)
-    
-    if not rows:
-        await interaction.response.send_message(f"📭 No history found for {member.mention}.")
-        return
-    
-    await interaction.response.defer()
-    embed = discord.Embed(
-        title=f"🕰️ History: {member.display_name}",
-        description=f"Last 25 events for {member.mention}",
-        color=discord.Color.blue()
-    )
-    
-    for event, details, time in rows[:25]:
-        emoji_map = {
-            "JOIN": "👋", "LEAVE": "👋", "WARN": "⚠️", "KICK": "👢", "BAN": "🔨",
-            "MUTE": "🔇", "UNMUTE": "🔊", "NICK_CHANGE": "✏️", "ROLE_ADD": "➕",
-            "ROLE_REMOVE": "➖", "DELETE": "🗑️", "EDIT": "📝", "LEVEL_UP": "⬆️",
-            "VOICE_JOIN": "🔊", "VOICE_LEAVE": "🔇", "SOFTBAN": "🧹",
-            "TICKET_CREATE": "🎫", "GIVEAWAY_WIN": "🎉", "BIRTHDAY": "🎂",
-            "AUTO_MOD": "🤖", "CLEAR_WARNS": "🧹"
-        }
-        emoji = emoji_map.get(event, "📌")
-        embed.add_field(
-            name=f"{emoji} {event}",
-            value=f"{details[:100]}{'...' if len(details) > 100 else ''}\n{time}",
-            inline=False
-        )
-    
-    await interaction.followup.send(embed=embed)
-
-@history_group.command(name="server", description="Show server-wide analytics and summary")
-async def history_server(interaction: discord.Interaction, days: int = 7):
-    await interaction.response.defer()
-    busiest = get_busiest_day(interaction.guild.id)
-    
-    most_active = get_most_active_user(interaction.guild.id, days)
-    most_active_name = "No data"
-    if most_active:
-        user = interaction.guild.get_member(most_active[0])
-        if user:
-            most_active_name = user.display_name
-    
-    top_channels = get_top_channels(interaction.guild.id, days)
-    channel_text = "\n".join([
-        f"<#{cid}>: {count:,} msgs"
-        for cid, count in top_channels
-    ]) or "No data"
-    
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    
-    joins = count_events_for_date(interaction.guild.id, datetime.now().strftime("%Y-%m-%d"), "JOIN")
-    leaves = count_events_for_date(interaction.guild.id, datetime.now().strftime("%Y-%m-%d"), "LEAVE")
-    warns = count_events_for_date(interaction.guild.id, datetime.now().strftime("%Y-%m-%d"), "WARN")
-    
-    c.execute("""
-    SELECT summary FROM daily_summaries
-    WHERE guild_id=? AND date=?
-    ORDER BY id DESC LIMIT 1
-    """, (interaction.guild.id, yesterday))
-    summary_row = c.fetchone()
-    
-    embed = discord.Embed(
-        title=f"📊 {interaction.guild.name} Analytics",
-        description=f"Last {days} days summary",
-        color=discord.Color.gold()
-    )
-    
-    if busiest:
-        embed.add_field(name="🚀 Busiest Day Ever", value=f"{busiest[0]} ({busiest[1]:,} msgs)", inline=False)
-    
-    embed.add_field(name="🏆 Most Active User", value=most_active_name, inline=True)
-    embed.add_field(name="📊 Today's Activity", value=f"👋 {joins} joins | 👋 {leaves} leaves | ⚠️ {warns} warns", inline=False)
-    embed.add_field(name="📈 Top Channels", value=channel_text, inline=False)
-    
-    if summary_row:
-        embed.add_field(name="📋 Yesterday's Summary", value=summary_row[0][:500], inline=False)
-    
-    await interaction.followup.send(embed=embed)
-
-@history_group.command(name="rewind", description="🕰️ See what happened on a specific date")
-async def history_rewind(interaction: discord.Interaction, date: str):
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
-        await interaction.response.send_message("❌ Invalid date format. Use YYYY-MM-DD (e.g., 2026-06-10)")
-        return
-    
-    await interaction.response.defer()
-    
-    events = get_guild_history_by_date(interaction.guild.id, date, 50)
-    
-    if not events:
-        await interaction.followup.send(f"📭 Nothing recorded for {date}.")
-        return
-    
-    event_counts = {}
-    for event, _, _, _, _ in events:
-        event_counts[event] = event_counts.get(event, 0) + 1
-    
-    c.execute("""
-    SELECT SUM(count) FROM message_stats
-    WHERE guild_id=? AND date=?
-    """, (interaction.guild.id, date))
-    total_msgs = c.fetchone()[0] or 0
-    
-    c.execute("""
-    SELECT user_id, SUM(count) as total
-    FROM message_stats
-    WHERE guild_id=? AND date=?
-    GROUP BY user_id
-    ORDER BY total DESC
-    LIMIT 1
-    """, (interaction.guild.id, date))
-    top_user_row = c.fetchone()
-    top_user_name = "Unknown"
-    if top_user_row:
-        user = interaction.guild.get_member(top_user_row[0])
-        if user:
-            top_user_name = user.display_name
-        else:
-            top_user_name = f"User({top_user_row[0]})"
-    
-    embed = discord.Embed(
-        title=f"🕰️ Time Machine: {date}",
-        description=f"What happened on this day in {interaction.guild.name}",
-        color=discord.Color.dark_gold()
-    )
-    
-    summary_lines = []
-    if total_msgs > 0:
-        summary_lines.append(f"📝 **{total_msgs:,}** messages sent")
-    if event_counts.get("JOIN", 0) > 0:
-        summary_lines.append(f"👋 **{event_counts['JOIN']}** members joined")
-    if event_counts.get("LEAVE", 0) > 0:
-        summary_lines.append(f"👋 **{event_counts['LEAVE']}** members left")
-    if event_counts.get("WARN", 0) > 0:
-        summary_lines.append(f"⚠️ **{event_counts['WARN']}** warnings issued")
-    if event_counts.get("KICK", 0) > 0:
-        summary_lines.append(f"👢 **{event_counts['KICK']}** kicks")
-    if event_counts.get("BAN", 0) > 0:
-        summary_lines.append(f"🔨 **{event_counts['BAN']}** bans")
-    if event_counts.get("CHANNEL_CREATE", 0) > 0:
-        summary_lines.append(f"📁 **{event_counts['CHANNEL_CREATE']}** channels created")
-    if event_counts.get("CHANNEL_DELETE", 0) > 0:
-        summary_lines.append(f"🗑️ **{event_counts['CHANNEL_DELETE']}** channels deleted")
-    if event_counts.get("MUTE", 0) > 0:
-        summary_lines.append(f"🔇 **{event_counts['MUTE']}** mutes")
-    if event_counts.get("LEVEL_UP", 0) > 0:
-        summary_lines.append(f"⬆️ **{event_counts['LEVEL_UP']}** level ups")
-    if top_user_row and total_msgs > 0:
-        summary_lines.append(f"🏆 **Most active:** {top_user_name} ({top_user_row[1]:,} msgs)")
-    
-    embed.add_field(name="📊 Summary", value="\n".join(summary_lines) or "No significant events", inline=False)
-    
-    timeline = []
-    for event, details, time, username, user_id in events[:20]:
-        emoji_map = {
-            "JOIN": "👋", "LEAVE": "👋", "WARN": "⚠️", "KICK": "👢", "BAN": "🔨",
-            "MUTE": "🔇", "UNMUTE": "🔊", "NICK_CHANGE": "✏️", "ROLE_ADD": "➕",
-            "ROLE_REMOVE": "➖", "DELETE": "🗑️", "EDIT": "📝", "LEVEL_UP": "⬆️",
-            "VOICE_JOIN": "🔊", "VOICE_LEAVE": "🔇", "SOFTBAN": "🧹",
-            "CHANNEL_CREATE": "📁", "CHANNEL_DELETE": "🗑️", "CHANNEL_LOCK": "🔒",
-            "CHANNEL_UNLOCK": "🔓", "SLOWMODE": "🐌"
-        }
-        emoji = emoji_map.get(event, "📌")
-        time_only = time.split(" ")[1][:5] if " " in time else time
-        timeline.append(f"**{time_only}** {emoji} **{username}**: {details[:80]}")
-    
-    if timeline:
-        embed.add_field(name="📋 Event Timeline", value="\n".join(timeline[:15]), inline=False)
-    
-    embed.set_footer(text=f"Total events: {len(events)}")
-    
-    await interaction.followup.send(embed=embed)
-
-# ===== FUN COMMANDS =====
-fun_group = app_commands.Group(name="fun", description="Fun commands")
-
-@fun_group.command(name="guess", description="Guess a number between 1 and 10")
-async def fun_guess(interaction: discord.Interaction, number: int):
-    secret = random.randint(1, 10)
-    if number == secret:
-        await interaction.response.send_message(f"🎉 You won! I picked {secret}")
-    else:
-        await interaction.response.send_message(f"❌ Wrong! I picked {secret}")
-
-@fun_group.command(name="coinflip", description="Flip a coin")
-async def fun_coinflip(interaction: discord.Interaction):
-    result = random.choice(["Heads", "Tails"])
-    embed = discord.Embed(title="🪙 Coin Flip", description=f"**{result}**", color=discord.Color.gold())
-    await interaction.response.send_message(embed=embed)
-
-@fun_group.command(name="dice", description="Roll a dice")
-async def fun_dice(interaction: discord.Interaction, sides: int = 6):
-    result = random.randint(1, sides)
-    await interaction.response.send_message(f"🎲 You rolled a **{result}** (1-{sides})")
-
-@fun_group.command(name="meme", description="Get a random meme")
-async def fun_meme(interaction: discord.Interaction):
-    await interaction.response.defer()
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://meme-api.com/gimme") as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    embed = discord.Embed(title=data.get("title", "Meme"), color=discord.Color.random())
-                    embed.set_image(url=data["url"])
-                    embed.set_footer(text=f"👍 {data.get('ups', 0)} | r/{data.get('subreddit', 'unknown')}")
-                    await interaction.followup.send(embed=embed)
-                else:
-                    await interaction.followup.send("❌ Couldn't fetch a meme right now.")
-    except Exception as e:
-        await interaction.followup.send("❌ Meme API unavailable.")
-
-# ===== UTILITY COMMANDS =====
-@bot.tree.command(name="avatar", description="Show user avatar")
-async def avatar(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    embed = discord.Embed(title=f"{member.name}'s Avatar", color=discord.Color.blue())
-    embed.set_image(url=member.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="banner", description="Show user banner")
-async def banner(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    user = await bot.fetch_user(member.id)
-    if not user.banner:
-        await interaction.response.send_message("❌ No banner found.")
-        return
-    embed = discord.Embed(title=f"{member.name}'s Banner", color=discord.Color.purple())
-    embed.set_image(url=user.banner.url)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="userinfo", description="Get user information")
-async def userinfo(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    roles = [role.mention for role in member.roles if role != interaction.guild.default_role]
-    
-    await interaction.response.defer()
-    embed = discord.Embed(title=f"User Info - {member.display_name}", color=member.color, timestamp=datetime.now())
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="ID", value=member.id, inline=True)
-    embed.add_field(name="Joined", value=member.joined_at.strftime("%Y-%m-%d"), inline=True)
-    embed.add_field(name="Registered", value=member.created_at.strftime("%Y-%m-%d"), inline=True)
-    embed.add_field(name=f"Roles [{len(roles)}]", value=" ".join(roles[:10]) or "None", inline=False)
-    embed.add_field(name="Top Role", value=member.top_role.mention, inline=True)
-    embed.add_field(name="Bot?", value="Yes" if member.bot else "No", inline=True)
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="serverinfo", description="Get server information")
-async def serverinfo(interaction: discord.Interaction):
-    guild = interaction.guild
-    embed = discord.Embed(title=f"Server Info - {guild.name}", color=discord.Color.gold())
-    embed.set_thumbnail(url=guild.icon.url if guild.icon else None)
-    embed.add_field(name="ID", value=guild.id, inline=True)
-    embed.add_field(name="Owner", value=guild.owner.mention, inline=True)
-    embed.add_field(name="Members", value=guild.member_count, inline=True)
-    embed.add_field(name="Channels", value=len(guild.channels), inline=True)
-    embed.add_field(name="Roles", value=len(guild.roles), inline=True)
-    embed.add_field(name="Boosts", value=guild.premium_subscription_count, inline=True)
-    embed.add_field(name="Created", value=guild.created_at.strftime("%Y-%m-%d"), inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="poll", description="Create a poll")
-@app_commands.check(owner_check)
-async def create_poll(interaction: discord.Interaction, question: str, option1: str, option2: str, option3: str = None, option4: str = None, option5: str = None):
-    options = [opt for opt in [option1, option2, option3, option4, option5] if opt]
-    
-    c.execute("INSERT INTO polls (guild_id, channel_id, question, options, votes) VALUES (?, ?, ?, ?, ?)",
-              (interaction.guild.id, interaction.channel.id, question, json.dumps(options), json.dumps({i: [] for i in range(len(options))})))
-    poll_id = c.lastrowid
-    conn.commit()
-    
-    embed = discord.Embed(title="📊 Poll", description=question, color=discord.Color.blue())
-    emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
-    for i, option in enumerate(options):
-        embed.add_field(name=f"{emojis[i]} Option {i+1}", value=option, inline=False)
-    
-    view = PollView(poll_id, options)
-    await interaction.response.send_message(embed=embed, view=view)
-
-# ===== TICKET COMMANDS =====
-ticket_group = app_commands.Group(name="ticket", description="Ticket system commands")
-
-@ticket_group.command(name="setup", description="Setup ticket system in current channel")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def ticket_setup(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎫 Support Tickets", description="Click below to create a ticket", color=discord.Color.green())
-    await interaction.channel.send(embed=embed, view=TicketView())
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "TICKET_SETUP", "Ticket system configured")
-    await interaction.response.send_message("✅ Ticket system setup complete!", ephemeral=True)
-
-@ticket_group.command(name="add", description="Add user to current ticket")
-@app_commands.check(owner_check)
-async def ticket_add(interaction: discord.Interaction, member: discord.Member):
-    c.execute("SELECT * FROM tickets WHERE channel_id=? AND status='open'", (interaction.channel.id,))
-    ticket = c.fetchone()
-    if not ticket:
-        await interaction.response.send_message("❌ This isn't an open ticket channel.")
-        return
-    await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
-    await interaction.response.send_message(f"✅ Added {member.mention} to ticket")
-
-@ticket_group.command(name="remove", description="Remove user from current ticket")
-@app_commands.check(owner_check)
-async def ticket_remove(interaction: discord.Interaction, member: discord.Member):
-    c.execute("SELECT * FROM tickets WHERE channel_id=? AND status='open'", (interaction.channel.id,))
-    ticket = c.fetchone()
-    if not ticket:
-        await interaction.response.send_message("❌ This isn't an open ticket channel.")
-        return
-    if member.id == ticket[2]:
-        await interaction.response.send_message("❌ Cannot remove the ticket creator.")
-        return
-    await interaction.channel.set_permissions(member, overwrite=None)
-    await interaction.response.send_message(f"✅ Removed {member.mention} from ticket")
-
-# ===== LEVELING COMMANDS =====
-level_group = app_commands.Group(name="level", description="Leveling system commands")
-
-@level_group.command(name="rank", description="Check your rank or another user's")
-async def level_rank(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    c.execute("SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?", (member.id, interaction.guild.id))
-    result = c.fetchone()
-    
-    if not result:
-        await interaction.response.send_message(f"{member.mention} has no XP yet. Start chatting!")
-        return
-    
-    xp, level = result
-    xp_needed = level * 100
-    
-    c.execute("SELECT user_id, level, xp FROM leveling WHERE guild_id=? ORDER BY level DESC, xp DESC", (interaction.guild.id,))
-    all_users = c.fetchall()
-    rank_pos = 1
-    for uid, l, x in all_users:
-        if uid == member.id:
-            break
-        rank_pos += 1
-    
-    embed = discord.Embed(title=f"📊 {member.display_name}'s Rank", color=discord.Color.gold())
-    embed.set_thumbnail(url=member.display_avatar.url)
-    embed.add_field(name="Level", value=level, inline=True)
-    embed.add_field(name="XP", value=f"{xp}/{xp_needed}", inline=True)
-    embed.add_field(name="Rank", value=f"#{rank_pos}/{len(all_users)}", inline=True)
-    
-    progress = int((xp / xp_needed) * 10)
-    bar = "🟩" * progress + "⬜" * (10 - progress)
-    embed.add_field(name="Progress", value=bar, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-@level_group.command(name="leaderboard", description="Show server level leaderboard")
-async def level_leaderboard(interaction: discord.Interaction):
-    c.execute("SELECT user_id, level, xp FROM leveling WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10", (interaction.guild.id,))
-    top_users = c.fetchall()
-    
-    if not top_users:
-        await interaction.response.send_message("No one has XP yet!")
-        return
-    
-    embed = discord.Embed(title=f"🏆 {interaction.guild.name} Leaderboard", color=discord.Color.gold())
-    
-    medals = ["🥇", "🥈", "🥉"]
-    for i, (user_id, level, xp) in enumerate(top_users):
-        user = interaction.guild.get_member(user_id)
-        name = user.display_name if user else f"Unknown ({user_id})"
-        medal = medals[i] if i < 3 else f"#{i+1}"
-        embed.add_field(name=f"{medal} {name}", value=f"Level {level} | XP: {xp}", inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-# ===== ECONOMY COMMANDS =====
-eco_group = app_commands.Group(name="economy", description="Economy system commands")
-
-@eco_group.command(name="balance", description="Check your balance")
-async def eco_balance(interaction: discord.Interaction, member: discord.Member = None):
-    member = member or interaction.user
-    bal = get_balance(member.id, interaction.guild.id)
-    
-    embed = discord.Embed(title=f"💰 {member.display_name}'s Balance", color=discord.Color.green())
-    embed.add_field(name="Wallet", value=f"${bal['wallet']:,}", inline=True)
-    embed.add_field(name="Bank", value=f"${bal['bank']:,}", inline=True)
-    embed.add_field(name="Total", value=f"${bal['wallet'] + bal['bank']:,}", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@eco_group.command(name="daily", description="Claim daily reward")
-async def eco_daily(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    guild_id = interaction.guild.id
-    
-    c.execute("SELECT daily_streak, last_daily FROM economy WHERE user_id=? AND guild_id=?", (user_id, guild_id))
-    result = c.fetchone()
-    
-    if result:
-        streak, last_daily_str = result
-        if last_daily_str:
-            last_daily = datetime.fromisoformat(last_daily_str)
-            if datetime.now().date() == last_daily.date():
-                await interaction.response.send_message("❌ You already claimed your daily today!")
-                return
-            elif (datetime.now() - last_daily).days == 1:
-                streak += 1
-            else:
-                streak = 0
-        else:
-            streak = 0
-    else:
-        c.execute("INSERT INTO economy (user_id, guild_id, balance, bank, daily_streak) VALUES (?, ?, 0, 0, 0)", (user_id, guild_id))
-        conn.commit()
-        streak = 0
-    
-    base_reward = 100
-    streak_bonus = min(streak * 10, 100)
-    reward = base_reward + streak_bonus
-    
-    update_balance(user_id, guild_id, reward, 'wallet')
-    
-    c.execute("UPDATE economy SET daily_streak=?, last_daily=? WHERE user_id=? AND guild_id=?", 
-              (streak + 1, datetime.now().isoformat(), user_id, guild_id))
-    conn.commit()
-    
-    embed = discord.Embed(title="🎁 Daily Reward", color=discord.Color.green())
-    embed.add_field(name="Reward", value=f"${reward:,}", inline=True)
-    embed.add_field(name="Streak", value=f"{streak + 1} days", inline=True)
-    embed.add_field(name="Streak Bonus", value=f"+${streak_bonus}", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@eco_group.command(name="give", description="Give money to another user")
-async def eco_give(interaction: discord.Interaction, member: discord.Member, amount: int):
-    if amount <= 0:
-        await interaction.response.send_message("❌ Amount must be positive!")
-        return
-    
-    bal = get_balance(interaction.user.id, interaction.guild.id)
-    if bal['wallet'] < amount:
-        await interaction.response.send_message("❌ You don't have enough money!")
-        return
-    
-    update_balance(interaction.user.id, interaction.guild.id, -amount, 'wallet')
-    update_balance(member.id, interaction.guild.id, amount, 'wallet')
-    
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "ECONOMY_GIVE", f"Gave ${amount} to {member}")
-    
-    await interaction.response.send_message(f"✅ Gave ${amount:,} to {member.mention}")
-
-@eco_group.command(name="slot", description="Play the slot machine")
-async def eco_slot(interaction: discord.Interaction, bet: int):
-    if bet <= 0:
-        await interaction.response.send_message("❌ Bet must be positive!")
-        return
-    
-    bal = get_balance(interaction.user.id, interaction.guild.id)
-    if bal['wallet'] < bet:
-        await interaction.response.send_message("❌ You don't have enough money!")
-        return
-    
-    slots = ["🍒", "🍋", "🍊", "🍇", "💎", "7️⃣", "🎰"]
-    result = [random.choice(slots) for _ in range(3)]
-    
-    if result[0] == result[1] == result[2]:
-        multiplier = random.choice([5, 10, 20])
-        winnings = bet * multiplier
-    elif result[0] == result[1] or result[1] == result[2] or result[0] == result[2]:
-        multiplier = 2
-        winnings = bet * multiplier
-    else:
-        winnings = -bet
-    
-    update_balance(interaction.user.id, interaction.guild.id, winnings, 'wallet')
-    
-    embed = discord.Embed(title="🎰 Slots", color=discord.Color.gold() if winnings > 0 else discord.Color.red())
-    embed.add_field(name="Result", value=f"{'  '.join(result)}", inline=False)
-    embed.add_field(name="Bet", value=f"${bet:,}", inline=True)
-    if winnings > 0:
-        embed.add_field(name="Won", value=f"+${winnings:,}", inline=True)
-    else:
-        embed.add_field(name="Lost", value=f"-${bet:,}", inline=True)
-    embed.add_field(name="Balance", value=f"${get_balance(interaction.user.id, interaction.guild.id)['wallet']:,}", inline=True)
-    
-    await interaction.response.send_message(embed=embed)
-
-# ===== GIVEAWAY COMMANDS =====
-giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
-
-@giveaway_group.command(name="start", description="Start a giveaway")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def giveaway_start(interaction: discord.Interaction, prize: str, duration_minutes: int, winners: int = 1, channel: discord.TextChannel = None):
-    channel = channel or interaction.channel
-    end_time = datetime.now() + timedelta(minutes=duration_minutes)
-    
-    embed = discord.Embed(title="🎉 Giveaway", description=f"**Prize:** {prize}", color=discord.Color.gold())
-    embed.add_field(name="Ends", value=f"<t:{int(end_time.timestamp())}:R>", inline=True)
-    embed.add_field(name="Winners", value=winners, inline=True)
-    embed.add_field(name="Hosted by", value=interaction.user.mention, inline=True)
-    embed.set_footer(text="Click the button to enter!")
-    
-    msg = await channel.send(embed=embed)
-    await msg.add_reaction("🎉")
-    
-    c.execute("INSERT INTO giveaways (guild_id, channel_id, prize, winner_count, end_time, host_id, message_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-              (interaction.guild.id, channel.id, prize, winners, end_time.isoformat(), interaction.user.id, msg.id))
-    conn.commit()
-    
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "GIVEAWAY_START", f"Giveaway: {prize} ({winners} winner(s))")
-    
-    await interaction.response.send_message(f"✅ Giveaway started in {channel.mention}!", ephemeral=True)
-
-@giveaway_group.command(name="reroll", description="Reroll a giveaway winner")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def giveaway_reroll(interaction: discord.Interaction, message_id: str):
-    try:
-        msg = await interaction.channel.fetch_message(int(message_id))
-        if not msg:
-            await interaction.response.send_message("❌ Message not found.")
-            return
-        
-        reactions = msg.reactions
-        users = []
-        for reaction in reactions:
-            async for user in reaction.users():
-                if user != bot.user:
-                    users.append(user)
-        
-        if users:
-            winner = random.choice(users)
-            await interaction.response.send_message(f"🎉 New winner: {winner.mention}!")
-            add_history(interaction.guild.id, winner.id, str(winner), "GIVEAWAY_WIN", f"Rerolled win")
-        else:
-            await interaction.response.send_message("❌ No one entered.")
-    except Exception as e:
-        await interaction.response.send_message("❌ Invalid message ID.")
-
-# ===== OTHER COMMANDS (standalone, not in groups to save slots) =====
-
-@bot.tree.command(name="nick", description="Change nickname")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_nicknames=True)
-async def nick(interaction: discord.Interaction, member: discord.Member, nickname: str):
-    old = member.display_name
-    await member.edit(nick=nickname)
-    add_history(interaction.guild.id, member.id, str(member), "NICK_CHANGE", f"{old} -> {nickname} (by {interaction.user})")
-    await interaction.response.send_message(f"✏️ Changed {old}'s nickname to {nickname}")
-
-@bot.tree.command(name="giverole", description="Give role to member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_roles=True)
-async def giverole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    await interaction.response.defer()
-    await member.add_roles(role)
-    add_history(interaction.guild.id, member.id, str(member), "ROLE_ADD", f"Role added: {role.name} (by {interaction.user})")
-    await interaction.followup.send(f"✅ Gave {role.name} to {member.mention}")
-
-@bot.tree.command(name="removerole", description="Remove role from member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(manage_roles=True)
-async def removerole(interaction: discord.Interaction, member: discord.Member, role: discord.Role):
-    await interaction.response.defer()
-    await member.remove_roles(role)
-    add_history(interaction.guild.id, member.id, str(member), "ROLE_REMOVE", f"Role removed: {role.name} (by {interaction.user})")
-    await interaction.followup.send(f"❌ Removed {role.name} from {member.mention}")
-
-@bot.tree.command(name="setlevel", description="Set a user's level (Admin)")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def set_level(interaction: discord.Interaction, member: discord.Member, level: int):
-    c.execute("UPDATE leveling SET level=? WHERE user_id=? AND guild_id=?", (level, member.id, interaction.guild.id))
-    if c.rowcount == 0:
-        c.execute("INSERT INTO leveling (user_id, guild_id, xp, level) VALUES (?, ?, 0, ?)", (member.id, interaction.guild.id, level))
-    conn.commit()
-    add_history(interaction.guild.id, member.id, str(member), "LEVEL_SET", f"Level set to {level} by {interaction.user}")
-    await interaction.response.send_message(f"✅ Set {member.mention}'s level to {level}")
-
-@bot.tree.command(name="reactionrole", description="Setup reaction role message")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def reaction_role(interaction: discord.Interaction, channel: discord.TextChannel, message_id: str, emoji: str, role: discord.Role):
-    try:
-        msg_id = int(message_id)
-        c.execute("INSERT INTO reaction_roles (guild_id, channel_id, message_id, emoji, role_id) VALUES (?, ?, ?, ?, ?)",
-                  (interaction.guild.id, channel.id, msg_id, emoji, role.id))
-        conn.commit()
-        add_history(interaction.guild.id, role.id, str(role), "REACTION_ROLE", f"Setup: {emoji} -> @{role.name}")
-        await interaction.response.send_message(f"✅ Reaction role set: {emoji} -> {role.name}")
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid message ID.")
-
-@bot.tree.command(name="setbirthday", description="Set your birthday (MM-DD)")
-async def set_birthday(interaction: discord.Interaction, date: str, year: int = None):
-    if not re.match(r"^\d{2}-\d{2}$", date):
-        await interaction.response.send_message("❌ Invalid date format. Use MM-DD (e.g., 06-15)")
-        return
-    
-    c.execute("INSERT OR REPLACE INTO birthdays (user_id, guild_id, date, year) VALUES (?, ?, ?, ?)",
-              (interaction.user.id, interaction.guild.id, date, year or 0))
-    conn.commit()
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "BIRTHDAY_SET", f"Birthday set to {date}")
-    await interaction.response.send_message(f"✅ Birthday set to {date}!")
-
-@bot.tree.command(name="setwelcome", description="Set welcome channel and message")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def set_welcome(interaction: discord.Interaction, channel: discord.TextChannel, message: str = None):
-    welcome_configs[interaction.guild.id] = {
-        'channel_id': channel.id,
-        'message': message or "Welcome {user} to {server}!"
-    }
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "WELCOME_SETUP", f"Welcome channel set to #{channel.name}")
-    await interaction.response.send_message(f"✅ Welcome messages will be sent to {channel.mention}")
-
-@bot.tree.command(name="addcommand", description="Add a custom command")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def add_command(interaction: discord.Interaction, name: str, response: str):
-    c.execute("INSERT OR REPLACE INTO custom_commands (guild_id, name, response) VALUES (?, ?, ?)",
-              (interaction.guild.id, name.lower(), response))
-    conn.commit()
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CUSTOM_CMD_ADD", f"Added command ?{name}")
-    await interaction.response.send_message(f"✅ Added command `?{name}`")
-
-@bot.tree.command(name="removecommand", description="Remove a custom command")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(administrator=True)
-async def remove_command(interaction: discord.Interaction, name: str):
-    c.execute("DELETE FROM custom_commands WHERE guild_id=? AND name=?", (interaction.guild.id, name.lower()))
-    conn.commit()
-    if c.rowcount:
-        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CUSTOM_CMD_REMOVE", f"Removed command ?{name}")
-        await interaction.response.send_message(f"✅ Removed command `?{name}`")
-    else:
-        await interaction.response.send_message("❌ Command not found.")
-
-@bot.tree.command(name="commands", description="List all custom commands")
-async def list_commands(interaction: discord.Interaction):
-    c.execute("SELECT name, response FROM custom_commands WHERE guild_id=?", (interaction.guild.id,))
-    cmds = c.fetchall()
-    if not cmds:
-        await interaction.response.send_message("No custom commands setup. Use `/addcommand` to create one.")
-        return
-    
-    embed = discord.Embed(title=f"📋 Custom Commands for {interaction.guild.name}", color=discord.Color.blue())
-    for name, response in cmds:
-        embed.add_field(name=f"?{name}", value=response[:100] + ("..." if len(response) > 100 else ""), inline=False)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="voicekick", description="Disconnect a user from voice channel")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(move_members=True)
-async def voice_kick(interaction: discord.Interaction, member: discord.Member):
-    if member.voice and member.voice.channel:
-        await member.move_to(None)
-        add_history(interaction.guild.id, member.id, str(member), "VOICE_KICK", f"Disconnected from voice by {interaction.user}")
-        await interaction.response.send_message(f"🔇 Disconnected {member.mention} from voice")
-        await log(interaction.guild, f"VOICEKICK | {member}")
-    else:
-        await interaction.response.send_message("❌ User is not in a voice channel.")
-
-@bot.tree.command(name="voicemove", description="Move a user to another voice channel")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(move_members=True)
-async def voice_move(interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
-    if member.voice:
-        await member.move_to(channel)
-        add_history(interaction.guild.id, member.id, str(member), "VOICE_MOVE", f"Moved to {channel.name} by {interaction.user}")
-        await interaction.response.send_message(f"🔊 Moved {member.mention} to {channel.name}")
-    else:
-        await interaction.response.send_message("❌ User is not in a voice channel.")
-
-@bot.tree.command(name="ping", description="Check bot latency")
-async def ping(interaction: discord.Interaction):
-    embed = discord.Embed(title="🏓 Pong!", color=discord.Color.green())
-    embed.add_field(name="Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="uptime", description="Check bot uptime")
-async def uptime(interaction: discord.Interaction):
-    uptime_delta = datetime.now() - START_TIME
-    days = uptime_delta.days
-    hours, remainder = divmod(uptime_delta.seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    await interaction.response.send_message(f"⏱️ Uptime: {days}d {hours}h {minutes}m {seconds}s")
-
-@bot.tree.command(name="say", description="Make the bot say something")
-@app_commands.check(owner_check)
-async def say(interaction: discord.Interaction, message: str, channel: discord.TextChannel = None):
-    channel = channel or interaction.channel
-    await channel.send(message)
-    await interaction.response.send_message("✅ Message sent!", ephemeral=True)
-
-@bot.tree.command(name="embed", description="Send an embed message")
-@app_commands.check(owner_check)
-async def send_embed(interaction: discord.Interaction, title: str, description: str, color: str = "blue", channel: discord.TextChannel = None):
-    colors = {
-        "red": discord.Color.red(), "blue": discord.Color.blue(), "green": discord.Color.green(),
-        "gold": discord.Color.gold(), "purple": discord.Color.purple(), "orange": discord.Color.orange(),
-        "random": discord.Color.random()
-    }
-    embed = discord.Embed(title=title, description=description, color=colors.get(color.lower(), discord.Color.blue()))
-    channel = channel or interaction.channel
-    await channel.send(embed=embed)
-    await interaction.response.send_message("✅ Embed sent!", ephemeral=True)
-
-# ===== PLAYLIST COMMANDS =====
-@bot.tree.command(name="addsong", description="Add a song to the server playlist")
-async def add_song(interaction: discord.Interaction, name: str, url: str):
-    c.execute("INSERT INTO playlists (guild_id, name, url, added_by) VALUES (?, ?, ?, ?)",
-              (interaction.guild.id, name, url, interaction.user.id))
-    conn.commit()
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PLAYLIST_ADD", f"Added song: {name}")
-    await interaction.response.send_message(f"✅ Added **{name}** to playlist!")
-
-@bot.tree.command(name="playlist", description="Show server playlist")
-async def show_playlist(interaction: discord.Interaction):
-    c.execute("SELECT name, url, added_by FROM playlists WHERE guild_id=?", (interaction.guild.id,))
-    songs = c.fetchall()
-    if not songs:
-        await interaction.response.send_message("No songs in playlist. Use `/addsong` to add one.")
-        return
-    
-    embed = discord.Embed(title=f"🎵 {interaction.guild.name} Playlist", color=discord.Color.blue())
-    for i, (name, url, added_by) in enumerate(songs[:15], 1):
-        member = interaction.guild.get_member(added_by)
-        embed.add_field(name=f"{i}. {name}", value=f"[Link]({url}) | Added by {member.display_name if member else 'Unknown'}", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-# =========================
-# AI Chat Command
-# =========================
-@bot.tree.command(name="ai", description="🤖 Chat with the AI — remembers you across sessions!")
-async def ai_chat(interaction: discord.Interaction, message: str):
-    await interaction.response.defer()
-    
-    guild_id = interaction.guild.id
-    channel_id = interaction.channel.id
-    user_id = interaction.user.id
-    
-    save_conversation(guild_id, channel_id, user_id, "user", message)
-    
-    context = await build_ai_context(guild_id, channel_id, user_id, interaction.user.display_name, message)
-    
-    guild_mems = get_all_guild_memories(guild_id, limit=10)
-    guild_memory_text = ""
-    if guild_mems:
-        lines = []
-        for uid, key, val, _ in guild_mems[:5]:
-            user_obj = interaction.guild.get_member(uid)
-            name = user_obj.display_name if user_obj else f"User({uid})"
-            lines.append(f"- {name}'s {key}: {val}")
-        if lines:
-            guild_memory_text = "What I know about server members:\n" + "\n".join(lines) + "\n"
-    
-    channel_context = get_recent_conversation(guild_id, channel_id, limit=8)
-    channel_text = ""
-    if channel_context:
-        lines = []
-        for role, content, ts, uid in channel_context:
-            if role == "user":
-                user_obj = interaction.guild.get_member(uid)
-                name = user_obj.display_name if user_obj else f"User({uid})"
-                lines.append(f"{name}: {content[:200]}")
-            else:
-                lines.append(f"Bot: {content[:200]}")
-        channel_text = "Recent channel discussion:\n" + "\n".join(lines) + "\n"
-    
-    prompt = f"""You are a friendly AI assistant in a Discord server. You have memory of users.
-
-{context}
-
-{guild_memory_text}
-{channel_text}
-
-{interaction.user.display_name}: {message}
-
-Respond naturally, conversationally, and keep it concise (under 300 words). Reference things you remember about the user when relevant."""
-    
-    reply = await get_ai_response(prompt, temperature=0.8)
-    
-    save_conversation(guild_id, channel_id, user_id, "assistant", reply)
-    
-    embed = discord.Embed(
-        description=reply,
-        color=discord.Color.purple()
-    )
-    embed.set_footer(text=f"🧠 I remember you, {interaction.user.display_name}!")
-    
-    await interaction.followup.send(embed=embed)
-
-@bot.tree.command(name="whatiknow", description="🧠 See what the AI has learned about you")
-async def what_i_know(interaction: discord.Interaction):
-    memories = get_ai_memories(interaction.guild.id, interaction.user.id)
-    traits = get_user_personality(interaction.guild.id, interaction.user.id)
-    
-    if not memories and not traits:
-        await interaction.response.send_message("🤖 I don't know much about you yet! Chat with me using `/ai` and I'll learn about you naturally.")
-        return
-    
-    embed = discord.Embed(
-        title=f"🧠 What I Know About {interaction.user.display_name}",
-        description="Things I've learned from our conversations",
-        color=discord.Color.purple()
-    )
-    
-    if memories:
-        memory_text = ""
-        for key, value, importance, created, accessed in memories:
-            icon = "⭐" if importance >= 4 else "📌" if importance >= 2 else "🔹"
-            memory_text += f"{icon} **{key.replace('_', ' ').title()}**: {value}\n"
-        embed.add_field(name="📝 Memories", value=memory_text, inline=False)
-    
-    if traits:
-        trait_text = "\n".join([f"• **{t.replace('_', ' ').title()}**: {v}" for t, v in traits])
-        embed.add_field(name="🎭 Personality", value=trait_text, inline=False)
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="forgetme", description="🧹 Make the AI forget everything about you")
-async def forget_me(interaction: discord.Interaction):
-    c.execute("DELETE FROM ai_memories WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
-    c.execute("DELETE FROM ai_personality WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
-    c.execute("DELETE FROM ai_conversations WHERE guild_id=? AND user_id=?", (interaction.guild.id, interaction.user.id))
-    conn.commit()
-    await interaction.response.send_message("🧹 Done! I've forgotten everything about you. Let's start fresh whenever you're ready.")
-
-# =========================
-# 🎵 MUSIC SYSTEM - SLASH COMMANDS
-# =========================
-
-@bot.tree.command(name="play", description="🎵 Play a song by name or URL (YouTube, Spotify, SoundCloud)")
-async def play_music(interaction: discord.Interaction, query: str):
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
-        return
-    
-    await interaction.response.defer()
-    
-    player = get_music_player(interaction.guild.id)
-    
-    connected = await player.connect_voice(interaction.user.voice.channel)
-    if not connected:
-        await interaction.followup.send("❌ Could not connect to voice channel.", ephemeral=True)
-        return
-    
-    try:
-        is_url = bool(URL_REGEX.match(query))
-        
-        if is_url and ('playlist' in query.lower() or '&list=' in query.lower()):
-            playlist_title, tracks = await YTDLSource.from_playlist(query)
-            
-            if not tracks:
-                await interaction.followup.send("❌ Could not find any tracks in that playlist.")
-                return
-            
-            for track in tracks:
-                await player.add_to_queue(track)
-            
-            embed = discord.Embed(
-                title="📋 Playlist Added",
-                description=f"**{playlist_title}**",
-                color=discord.Color.green()
+            dm_embed = discord.Embed(
+                title=f"You were warned in {interaction.guild.name}",
+                description=f"**Reason:** {reason}",
+                color=discord.Color.orange()
             )
-            embed.add_field(name="Tracks", value=f"{len(tracks)} songs added to queue", inline=False)
-            
-            if player.current:
-                embed.add_field(name="Now Playing", value=f"[{player.current.get('title', 'Unknown')}]({player.current.get('url', '')})", inline=False)
-            
-            await interaction.followup.send(embed=embed)
-            add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST", f"Added playlist: {playlist_title} ({len(tracks)} tracks)")
-            return
+            await member.send(embed=dm_embed)
+        except:
+            pass
         
-        source = await YTDLSource.from_url(query)
-        
-        track_data = {
-            'title': source.title,
-            'url': source.url,
-            'duration': source.duration,
-            'thumbnail': source.thumbnail,
-            'channel': source.channel,
-            'channel_url': source.channel_url,
-            'uploader': source.uploader,
-            'views': source.views,
-        }
-        
-        await player.add_to_queue(track_data)
-        
-        duration_str = MusicPlayer._format_duration(source.duration)
-        
-        embed = discord.Embed(
-            title="🎵 Added to Queue" if player.is_playing() else "🎵 Now Playing",
-            description=f"[{source.title}]({source.url})",
-            color=discord.Color.green()
-        )
-        
-        if source.thumbnail:
-            embed.set_thumbnail(url=source.thumbnail)
-        
-        embed.add_field(name="Duration", value=duration_str, inline=True)
-        embed.add_field(name="Uploader", value=source.uploader, inline=True)
-        
-        queue_size = player.queue.qsize()
-        if queue_size > 0:
-            embed.add_field(name="Position in Queue", value=f"#{queue_size}", inline=True)
+        # Channel confirmation embed
+        embed = discord.Embed(title="⚠️ Warned User", color=discord.Color.orange())
+        embed.add_field(name="User", value=member.mention, inline=True)
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"User ID: {member.id}")
         
         await interaction.followup.send(embed=embed)
-        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAY", f"Played: {source.title}")
-        
-    except ValueError as e:
-        await interaction.followup.send(f"❌ {str(e)}")
-    except Exception as e:
-        await interaction.followup.send(f"❌ Error playing song: {str(e)[:100]}")
 
-@bot.tree.command(name="search", description="🔍 Search YouTube and pick a song to play")
-async def search_music(interaction: discord.Interaction, query: str):
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
-        return
+@mod_group.command(name="kick", description="Kick a member from the server")
+@app_commands.describe(member="Member to kick", reason="Reason for kicking")
+async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+    await interaction.response.defer(ephemeral=True)
     
-    await interaction.response.defer()
+    if not interaction.user.guild_permissions.kick_members:
+        return await interaction.followup.send("❌ You don't have permission to kick members.", ephemeral=True)
+    
+    if member.top_role >= interaction.user.top_role:
+        return await interaction.followup.send("❌ You cannot kick this member (role hierarchy).", ephemeral=True)
     
     try:
-        results = await YTDLSource.search_results(query, max_results=5)
+        await member.kick(reason=reason)
+        embed = discord.Embed(title="👢 Kicked User", color=discord.Color.red())
+        embed.add_field(name="User", value=member.mention, inline=True)
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.set_footer(text=f"User ID: {member.id}")
+        await interaction.followup.send(embed=embed)
+    except discord.Forbidden:
+        await interaction.followup.send("❌ I don't have permission to kick that member.", ephemeral=True)
+
+@mod_group.command(name="clean", description="Clean a number of messages from a channel")
+@app_commands.describe(amount="Number of messages to delete", member="Only delete messages from this member (optional)")
+async def mod_clean(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
+    await interaction.response.defer(ephemeral=True)
+    
+    if not interaction.user.guild_permissions.manage_messages:
+        return await interaction.followup.send("❌ You don't have permission to manage messages.", ephemeral=True)
+    
+    amount = min(amount, 100)
+    
+    def check(msg):
+        return True if member is None else msg.author.id == member.id
+    
+    try:
+        deleted = await interaction.channel.purge(limit=amount, check=check)
+        await interaction.followup.send(f"✅ Deleted {len(deleted)} messages.", ephemeral=True)
+    except:
+        await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
+
+# ─── MUSIC COG ────────────────────────────────────────────────────────────────
+
+class MusicControls(discord.ui.View):
+    def __init__(self, music_cog, track: wavelink.Track):
+        super().__init__(timeout=600)
+        self.music_cog = music_cog
+        self.track = track
+    
+    @discord.ui.button(label="⏸️", style=discord.ButtonStyle.secondary)
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player):
+            return await interaction.response.send_message("Not connected.", ephemeral=True)
+        if player.paused:
+            await player.resume()
+            button.label = "⏸️"
+        else:
+            await player.pause()
+            button.label = "▶️"
+        await interaction.response.edit_message(view=self)
+    
+    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.secondary)
+    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player):
+            return await interaction.response.send_message("Not connected.", ephemeral=True)
+        await player.stop()
+        await interaction.response.send_message("⏭️ Skipped", ephemeral=True)
+    
+    @discord.ui.button(label="🔀", style=discord.ButtonStyle.secondary)
+    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.shuffle_queue(interaction.guild.id)
+        await interaction.response.send_message("🔀 Queue shuffled!", ephemeral=True)
+    
+    @discord.ui.button(label="⏹️", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        player = interaction.guild.voice_client
+        if not player:
+            return await interaction.response.send_message("Not connected.", ephemeral=True)
+        player.queue.clear()
+        await player.stop()
+        await player.disconnect()
+        await interaction.response.send_message("⏹️ Stopped and disconnected.", ephemeral=True)
+
+
+async def get_music_player(guild: discord.Guild, voice_channel: discord.VoiceChannel) -> Optional[wavelink.Player]:
+    """Get or create a wavelink player for a guild."""
+    player = guild.voice_client
+    if player and isinstance(player, wavelink.Player):
+        if player.channel != voice_channel:
+            await player.move_to(voice_channel)
+        return player
+    
+    if player:
+        await player.disconnect()
+    
+    player = await voice_channel.connect(cls=wavelink.Player)
+    return player
+
+
+class Music(discord.Cog, name="music"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.queue = {}  # guild_id: list of wavelink.Track
+        self.current = {}  # guild_id: wavelink.Track
+        self.history = {}  # guild_id: list of wavelink.Track (for previous)
+        self.loop = {}  # guild_id: bool
+        self.volume = {}  # guild_id: int
+    
+    def get_queue(self, guild_id: int) -> list:
+        if guild_id not in self.queue:
+            self.queue[guild_id] = []
+        return self.queue[guild_id]
+    
+    def get_history(self, guild_id: int) -> list:
+        if guild_id not in self.history:
+            self.history[guild_id] = []
+        return self.history[guild_id]
+    
+    async def shuffle_queue(self, guild_id: int):
+        q = self.get_queue(guild_id)
+        random.shuffle(q)
+    
+    async def ensure_voice(self, interaction: discord.Interaction) -> bool:
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.followup.send("❌ You must be in a voice channel first.", ephemeral=True)
+            return False
+        return True
+    
+    @music_group.command(name="play", description="Play a song from a query or URL")
+    @app_commands.describe(query="Song name or URL to play")
+    async def music_play(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer()
         
-        if not results:
-            await interaction.followup.send(f"❌ No results found for '{query}'.")
+        if not await self.ensure_voice(interaction):
             return
         
-        embed = discord.Embed(
-            title="🔍 Search Results",
-            description=f"Results for: **{query}**\n*Click a button below to play*",
-            color=discord.Color.blue()
-        )
+        voice_channel = interaction.user.voice.channel
+        guild = interaction.guild
         
-        for i, result in enumerate(results, 1):
-            duration = MusicPlayer._format_duration(result.get('duration', 0))
+        try:
+            player = await get_music_player(guild, voice_channel)
+            
+            # Search for tracks
+            tracks = await wavelink.Playable.search(query)
+            if not tracks:
+                return await interaction.followup.send("❌ No results found.")
+            
+            track = tracks[0]
+            
+            if isinstance(track, wavelink.Playlist):
+                playlist_tracks = list(tracks)
+                queue = self.get_queue(guild.id)
+                queue.extend(playlist_tracks[1:])
+                
+                if not player.playing:
+                    self.current[guild.id] = playlist_tracks[0]
+                    await player.play(playlist_tracks[0])
+                    embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+                    embed.add_field(name="Title", value=playlist_tracks[0].title, inline=False)
+                    embed.add_field(name="Duration", value=format_duration(playlist_tracks[0].length), inline=True)
+                    embed.add_field(name="Tracks in Playlist", value=len(playlist_tracks), inline=True)
+                    view = MusicControls(self, playlist_tracks[0])
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    embed = discord.Embed(title="📋 Added to Queue", color=discord.Color.blue())
+                    embed.add_field(name="Playlist", value=track.name, inline=False)
+                    embed.add_field(name="Tracks Added", value=len(playlist_tracks[1:]) + 1, inline=True)
+                    await interaction.followup.send(embed=embed)
+            else:
+                queue = self.get_queue(guild.id)
+                
+                if not player.playing:
+                    self.current[guild.id] = track
+                    await player.play(track)
+                    embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+                    embed.add_field(name="Title", value=track.title, inline=False)
+                    embed.add_field(name="Artist", value=track.author, inline=True)
+                    embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
+                    embed.set_thumbnail(url=track.artwork)
+                    view = MusicControls(self, track)
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    queue.append(track)
+                    position = len(queue)
+                    embed = discord.Embed(title="📋 Added to Queue", color=discord.Color.blue())
+                    embed.add_field(name="Title", value=track.title, inline=False)
+                    embed.add_field(name="Position", value=f"#{position}", inline=True)
+                    embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
+                    await interaction.followup.send(embed=embed)
+        
+        except Exception as e:
+            await interaction.followup.send(f"❌ An error occurred: {str(e)}")
+    
+    @music_group.command(name="search", description="Search for a song and select from results")
+    @app_commands.describe(query="Search query")
+    async def music_search(self, interaction: discord.Interaction, query: str):
+        await interaction.response.defer()
+        
+        if not await self.ensure_voice(interaction):
+            return
+        
+        try:
+            tracks = await wavelink.Playable.search(query)
+            if not tracks:
+                return await interaction.followup.send("❌ No results found.")
+            
+            tracks = tracks[:5]
+            
+            embed = discord.Embed(title="🔍 Search Results", color=discord.Color.blue())
+            for i, track in enumerate(tracks, 1):
+                embed.add_field(
+                    name=f"{i}. {track.title}",
+                    value=f"Artist: {track.author} | Duration: {format_duration(track.length)}",
+                    inline=False
+                )
+            
+            class SearchSelect(discord.ui.View):
+                def __init__(self, tracks, music_cog):
+                    super().__init__(timeout=30)
+                    self.tracks = tracks
+                    self.music_cog = music_cog
+                    options = [
+                        discord.SelectOption(label=f"{t.title[:50]}", value=str(i), description=t.author[:50])
+                        for i, t in enumerate(tracks)
+                    ]
+                    select = discord.ui.Select(placeholder="Choose a track...", options=options)
+                    
+                    async def select_callback(interaction: discord.Interaction):
+                        await interaction.response.defer()
+                        idx = int(select.values[0])
+                        track = self.tracks[idx]
+                        
+                        voice_channel = interaction.user.voice.channel
+                        guild = interaction.guild
+                        player = await get_music_player(guild, voice_channel)
+                        
+                        queue = self.music_cog.get_queue(guild.id)
+                        
+                        if not player.playing:
+                            self.music_cog.current[guild.id] = track
+                            await player.play(track)
+                            embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+                            embed.add_field(name="Title", value=track.title, inline=False)
+                            embed.add_field(name="Artist", value=track.author, inline=True)
+                            embed.add_field(name="Duration", value=format_duration(track.length), inline=True)
+                            embed.set_thumbnail(url=track.artwork)
+                            view = MusicControls(self.music_cog, track)
+                            await interaction.followup.send(embed=embed, view=view)
+                        else:
+                            queue.append(track)
+                            await interaction.followup.send(f"✅ Added **{track.title}** to the queue (position #{len(queue)})")
+                        
+                        await interaction.message.delete()
+                    
+                    select.callback = select_callback
+                    self.add_item(select)
+            
+            view = SearchSelect(tracks, self)
+            await interaction.followup.send(embed=embed, view=view)
+        
+        except Exception as e:
+            await interaction.followup.send(f"❌ An error occurred: {str(e)}")
+    
+    @music_group.command(name="pause", description="Pause the current track")
+    async def music_pause(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player) or not player.playing:
+            return await interaction.followup.send("❌ Nothing is playing.")
+        if player.paused:
+            return await interaction.followup.send("⚠️ Already paused.")
+        await player.pause()
+        await interaction.followup.send("⏸️ Paused")
+    
+    @music_group.command(name="resume", description="Resume the current track")
+    async def music_resume(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player):
+            return await interaction.followup.send("❌ Not connected.")
+        if not player.paused:
+            return await interaction.followup.send("⚠️ Already playing.")
+        await player.resume()
+        await interaction.followup.send("▶️ Resumed")
+    
+    @music_group.command(name="skip", description="Skip the current track")
+    async def music_skip(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player) or not player.playing:
+            return await interaction.followup.send("❌ Nothing to skip.")
+        
+        # Save to history before skipping
+        if interaction.guild.id in self.current:
+            history = self.get_history(interaction.guild.id)
+            history.append(self.current[interaction.guild.id])
+            if len(history) > 20:
+                history.pop(0)
+        
+        await player.stop()
+        await interaction.followup.send("⏭️ Skipped")
+    
+    @music_group.command(name="stop", description="Stop playback and clear the queue")
+    async def music_stop(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        player = interaction.guild.voice_client
+        if not player or not isinstance(player, wavelink.Player):
+            return await interaction.followup.send("❌ Not connected.")
+        
+        player.queue.clear()
+        self.queue[interaction.guild.id] = []
+        self.current[interaction.guild.id] = None
+        await player.stop()
+        await player.disconnect()
+        await interaction.followup.send("⏹️ Stopped and disconnected")
+    
+    @music_group.command(name="queue", description="View the current music queue")
+    async def music_queue(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        queue = self.get_queue(interaction.guild.id)
+        current = self.current.get(interaction.guild.id)
+        
+        embed = discord.Embed(title="📋 Music Queue", color=discord.Color.blue())
+        
+        if current:
             embed.add_field(
-                name=f"{i}. {result['title'][:80]}",
-                value=f"Duration: {duration} | {result.get('uploader', 'Unknown')}",
+                name="▶️ Now Playing",
+                value=f"**{current.title}** by {current.author} [`{format_duration(current.length)}`]",
                 inline=False
             )
         
-        class SearchSelect(discord.ui.Select):
-            def __init__(self):
-                options = []
-                for i, result in enumerate(results, 1):
-                    label = f"{i}. {result['title'][:80]}"
-                    options.append(discord.SelectOption(
-                        label=label[:100],
-                        description=f"{MusicPlayer._format_duration(result.get('duration', 0))}",
-                        value=str(i - 1)
-                    ))
-                super().__init__(placeholder="Choose a song to play...", min_values=1, max_values=1, options=options)
-            
-            async def callback(self, interaction: discord.Interaction):
-                selected_idx = int(self.values[0])
-                selected = results[selected_idx]
-                
-                player = get_music_player(interaction.guild.id)
-                connected = await player.connect_voice(interaction.user.voice.channel)
-                if not connected:
-                    await interaction.response.send_message("❌ Could not connect to voice channel.", ephemeral=True)
-                    return
-                
-                await player.add_to_queue(selected)
-                
-                duration_str = MusicPlayer._format_duration(selected.get('duration', 0))
-                
-                embed = discord.Embed(
-                    title="🎵 Added to Queue",
-                    description=f"[{selected['title']}]({selected['url']})",
-                    color=discord.Color.green()
-                )
-                if selected.get('thumbnail'):
-                    embed.set_thumbnail(url=selected['thumbnail'])
-                embed.add_field(name="Duration", value=duration_str, inline=True)
-                embed.add_field(name="Uploader", value=selected.get('uploader', 'Unknown'), inline=True)
-                
-                await interaction.response.edit_message(embed=embed, view=None)
-                add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SEARCH", f"Searched and played: {selected['title']}")
-        
-        view = discord.ui.View(timeout=30)
-        view.add_item(SearchSelect())
-        
-        await interaction.followup.send(embed=embed, view=view)
-        
-    except Exception as e:
-        await interaction.followup.send(f"❌ Search error: {str(e)[:100]}")
-
-@bot.tree.command(name="pause", description="⏸️ Pause the current song")
-async def pause_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    if not player.is_playing():
-        await interaction.response.send_message("❌ Nothing is playing right now.")
-        return
-    
-    player.pause()
-    await interaction.response.send_message("⏸️ **Paused** — Use `/resume` to continue.")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PAUSE", "Paused music")
-
-@bot.tree.command(name="resume", description="▶️ Resume the paused song")
-async def resume_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    if not player.is_paused:
-        await interaction.response.send_message("❌ The music isn't paused.")
-        return
-    
-    player.resume()
-    await interaction.response.send_message("▶️ **Resumed** — Enjoy the music!")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_RESUME", "Resumed music")
-
-@bot.tree.command(name="skip", description="⏭️ Skip the current song")
-async def skip_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    if not player.is_playing() and not player.is_paused:
-        await interaction.response.send_message("❌ Nothing is playing right now.")
-        return
-    
-    current_title = player.current.get('title', 'Unknown') if player.current else 'Unknown'
-    player.skip()
-    
-    await interaction.response.send_message(f"⏭️ **Skipped** `{current_title}`")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SKIP", f"Skipped: {current_title}")
-
-@bot.tree.command(name="previous", description="⏮️ Go back to the previous song")
-async def previous_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    if player.previous():
-        await interaction.response.send_message("⏮️ **Going back to previous song**")
-        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PREVIOUS", "Went to previous song")
-    else:
-        await interaction.response.send_message("❌ No previous song in history.")
-
-@bot.tree.command(name="stop", description="⏹️ Stop music and clear the queue")
-async def stop_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    player.stop()
-    await interaction.response.send_message("⏹️ **Stopped** — Music stopped and queue cleared.")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_STOP", "Stopped music and cleared queue")
-
-@bot.tree.command(name="queue", description="📋 Show the current music queue")
-async def queue_music(interaction: discord.Interaction, page: int = 1):
-    player = get_music_player(interaction.guild.id)
-    
-    queue_list = player.get_queue_list()
-    total_songs = len(queue_list)
-    
-    if total_songs == 0 and not player.current:
-        await interaction.response.send_message("📋 **Queue is empty** — Use `/play` to add songs!")
-        return
-    
-    items_per_page = 10
-    total_pages = max(1, (total_songs + items_per_page - 1) // items_per_page)
-    page = max(1, min(page, total_pages))
-    
-    start_idx = (page - 1) * items_per_page
-    end_idx = min(start_idx + items_per_page, total_songs)
-    
-    embed = discord.Embed(
-        title="📋 Music Queue",
-        color=discord.Color.blue()
-    )
-    
-    if player.current:
-        current = player.current
-        duration_str = MusicPlayer._format_duration(current.get('duration', 0))
-        status = "▶️ Playing" if player.is_playing() else "⏸️ Paused"
-        embed.add_field(
-            name=f"{status} — Now Playing",
-            value=f"[{current.get('title', 'Unknown')}]({current.get('url', '')})\n`{duration_str}` • {current.get('uploader', 'Unknown')}",
-            inline=False
-        )
-    
-    if queue_list:
-        queue_text = ""
-        for i in range(start_idx, end_idx):
-            track = queue_list[i]
-            duration_str = MusicPlayer._format_duration(track.get('duration', 0))
-            queue_text += f"**{i + 1}.** [{track.get('title', 'Unknown')[:50]}]({track.get('url', '')}) `{duration_str}`\n"
-        
-        embed.add_field(
-            name=f"⏭️ Up Next ({start_idx + 1}-{end_idx} of {total_songs})",
-            value=queue_text or "No more songs",
-            inline=False
-        )
-    
-    loop_icons = {'none': '➡️ No Loop', 'one': '🔂 Loop One', 'all': '🔁 Loop All'}
-    embed.set_footer(text=f"Page {page}/{total_pages} | {loop_icons.get(player.loop_mode, '➡️ No Loop')} | Volume: {int(player.volume * 100)}%")
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="nowplaying", description="🎶 Show what's currently playing")
-async def now_playing(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.current:
-        await interaction.response.send_message("❌ Nothing is playing right now.")
-        return
-    
-    track = player.current
-    duration_str = MusicPlayer._format_duration(track.get('duration', 0))
-    status = "▶️ Playing" if player.is_playing() else "⏸️ Paused"
-    
-    embed = discord.Embed(
-        title=f"{status} — Now Playing",
-        description=f"[{track.get('title', 'Unknown')}]({track.get('url', '')})",
-        color=discord.Color.green()
-    )
-    
-    if track.get('thumbnail'):
-        embed.set_thumbnail(url=track['thumbnail'])
-    
-    embed.add_field(name="Duration", value=duration_str, inline=True)
-    embed.add_field(name="Uploader", value=track.get('uploader', 'Unknown'), inline=True)
-    embed.add_field(name="Channel", value=track.get('channel', 'Unknown'), inline=True)
-    
-    queue_size = player.queue.qsize()
-    embed.add_field(name="Songs in Queue", value=str(queue_size), inline=True)
-    
-    loop_icons = {'none': '➡️', 'one': '🔂', 'all': '🔁'}
-    embed.set_footer(text=f"Volume: {int(player.volume * 100)}% | Loop: {loop_icons.get(player.loop_mode, '➡️')}")
-    
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="volume", description="🔊 Set the volume (0-100)")
-async def volume_music(interaction: discord.Interaction, level: int):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    if level < 0 or level > 100:
-        await interaction.response.send_message("❌ Volume must be between 0 and 100.")
-        return
-    
-    player.set_volume(level / 100)
-    await interaction.response.send_message(f"🔊 **Volume set to {level}%**")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_VOLUME", f"Volume set to {level}%")
-
-@bot.tree.command(name="loop", description="🔁 Set loop mode: none, one, or all")
-async def loop_music(interaction: discord.Interaction, mode: str):
-    player = get_music_player(interaction.guild.id)
-    
-    mode = mode.lower().strip()
-    if mode not in ['none', 'one', 'all']:
-        await interaction.response.send_message("❌ Mode must be `none`, `one`, or `all`.")
-        return
-    
-    player.loop_mode = mode
-    
-    loop_names = {'none': '➡️ No Loop', 'one': '🔂 Loop One', 'all': '🔁 Loop All'}
-    await interaction.response.send_message(f"**Loop: {loop_names[mode]}**")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_LOOP", f"Loop mode: {mode}")
-
-@bot.tree.command(name="shuffle", description="🔀 Shuffle the queue")
-async def shuffle_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    queue_list = player.get_queue_list()
-    if len(queue_list) < 2:
-        await interaction.response.send_message("❌ Not enough songs in queue to shuffle (need at least 2).")
-        return
-    
-    player.shuffle()
-    await interaction.response.send_message(f"🔀 **Queue shuffled!** ({len(queue_list)} songs)")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_SHUFFLE", "Shuffled queue")
-
-@bot.tree.command(name="remove", description="❌ Remove a song from the queue by its number")
-async def remove_music(interaction: discord.Interaction, position: int):
-    player = get_music_player(interaction.guild.id)
-    
-    removed = player.remove_from_queue(position)
-    if removed:
-        await interaction.response.send_message(f"❌ Removed **{removed.get('title', 'Unknown')}** from position #{position}")
-        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_REMOVE", f"Removed #{position} from queue")
-    else:
-        await interaction.response.send_message(f"❌ Invalid position. Use `/queue` to see positions.")
-
-@bot.tree.command(name="clearqueue", description="🧹 Clear the entire queue")
-async def clear_queue_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    queue_list = player.get_queue_list()
-    if not queue_list:
-        await interaction.response.send_message("❌ Queue is already empty.")
-        return
-    
-    count = len(queue_list)
-    player.clear_queue()
-    await interaction.response.send_message(f"🧹 **Cleared {count} songs** from the queue. Current song continues.")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_CLEAR", f"Cleared {count} songs from queue")
-
-@bot.tree.command(name="join", description="🔊 Make the bot join your voice channel")
-async def join_voice(interaction: discord.Interaction):
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You must be in a voice channel first!")
-        return
-    
-    player = get_music_player(interaction.guild.id)
-    connected = await player.connect_voice(interaction.user.voice.channel)
-    
-    if connected:
-        await interaction.response.send_message(f"🔊 **Joined** {interaction.user.voice.channel.mention}")
-        add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_JOIN", f"Joined {interaction.user.voice.channel.name}")
-    else:
-        await interaction.response.send_message("❌ Could not connect to that voice channel.")
-
-@bot.tree.command(name="leave", description="👋 Make the bot leave the voice channel")
-async def leave_voice(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.voice_client or not player.voice_client.is_connected():
-        await interaction.response.send_message("❌ I'm not in a voice channel.")
-        return
-    
-    channel_name = player.voice_client.channel.name
-    await player.disconnect_voice()
-    if interaction.guild.id in music_players:
-        del music_players[interaction.guild.id]
-    
-    await interaction.response.send_message(f"👋 **Left** {channel_name} — Queue cleared.")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_LEAVE", f"Left voice channel")
-
-@bot.tree.command(name="lyrics", description="📝 Get lyrics for the current song")
-async def lyrics_music(interaction: discord.Interaction, song: str = None):
-    await interaction.response.defer()
-    
-    if not song:
-        player = get_music_player(interaction.guild.id)
-        if player.current:
-            song = player.current.get('title', '')
+        if not queue:
+            embed.description = "No songs in queue."
         else:
-            await interaction.followup.send("❌ Provide a song name or play something first.")
-            return
+            total_tracks = len(queue)
+            total_duration = sum(t.length for t in queue if hasattr(t, 'length'))
+            
+            embed.set_footer(text=f"Total: {total_tracks} tracks | Duration: {format_duration(total_duration)}")
+            
+            # Show first 15 tracks
+            show = queue[:15]
+            for i, track in enumerate(show, 1):
+                embed.add_field(
+                    name=f"{i}. {track.title}",
+                    value=f"{track.author} [`{format_duration(track.length)}`]",
+                    inline=False
+                )
+            
+            if len(queue) > 15:
+                embed.add_field(name="...", value=f"And {len(queue) - 15} more tracks", inline=False)
+        
+        await interaction.followup.send(embed=embed)
     
+    @music_group.command(name="nowplaying", description="Show the currently playing track")
+    async def music_nowplaying(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        player = interaction.guild.voice_client
+        current = self.current.get(interaction.guild.id)
+        
+        if not current or not player or not isinstance(player, wavelink.Player) or not player.playing:
+            return await interaction.followup.send("❌ Nothing is currently playing.")
+        
+        embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+        embed.add_field(name="Title", value=current.title, inline=False)
+        embed.add_field(name="Artist", value=current.author, inline=True)
+        
+        if hasattr(player, 'position') and hasattr(current, 'length'):
+            elapsed = player.position
+            total = current.length
+            progress = min(elapsed / total, 1.0) if total > 0 else 0
+            bar_length = 20
+            filled = int(progress * bar_length)
+            bar = "█" * filled + "░" * (bar_length - filled)
+            embed.add_field(name="Progress", value=f"`{format_duration(elapsed)}` {bar} `{format_duration(total)}`", inline=False)
+        
+        embed.set_thumbnail(url=current.artwork)
+        view = MusicControls(self, current)
+        await interaction.followup.send(embed=embed, view=view)
+    
+    @music_group.command(name="shuffle", description="Shuffle the music queue")
+    async def music_shuffle(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        await self.shuffle_queue(interaction.guild.id)
+        await interaction.followup.send("🔀 Queue shuffled!")
+    
+    @music_group.command(name="remove", description="Remove a track from the queue by position")
+    @app_commands.describe(position="Position of the track to remove")
+    async def music_remove(self, interaction: discord.Interaction, position: int):
+        await interaction.response.defer()
+        queue = self.get_queue(interaction.guild.id)
+        
+        if position < 1 or position > len(queue):
+            return await interaction.followup.send(f"❌ Invalid position. Queue has {len(queue)} tracks.")
+        
+        removed = queue.pop(position - 1)
+        await interaction.followup.send(f"✅ Removed **{removed.title}** from the queue.")
+    
+    @music_group.command(name="previous", description="Play the previous track")
+    async def music_previous(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        if not await self.ensure_voice(interaction):
+            return
+        
+        history = self.get_history(interaction.guild.id)
+        if not history:
+            return await interaction.followup.send("❌ No previous track.")
+        
+        voice_channel = interaction.user.voice.channel
+        guild = interaction.guild
+        player = await get_music_player(guild, voice_channel)
+        
+        prev_track = history.pop()
+        
+        # Push current to front of queue
+        current = self.current.get(guild.id)
+        if current:
+            queue = self.get_queue(guild.id)
+            queue.insert(0, current)
+        
+        self.current[guild.id] = prev_track
+        await player.play(prev_track)
+        
+        embed = discord.Embed(title="⏮️ Playing Previous Track", color=discord.Color.green())
+        embed.add_field(name="Title", value=prev_track.title, inline=False)
+        embed.add_field(name="Artist", value=prev_track.author, inline=True)
+        embed.add_field(name="Duration", value=format_duration(prev_track.length), inline=True)
+        embed.set_thumbnail(url=prev_track.artwork)
+        view = MusicControls(self, prev_track)
+        await interaction.followup.send(embed=embed, view=view)
+    
+    @music_group.command(name="loop", description="Toggle looping for the current track")
+    async def music_loop(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        guild_id = interaction.guild.id
+        self.loop[guild_id] = not self.loop.get(guild_id, False)
+        state = "enabled" if self.loop[guild_id] else "disabled"
+        await interaction.followup.send(f"🔁 Loop {state}")
+    
+    @music_group.command(name="volume", description="Set the player volume")
+    @app_commands.describe(volume="Volume level (0-100)")
+    async def music_volume(self, interaction: discord.Interaction, volume: int):
+        await interaction.response.defer()
+        volume = max(0, min(100, volume))
+        
+        player = interaction.guild.voice_client
+        if player and isinstance(player, wavelink.Player):
+            await player.set_volume(volume)
+        
+        self.volume[interaction.guild.id] = volume
+        await interaction.followup.send(f"🔊 Volume set to {volume}%")
+    
+    @music_group.command(name="playlist", description="Load and play a playlist from a URL")
+    @app_commands.describe(url="Playlist URL")
+    async def music_playlist(self, interaction: discord.Interaction, url: str):
+        await interaction.response.defer()
+        
+        if not await self.ensure_voice(interaction):
+            return
+        
+        voice_channel = interaction.user.voice.channel
+        guild = interaction.guild
+        
+        try:
+            player = await get_music_player(guild, voice_channel)
+            tracks = await wavelink.Playable.search(url)
+            
+            if not tracks:
+                return await interaction.followup.send("❌ No tracks found in playlist.")
+            
+            if isinstance(tracks, wavelink.Playlist):
+                playlist_tracks = list(tracks)
+                queue = self.get_queue(guild.id)
+                
+                if not player.playing:
+                    first = playlist_tracks[0]
+                    self.current[guild.id] = first
+                    await player.play(first)
+                    queue.extend(playlist_tracks[1:])
+                    embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+                    embed.add_field(name="Title", value=first.title, inline=False)
+                    embed.add_field(name="Playlist", value=tracks.name, inline=True)
+                    embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
+                    view = MusicControls(self, first)
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    queue.extend(playlist_tracks)
+                    embed = discord.Embed(title="📋 Added to Queue", color=discord.Color.blue())
+                    embed.add_field(name="Playlist", value=tracks.name, inline=False)
+                    embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
+                    await interaction.followup.send(embed=embed)
+            else:
+                # Single track result from playlist command
+                queue = self.get_queue(guild.id)
+                if not player.playing:
+                    self.current[guild.id] = tracks[0]
+                    await player.play(tracks[0])
+                    embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+                    embed.add_field(name="Title", value=tracks[0].title, inline=False)
+                    view = MusicControls(self, tracks[0])
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    queue.append(tracks[0])
+                    await interaction.followup.send(f"✅ Added **{tracks[0].title}** to the queue.")
+        
+        except Exception as e:
+            await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+# ─── EVENTS COG ───────────────────────────────────────────────────────────────
+
+class Events(discord.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print(f"✅ Logged in as {self.bot.user}")
+        print(f"🌐 Connected to {len(self.bot.guilds)} guild(s)")
+        
+        # Connect to Lavalink
+        try:
+            lava_node: wavelink.Node = wavelink.Node(
+                uri="http://localhost:2333",
+                password="youshallnotpass"
+            )
+            await wavelink.Pool.connect(client=self.bot, nodes=[lava_node])
+            print("✅ Connected to Lavalink")
+        except Exception as e:
+            print(f"⚠️ Failed to connect to Lavalink: {e}")
+            print("Music features will be unavailable. Start Lavalink server at http://localhost:2333")
+    
+    @commands.Cog.listener()
+    async def on_wavelink_track_start(self, payload: wavelink.TrackStartEventPayload):
+        guild = self.bot.get_guild(payload.player.guild.id)
+        if not guild:
+            return
+        
+        music_cog = self.bot.get_cog("Music")
+        if music_cog:
+            track = payload.track
+            music_cog.current[guild.id] = track
+    
+    @commands.Cog.listener()
+    async def on_wavelink_track_end(self, payload: wavelink.TrackEndEventPayload):
+        guild = self.bot.get_guild(payload.player.guild.id)
+        if not guild:
+            return
+        
+        music_cog = self.bot.get_cog("Music")
+        if not music_cog:
+            return
+        
+        # Handle loop
+        if music_cog.loop.get(guild.id, False) and music_cog.current.get(guild.id):
+            track = music_cog.current[guild.id]
+            await payload.player.play(track)
+            return
+        
+        # Save to history
+        if guild.id in music_cog.current and music_cog.current[guild.id]:
+            history = music_cog.get_history(guild.id)
+            history.append(music_cog.current[guild.id])
+            if len(history) > 20:
+                history.pop(0)
+        
+        # Play next in queue
+        queue = music_cog.get_queue(guild.id)
+        if queue:
+            next_track = queue.pop(0)
+            music_cog.current[guild.id] = next_track
+            await payload.player.play(next_track)
+        else:
+            music_cog.current[guild.id] = None
+    
+    @commands.Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+        
+        # XP system
+        if message.guild:
+            await self.handle_xp(message)
+        
+        # Auto-response to "good morning/night" etc.
+        content = message.content.lower()
+        if any(greeting in content for greeting in ["good morning", "gm", "good night", "gn", "good afternoon", "good evening"]):
+            async with message.channel.typing():
+                response = await query_ai(f"The user said: '{message.content}'. Respond naturally to their greeting in a friendly way. Keep it short.")
+                await message.reply(response, mention_author=False)
+    
+    async def handle_xp(self, message):
+        user_id = message.author.id
+        guild_id = message.guild.id
+        now = int(time.time())
+        
+        cur = conn.cursor()
+        
+        # Check cooldown (60 seconds)
+        cur.execute("SELECT last_message FROM levels WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
+        row = cur.fetchone()
+        
+        if row:
+            if now - row[0] < 60:
+                return
+            xp_gain = random.randint(10, 25)
+            cur.execute("UPDATE levels SET xp = xp + ?, total_messages = total_messages + 1, last_message = ? WHERE user_id = ? AND guild_id = ?",
+                       (xp_gain, now, user_id, guild_id))
+        else:
+            xp_gain = random.randint(10, 25)
+            cur.execute("INSERT INTO levels (user_id, guild_id, xp, level, total_messages, last_message) VALUES (?, ?, ?, 1, 1, ?)",
+                       (user_id, guild_id, xp_gain, now))
+        
+        conn.commit()
+        
+        # Check level up
+        cur.execute("SELECT xp, level FROM levels WHERE user_id = ? AND guild_id = ?", (user_id, guild_id))
+        row = cur.fetchone()
+        if row:
+            xp, level = row
+            needed = 100 + (level * 50)
+            if xp >= needed:
+                new_level = level + 1
+                cur.execute("UPDATE levels SET xp = 0, level = ? WHERE user_id = ? AND guild_id = ?", (new_level, user_id, guild_id))
+                conn.commit()
+                
+                # Level up message
+                embed = discord.Embed(
+                    title="🎉 Level Up!",
+                    description=f"{message.author.mention} reached **level {new_level}**!",
+                    color=discord.Color.gold()
+                )
+                await message.channel.send(embed=embed)
+
+
+# ─── FUN COG ─────────────────────────────────────────────────────────────────
+
+class Fun(discord.Cog, name="fun"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @fun_group.command(name="8ball", description="Ask the magic 8ball a question")
+    @app_commands.describe(question="Your question")
+    async def fun_8ball(self, interaction: discord.Interaction, question: str):
+        responses = [
+            "It is certain.", "It is decidedly so.", "Without a doubt.", "Yes definitely.",
+            "You may rely on it.", "As I see it, yes.", "Most likely.", "Outlook good.",
+            "Yes.", "Signs point to yes.", "Reply hazy, try again.", "Ask again later.",
+            "Better not tell you now.", "Cannot predict now.", "Concentrate and ask again.",
+            "Don't count on it.", "My reply is no.", "My sources say no.", "Outlook not so good.", "Very doubtful."
+        ]
+        embed = discord.Embed(title="🎱 Magic 8Ball", color=discord.Color.purple())
+        embed.add_field(name="Question", value=question, inline=False)
+        embed.add_field(name="Answer", value=random.choice(responses), inline=False)
+        await interaction.response.send_message(embed=embed)
+    
+    @fun_group.command(name="dice", description="Roll a dice")
+    @app_commands.describe(sides="Number of sides (default: 6)")
+    async def fun_dice(self, interaction: discord.Interaction, sides: int = 6):
+        if sides < 2:
+            return await interaction.response.send_message("❌ Dice must have at least 2 sides.", ephemeral=True)
+        result = random.randint(1, sides)
+        await interaction.response.send_message(f"🎲 You rolled a **{result}** (1-{sides})")
+    
+    @fun_group.command(name="coinflip", description="Flip a coin")
+    async def fun_coinflip(self, interaction: discord.Interaction):
+        result = random.choice(["Heads", "Tails"])
+        await interaction.response.send_message(f"🪙 **{result}**")
+    
+    @fun_group.command(name="meme", description="Get a random meme")
+    async def fun_meme(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get("https://meme-api.com/gimme") as resp:
+                    data = await resp.json()
+                    embed = discord.Embed(title=data.get("title", "Meme"), color=discord.Color.random())
+                    embed.set_image(url=data.get("url"))
+                    embed.set_footer(text=f"From r/{data.get('subreddit', 'unknown')} | 👍 {data.get('ups', 0)}")
+                    await interaction.followup.send(embed=embed)
+        except:
+            await interaction.followup.send("❌ Failed to fetch meme. Try again later.")
+    
+    @fun_group.command(name="rps", description="Play rock-paper-scissors")
+    @app_commands.describe(choice="Your choice")
+    @app_commands.choices(choice=[
+        discord.app_commands.Choice(name="Rock 🪨", value="rock"),
+        discord.app_commands.Choice(name="Paper 📄", value="paper"),
+        discord.app_commands.Choice(name="Scissors ✂️", value="scissors"),
+    ])
+    async def fun_rps(self, interaction: discord.Interaction, choice: str):
+        bot_choice = random.choice(["rock", "paper", "scissors"])
+        emojis = {"rock": "🪨", "paper": "📄", "scissors": "✂️"}
+        
+        if choice == bot_choice:
+            result = "It's a tie!"
+        elif (choice == "rock" and bot_choice == "scissors") or \
+             (choice == "paper" and bot_choice == "rock") or \
+             (choice == "scissors" and bot_choice == "paper"):
+            result = "You win! 🎉"
+        else:
+            result = "I win! 😎"
+        
+        embed = discord.Embed(title="Rock Paper Scissors", color=discord.Color.blue())
+        embed.add_field(name="Your Choice", value=f"{emojis[choice]} {choice.title()}", inline=True)
+        embed.add_field(name="My Choice", value=f"{emojis[bot_choice]} {bot_choice.title()}", inline=True)
+        embed.add_field(name="Result", value=result, inline=False)
+        await interaction.response.send_message(embed=embed)
+
+
+# ─── ECONOMY COG ─────────────────────────────────────────────────────────────
+
+class Economy(discord.Cog, name="economy"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.daily_cooldowns = {}
+    
+    def get_balance(self, user_id: int) -> tuple:
+        cur = conn.cursor()
+        cur.execute("SELECT wallet, bank FROM economy WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        if row:
+            return row
+        cur.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, 0, 0)", (user_id,))
+        conn.commit()
+        return (0, 0)
+    
+    @economy_group.command(name="balance", description="Check your or another user's balance")
+    @app_commands.describe(member="Member to check (optional)")
+    async def economy_balance(self, interaction: discord.Interaction, member: discord.Member = None):
+        target = member or interaction.user
+        wallet, bank = self.get_balance(target.id)
+        embed = discord.Embed(title=f"💰 {target.display_name}'s Balance", color=discord.Color.gold())
+        embed.add_field(name="Wallet", value=f"${wallet:,}", inline=True)
+        embed.add_field(name="Bank", value=f"${bank:,}", inline=True)
+        embed.add_field(name="Total", value=f"${wallet + bank:,}", inline=False)
+        await interaction.response.send_message(embed=embed)
+    
+    @economy_group.command(name="daily", description="Claim your daily reward")
+    async def economy_daily(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
+        now = int(time.time())
+        
+        if user_id in self.daily_cooldowns:
+            remaining = 86400 - (now - self.daily_cooldowns[user_id])
+            if remaining > 0:
+                hours = remaining // 3600
+                minutes = (remaining % 3600) // 60
+                return await interaction.response.send_message(
+                    f"⏰ You already claimed your daily! Come back in {int(hours)}h {int(minutes)}m.", ephemeral=True)
+        
+        amount = random.randint(100, 500)
+        cur = conn.cursor()
+        cur.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id = ?", (amount, user_id))
+        if cur.rowcount == 0:
+            cur.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (user_id, amount))
+        conn.commit()
+        
+        self.daily_cooldowns[user_id] = now
+        embed = discord.Embed(title="📅 Daily Reward", description=f"You received **${amount:,}**!", color=discord.Color.green())
+        await interaction.response.send_message(embed=embed)
+    
+    @economy_group.command(name="pay", description="Send money to another user")
+    @app_commands.describe(member="Recipient", amount="Amount to send")
+    async def economy_pay(self, interaction: discord.Interaction, member: discord.Member, amount: int):
+        if amount <= 0:
+            return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
+        if member.id == interaction.user.id:
+            return await interaction.response.send_message("❌ You can't pay yourself.", ephemeral=True)
+        
+        sender_wallet, _ = self.get_balance(interaction.user.id)
+        if sender_wallet < amount:
+            return await interaction.response.send_message("❌ Insufficient funds in wallet.", ephemeral=True)
+        
+        cur = conn.cursor()
+        cur.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id = ?", (amount, interaction.user.id))
+        cur.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id = ?", (amount, member.id))
+        if cur.rowcount == 0:
+            cur.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (member.id, amount))
+        conn.commit()
+        
+        embed = discord.Embed(title="💸 Payment Sent", color=discord.Color.green())
+        embed.add_field(name="From", value=interaction.user.mention, inline=True)
+        embed.add_field(name="To", value=member.mention, inline=True)
+        embed.add_field(name="Amount", value=f"${amount:,}", inline=False)
+        await interaction.response.send_message(embed=embed)
+    
+    @economy_group.command(name="gamble", description="Gamble your money")
+    @app_commands.describe(amount="Amount to gamble")
+    async def economy_gamble(self, interaction: discord.Interaction, amount: int):
+        if amount <= 0:
+            return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
+        
+        wallet, _ = self.get_balance(interaction.user.id)
+        if wallet < amount:
+            return await interaction.response.send_message("❌ Insufficient funds.", ephemeral=True)
+        
+        win = random.random() < 0.45
+        if win:
+            winnings = int(amount * random.uniform(1.5, 3.0))
+            cur = conn.cursor()
+            cur.execute("UPDATE economy SET wallet = wallet - ? + ? WHERE user_id = ?", (amount, winnings, interaction.user.id))
+            conn.commit()
+            embed = discord.Embed(title="🎰 You Won!", description=f"You gambled ${amount:,} and won **${winnings:,}**!", color=discord.Color.green())
+        else:
+            cur = conn.cursor()
+            cur.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id = ?", (amount, interaction.user.id))
+            conn.commit()
+            embed = discord.Embed(title="🎰 You Lost!", description=f"You gambled ${amount:,} and lost it all.", color=discord.Color.red())
+        
+        await interaction.response.send_message(embed=embed)
+    
+    @economy_group.command(name="leaderboard", description="View the economy leaderboard")
+    async def economy_leaderboard(self, interaction: discord.Interaction):
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, wallet, bank FROM economy ORDER BY (wallet + bank) DESC LIMIT 10")
+        rows = cur.fetchall()
+        
+        embed = discord.Embed(title="🏆 Economy Leaderboard", color=discord.Color.gold())
+        
+        if not rows:
+            embed.description = "No data yet."
+        else:
+            medals = ["🥇", "🥈", "🥉"]
+            for i, (user_id, wallet, bank) in enumerate(rows):
+                total = wallet + bank
+                user = interaction.guild.get_member(user_id)
+                name = user.display_name if user else f"Unknown ({user_id})"
+                prefix = medals[i] if i < 3 else f"{i+1}."
+                embed.add_field(name=f"{prefix} {name}", value=f"${total:,} (Wallet: ${wallet:,} | Bank: ${bank:,})", inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+
+
+# ─── GIVEAWAY COG ─────────────────────────────────────────────────────────────
+
+# Store active giveaways: guild_id -> list of giveaway dicts
+active_giveaways = {}
+
+class GiveawayView(discord.ui.View):
+    def __init__(self, giveaway_id: str):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+    
+    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.primary, custom_id=f"giveaway_enter")
+    async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        for guild_id, giveaways in active_giveaways.items():
+            for g in giveaways:
+                if g["id"] == self.giveaway_id:
+                    if interaction.user.id in g["entries"]:
+                        return await interaction.response.send_message("⚠️ You already entered!", ephemeral=True)
+                    g["entries"].append(interaction.user.id)
+                    
+                    # Update embed
+                    embed = interaction.message.embeds[0]
+                    embed.set_field_at(0, name="Entries", value=str(len(g["entries"])), inline=True)
+                    await interaction.message.edit(embed=embed)
+                    
+                    return await interaction.response.send_message("✅ You entered the giveaway!", ephemeral=True)
+        
+        await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
+
+
+class Giveaway(discord.Cog, name="giveaway"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.bot.loop.create_task(self.check_giveaways())
+    
+    async def check_giveaways(self):
+        await self.bot.wait_until_ready()
+        while not self.bot.is_closed():
+            now = time.time()
+            for guild_id, giveaways in list(active_giveaways.items()):
+                for g in giveaways[:]:
+                    if now >= g["end_time"] and not g.get("ended"):
+                        g["ended"] = True
+                        await self.end_giveaway(guild_id, g)
+            await asyncio.sleep(30)
+    
+    async def end_giveaway(self, guild_id: int, g: dict):
+        guild = self.bot.get_guild(guild_id)
+        if not guild:
+            return
+        
+        channel = guild.get_channel(g["channel_id"])
+        if not channel:
+            return
+        
+        try:
+            msg = await channel.fetch_message(g["message_id"])
+        except:
+            return
+        
+        entries = g["entries"]
+        if not entries:
+            embed = msg.embeds[0]
+            embed.title = "🎉 Giveaway Ended - No Winners"
+            embed.color = discord.Color.red()
+            await msg.edit(embed=embed, view=None)
+            return
+        
+        winners_count = min(g["winners"], len(entries))
+        winners = random.sample(entries, winners_count)
+        
+        embed = msg.embeds[0]
+        embed.title = "🎉 Giveaway Ended"
+        embed.color = discord.Color.red()
+        embed.clear_fields()
+        embed.add_field(name="Winner(s)", value=", ".join(f"<@{w}>" for w in winners), inline=False)
+        embed.add_field(name="Prize", value=g["prize"], inline=False)
+        await msg.edit(embed=embed, view=None)
+        
+        await channel.send(f"🎉 Congratulations {' '.join(f'<@{w}>' for w in winners)}! You won **{g['prize']}**!")
+        
+        # Remove from active
+        for guild_id2, giveaways in active_giveaways.items():
+            if g in giveaways:
+                giveaways.remove(g)
+    
+    @giveaway_group.command(name="start", description="Start a giveaway")
+    @app_commands.describe(
+        prize="The prize to give away",
+        duration="Duration in minutes",
+        winners="Number of winners (default: 1)"
+    )
+    async def giveaway_start(self, interaction: discord.Interaction, prize: str, duration: int, winners: int = 1):
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message("❌ You need Manage Server permission.", ephemeral=True)
+        
+        if duration < 1:
+            return await interaction.response.send_message("❌ Duration must be at least 1 minute.", ephemeral=True)
+        if winners < 1:
+            return await interaction.response.send_message("❌ Must have at least 1 winner.", ephemeral=True)
+        
+        end_time = time.time() + (duration * 60)
+        giveaway_id = str(uuid.uuid4())
+        
+        embed = discord.Embed(title="🎉 Giveaway", color=discord.Color.blue())
+        embed.add_field(name="Prize", value=prize, inline=False)
+        embed.add_field(name="Entries", value="0", inline=True)
+        embed.add_field(name="Winners", value=str(winners), inline=True)
+        embed.add_field(name="Ends", value=f"<t:{int(end_time)}:R>", inline=False)
+        embed.set_footer(text="Click the button below to enter!")
+        
+        view = GiveawayView(giveaway_id)
+        await interaction.response.send_message(embed=embed, view=view)
+        msg = await interaction.original_response()
+        
+        g_entry = {
+            "id": giveaway_id,
+            "prize": prize,
+            "winners": winners,
+            "end_time": end_time,
+            "entries": [],
+            "channel_id": interaction.channel_id,
+            "message_id": msg.id,
+            "ended": False
+        }
+        
+        if interaction.guild_id not in active_giveaways:
+            active_giveaways[interaction.guild_id] = []
+        active_giveaways[interaction.guild_id].append(g_entry)
+    
+    @giveaway_group.command(name="reroll", description="Reroll a giveaway winner")
+    @app_commands.describe(message_id="ID of the giveaway message")
+    async def giveaway_reroll(self, interaction: discord.Interaction, message_id: str):
+        if not interaction.user.guild_permissions.manage_guild:
+            return await interaction.response.send_message("❌ You need Manage Server permission.", ephemeral=True)
+        
+        try:
+            msg_id = int(message_id)
+            msg = await interaction.channel.fetch_message(msg_id)
+        except:
+            return await interaction.response.send_message("❌ Message not found.", ephemeral=True)
+        
+        # Find the giveaway
+        for guild_id, giveaways in active_giveaways.items():
+            for g in giveaways:
+                if g["message_id"] == msg_id and g.get("ended"):
+                    entries = g["entries"]
+                    if not entries:
+                        return await interaction.response.send_message("❌ No entries in that giveaway.", ephemeral=True)
+                    
+                    winner = random.choice(entries)
+                    embed = msg.embeds[0]
+                    embed.clear_fields()
+                    embed.add_field(name="🎉 New Winner", value=f"<@{winner}>", inline=False)
+                    embed.add_field(name="Prize", value=g["prize"], inline=False)
+                    await msg.edit(embed=embed)
+                    
+                    return await interaction.response.send_message(f"🎉 New winner: <@{winner}>!")
+        
+        await interaction.response.send_message("❌ Could not find that giveaway or it hasn't ended yet.", ephemeral=True)
+
+
+# ─── TICKET COG ──────────────────────────────────────────────────────────────
+
+class TicketView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="🎫 Create Ticket", style=discord.ButtonStyle.primary, custom_id="create_ticket")
+    async def create_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        user = interaction.user
+        
+        # Check if user already has an open ticket
+        existing = discord.utils.get(guild.text_channels, name=f"ticket-{user.name.lower().replace(' ', '-')}")
+        if existing:
+            return await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
+        
+        # Create ticket channel
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+            user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            guild.me: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        }
+        
+        # Add admin role if exists
+        admin_role = discord.utils.get(guild.roles, name="Admin")
+        if admin_role:
+            overwrites[admin_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        
+        mod_role = discord.utils.get(guild.roles, name="Moderator")
+        if mod_role:
+            overwrites[mod_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+        
+        try:
+            channel = await guild.create_text_channel(
+                name=f"ticket-{user.name.lower().replace(' ', '-')}",
+                topic=f"Support ticket for {user.name} ({user.id})",
+                overwrites=overwrites,
+                category=None
+            )
+            
+            embed = discord.Embed(
+                title="🎫 Ticket Created",
+                description=f"Hello {user.mention}! Support will be with you shortly.\n\nType your issue below.",
+                color=discord.Color.green()
+            )
+            
+            close_view = TicketCloseView()
+            await channel.send(embed=embed, view=close_view)
+            await interaction.response.send_message(f"✅ Ticket created: {channel.mention}", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ Failed to create ticket. Check my permissions.", ephemeral=True)
+
+
+class TicketCloseView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="🔒 Close Ticket", style=discord.ButtonStyle.danger, custom_id="close_ticket")
+    async def close_ticket(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not interaction.channel.name.startswith("ticket-"):
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="🔒 Closing Ticket",
+            description="This ticket will be closed in 5 seconds...",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+        await asyncio.sleep(5)
+        await interaction.channel.delete()
+
+
+class Ticket(discord.Cog, name="ticket"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @ticket_group.command(name="setup", description="Set up the ticket panel in this channel")
+    async def ticket_setup(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.manage_channels:
+            return await interaction.response.send_message("❌ You need Manage Channels permission.", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="🎫 Support Tickets",
+            description="Click the button below to create a support ticket.",
+            color=discord.Color.blue()
+        )
+        
+        view = TicketView()
+        await interaction.response.send_message(embed=embed, view=view)
+    
+    @ticket_group.command(name="add", description="Add a user to a ticket")
+    @app_commands.describe(member="Member to add")
+    async def ticket_add(self, interaction: discord.Interaction, member: discord.Member):
+        if not interaction.channel.name.startswith("ticket-"):
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        
+        await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True)
+        await interaction.response.send_message(f"✅ Added {member.mention} to this ticket.")
+    
+    @ticket_group.command(name="remove", description="Remove a user from a ticket")
+    @app_commands.describe(member="Member to remove")
+    async def ticket_remove(self, interaction: discord.Interaction, member: discord.Member):
+        if not interaction.channel.name.startswith("ticket-"):
+            return await interaction.response.send_message("❌ This is not a ticket channel.", ephemeral=True)
+        
+        await interaction.channel.set_permissions(member, overwrite=None)
+        await interaction.response.send_message(f"✅ Removed {member.mention} from this ticket.")
+
+
+# ─── LEVELING COG ────────────────────────────────────────────────────────────
+
+class Leveling(discord.Cog, name="leveling"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @leveling_group.command(name="rank", description="Check your or another user's level rank")
+    @app_commands.describe(member="Member to check (optional)")
+    async def leveling_rank(self, interaction: discord.Interaction, member: discord.Member = None):
+        target = member or interaction.user
+        
+        cur = conn.cursor()
+        cur.execute("SELECT xp, level, total_messages FROM levels WHERE user_id = ? AND guild_id = ?", (target.id, interaction.guild.id))
+        row = cur.fetchone()
+        
+        if not row:
+            return await interaction.response.send_message(f"{target.mention} has no XP yet.", ephemeral=True)
+        
+        xp, level, total_messages = row
+        
+        # Get rank
+        cur.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ? AND (xp + (level * (100 + (level - 1) * 50))) > ?",
+                   (interaction.guild.id, xp + (level * (100 + (level - 1) * 50))))
+        rank_row = cur.fetchone()
+        rank = (rank_row[0] if rank_row else 0) + 1
+        
+        # Get total users
+        cur.execute("SELECT COUNT(*) FROM levels WHERE guild_id = ?", (interaction.guild.id,))
+        total_users = cur.fetchone()[0]
+        
+        needed = 100 + (level * 50)
+        
+        embed = discord.Embed(title=f"📊 {target.display_name}'s Rank", color=discord.Color.blue())
+        embed.add_field(name="Level", value=str(level), inline=True)
+        embed.add_field(name="Rank", value=f"#{rank}/{total_users}", inline=True)
+        embed.add_field(name="XP", value=f"{xp}/{needed}", inline=False)
+        embed.add_field(name="Total Messages", value=str(total_messages), inline=True)
+        
+        # Progress bar
+        progress = min(xp / needed, 1.0) if needed > 0 else 0
+        bar_length = 15
+        filled = int(progress * bar_length)
+        bar = "█" * filled + "░" * (bar_length - filled)
+        embed.add_field(name="Progress", value=f"`{bar}` {int(progress * 100)}%", inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+    
+    @leveling_group.command(name="leaderboard", description="View the leveling leaderboard")
+    async def leveling_leaderboard(self, interaction: discord.Interaction):
+        cur = conn.cursor()
+        cur.execute("SELECT user_id, level, xp FROM levels WHERE guild_id = ? ORDER BY level DESC, xp DESC LIMIT 10", (interaction.guild.id,))
+        rows = cur.fetchall()
+        
+        embed = discord.Embed(title=f"🏆 Leveling Leaderboard - {interaction.guild.name}", color=discord.Color.gold())
+        
+        if not rows:
+            embed.description = "No data yet."
+        else:
+            medals = ["🥇", "🥈", "🥉"]
+            for i, (user_id, level, xp) in enumerate(rows):
+                user = interaction.guild.get_member(user_id)
+                name = user.display_name if user else f"Unknown ({user_id})"
+                prefix = medals[i] if i < 3 else f"{i+1}."
+                embed.add_field(name=f"{prefix} {name}", value=f"Level {level} | {xp} XP", inline=False)
+        
+        await interaction.response.send_message(embed=embed)
+
+
+# ─── AI COG ──────────────────────────────────────────────────────────────────
+
+class AI(discord.Cog, name="ai"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.ai_client = OpenAI(api_key=AI_API_KEY, base_url=AI_BASE_URL)
+        self.conversation_history = {}  # channel_id or user_id -> list of messages
+    
+    def get_history(self, channel_id: int) -> list:
+        if channel_id not in self.conversation_history:
+            self.conversation_history[channel_id] = []
+        return self.conversation_history[channel_id]
+    
+    @ai_group.command(name="chat", description="Chat with the AI")
+    @app_commands.describe(message="Your message to the AI")
+    async def ai_chat(self, interaction: discord.Interaction, message: str):
+        await interaction.response.defer()
+        
+        history = self.get_history(interaction.channel_id)
+        history.append({"role": "user", "content": f"[{interaction.user.display_name}] {message}"})
+        
+        # Keep history manageable
+        if len(history) > 20:
+            history = history[-20:]
+            self.conversation_history[interaction.channel_id] = history
+        
+        try:
+            response = await query_ai(message)
+            history.append({"role": "assistant", "content": response})
+            
+            if len(response) > 1900:
+                parts = [response[i:i+1900] for i in range(0, len(response), 1900)]
+                for part in parts:
+                    await interaction.followup.send(part)
+            else:
+                await interaction.followup.send(response)
+        except Exception as e:
+            await interaction.followup.send(f"❌ AI Error: {str(e)}")
+    
+    @ai_group.command(name="reset", description="Reset the AI conversation history")
+    async def ai_reset(self, interaction: discord.Interaction):
+        self.conversation_history[interaction.channel_id] = []
+        await interaction.response.send_message("✅ Conversation history reset.", ephemeral=True)
+    
+    @ai_group.command(name="ask", description="Ask the AI a one-off question (no history)")
+    @app_commands.describe(question="Your question")
+    async def ai_ask(self, interaction: discord.Interaction, question: str):
+        await interaction.response.defer()
+        try:
+            response = await query_ai(question)
+            if len(response) > 1900:
+                parts = [response[i:i+1900] for i in range(0, len(response), 1900)]
+                for part in parts:
+                    await interaction.followup.send(part)
+            else:
+                await interaction.followup.send(response)
+        except Exception as e:
+            await interaction.followup.send(f"❌ AI Error: {str(e)}")
+
+
+# ─── HELP COG ────────────────────────────────────────────────────────────────
+
+class Help(discord.Cog, name="help"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @app_commands.command(name="help", description="Show all available commands")
+    async def help_command(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title=f"🤖 {self.bot.user.name} Help",
+            description="A multi-purpose Discord bot with moderation, music, economy, and more!",
+            color=discord.Color.blue()
+        )
+        
+        embed.add_field(
+            name="🛡️ Moderation",
+            value="`/mod ban`, `/mod kick`, `/mod warn`, `/mod mute`, `/mod unmute`, `/mod clean`, `/mod softban`",
+            inline=False
+        )
+        embed.add_field(
+            name="🎵 Music",
+            value="`/music play`, `/music search`, `/music pause`, `/music resume`, `/music skip`, `/music previous`, `/music stop`, `/music queue`, `/music nowplaying`, `/music shuffle`, `/music remove`, `/music loop`, `/music volume`, `/music playlist`",
+            inline=False
+        )
+        embed.add_field(
+            name="🎮 Fun",
+            value="`/fun 8ball`, `/fun dice`, `/fun coinflip`, `/fun meme`, `/fun rps`",
+            inline=False
+        )
+        embed.add_field(
+            name="💰 Economy",
+            value="`/economy balance`, `/economy daily`, `/economy pay`, `/economy gamble`, `/economy leaderboard`",
+            inline=False
+        )
+        embed.add_field(
+            name="📊 Leveling",
+            value="`/leveling rank`, `/leveling leaderboard`",
+            inline=False
+        )
+        embed.add_field(
+            name="🎫 Tickets",
+            value="`/ticket setup`, `/ticket add`, `/ticket remove`",
+            inline=False
+        )
+        embed.add_field(
+            name="🎉 Giveaways",
+            value="`/giveaway start`, `/giveaway reroll`",
+            inline=False
+        )
+        embed.add_field(
+            name="🤖 AI",
+            value="`/ai chat`, `/ai ask`, `/ai reset`",
+            inline=False
+        )
+        embed.add_field(
+            name="📋 Utility",
+            value="`/serverinfo`, `/userinfo`, `/ping`",
+            inline=False
+        )
+        
+        embed.set_footer(text=f"Use /<command> to use any command | {len(self.bot.cogs)} modules loaded")
+        await interaction.response.send_message(embed=embed)
+
+
+# ─── COMMAND GROUPS (definitions) ───────────────────────────────────────────
+
+# These were used earlier; the actual commands are in cogs above.
+# The groups are defined here for the tree to register properly.
+# Note: The actual command implementations are in their respective cogs.
+
+class GroupCog(discord.Cog):
+    """Container cog for command groups that don't need their own cog."""
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+
+
+# ─── ERROR HANDLER ───────────────────────────────────────────────────────────
+
+class CommandErrorHandler(discord.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx: commands.Context, error):
+        print(f"Command error: {error}")
+    
+    @commands.Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+        if isinstance(error, discord.app_commands.CommandOnCooldown):
+            return await interaction.response.send_message(f"⏰ Command on cooldown. Try again in {error.retry_after:.0f}s.", ephemeral=True)
+        elif isinstance(error, discord.app_commands.MissingPermissions):
+            return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        elif isinstance(error, discord.app_commands.BotMissingPermissions):
+            return await interaction.response.send_message("❌ I don't have the required permissions.", ephemeral=True)
+        else:
+            print(f"App command error: {error}")
+            try:
+                await interaction.response.send_message(f"❌ An error occurred: {str(error)}", ephemeral=True)
+            except:
+                try:
+                    await interaction.followup.send(f"❌ An error occurred: {str(error)}", ephemeral=True)
+                except:
+                    pass
+
+
+# ─── HELPER FUNCTIONS ───────────────────────────────────────────────────────
+
+async def query_ai(prompt: str) -> str:
+    """Query the AI API for a response."""
     try:
         async with aiohttp.ClientSession() as session:
-            search_query = urllib.parse.quote(song)
-            async with session.get(f"https://api.lyrics.ovh/v1/{search_query}") as resp:
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful Discord bot assistant. Keep responses concise and friendly."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            
+            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    lyrics = data.get('lyrics', '')
-                    
-                    if len(lyrics) > 4000:
-                        lyrics = lyrics[:4000] + "\n\n*...truncated*"
-                    
-                    embed = discord.Embed(
-                        title=f"📝 Lyrics: {song}",
-                        description=lyrics or "No lyrics found.",
-                        color=discord.Color.purple()
-                    )
-                    await interaction.followup.send(embed=embed)
+                    return data["choices"][0]["message"]["content"].strip()
                 else:
-                    async with session.get(f"https://api.lyrics.ovh/v1/{song.replace(' - ', '/')}") as resp2:
-                        if resp2.status == 200:
-                            data = await resp2.json()
-                            lyrics = data.get('lyrics', '')
-                            if len(lyrics) > 4000:
-                                lyrics = lyrics[:4000] + "\n\n*...truncated*"
-                            embed = discord.Embed(
-                                title=f"📝 Lyrics: {song}",
-                                description=lyrics or "No lyrics found.",
-                                color=discord.Color.purple()
-                            )
-                            await interaction.followup.send(embed=embed)
-                        else:
-                            await interaction.followup.send(f"❌ Could not find lyrics for `{song}`.")
+                    return f"AI service returned status {resp.status}"
     except Exception as e:
-        await interaction.followup.send(f"❌ Lyrics lookup failed: {str(e)[:100]}")
+        return f"AI error: {str(e)}"
 
-@bot.tree.command(name="favorite", description="⭐ Save the current song to your favorites")
-async def favorite_music(interaction: discord.Interaction):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.current:
-        await interaction.response.send_message("❌ Nothing is playing right now.")
-        return
-    
-    track = player.current
-    
-    c.execute("SELECT id FROM music_favorites WHERE user_id=? AND guild_id=? AND url=?",
-              (interaction.user.id, interaction.guild.id, track.get('url', '')))
-    existing = c.fetchone()
-    
-    if existing:
-        await interaction.response.send_message("⭐ This song is already in your favorites!")
-        return
-    
-    c.execute("INSERT INTO music_favorites (user_id, guild_id, title, url, added_at) VALUES (?, ?, ?, ?, ?)",
-              (interaction.user.id, interaction.guild.id, track.get('title', 'Unknown'), track.get('url', ''), datetime.now().isoformat()))
-    conn.commit()
-    
-    await interaction.response.send_message(f"⭐ **Added to favorites:** {track.get('title', 'Unknown')}")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_FAVORITE", f"Favorited: {track.get('title', 'Unknown')}")
 
-@bot.tree.command(name="favorites", description="⭐ Show your favorite songs")
-async def favorites_music(interaction: discord.Interaction):
-    c.execute("SELECT title, url, added_at FROM music_favorites WHERE user_id=? AND guild_id=? ORDER BY id DESC LIMIT 25",
-              (interaction.user.id, interaction.guild.id))
-    favorites = c.fetchall()
-    
-    if not favorites:
-        await interaction.response.send_message("⭐ You don't have any favorites yet. Use `/favorite` to save a song!")
-        return
-    
-    embed = discord.Embed(
-        title=f"⭐ {interaction.user.display_name}'s Favorites",
-        color=discord.Color.gold()
-    )
-    
-    for i, (title, url, added_at) in enumerate(favorites, 1):
-        date_only = added_at[:10] if added_at else 'Unknown'
-        embed.add_field(name=f"{i}. {title[:50]}", value=f"[Link]({url}) • Added {date_only}", inline=False)
-    
-    await interaction.response.send_message(embed=embed)
+def format_duration(ms: int) -> str:
+    """Format milliseconds to a time string."""
+    seconds = ms // 1000
+    minutes, secs = divmod(seconds, 60)
+    hours, mins = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}:{mins:02d}:{secs:02d}"
+    return f"{mins}:{secs:02d}"
 
-@bot.tree.command(name="playlistcreate", description="📁 Create a new music playlist")
-async def playlist_create(interaction: discord.Interaction, name: str):
-    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
-              (interaction.guild.id, name, interaction.user.id))
-    existing = c.fetchone()
-    
-    if existing:
-        await interaction.response.send_message(f"❌ You already have a playlist named `{name}`.")
-        return
-    
-    c.execute("INSERT INTO music_playlists (guild_id, name, user_id, created_at) VALUES (?, ?, ?, ?)",
-              (interaction.guild.id, name, interaction.user.id, datetime.now().isoformat()))
-    conn.commit()
-    
-    await interaction.response.send_message(f"📁 **Playlist created:** `{name}` — Use `/playlistadd` to add songs!")
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST_CREATE", f"Created playlist: {name}")
 
-@bot.tree.command(name="playlistadd", description="➕ Add the current song to a playlist")
-async def playlist_add(interaction: discord.Interaction, playlist_name: str):
-    player = get_music_player(interaction.guild.id)
-    
-    if not player.current:
-        await interaction.response.send_message("❌ Nothing is playing right now.")
-        return
-    
-    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
-              (interaction.guild.id, playlist_name, interaction.user.id))
-    pl = c.fetchone()
-    
-    if not pl:
-        await interaction.response.send_message(f"❌ Playlist `{playlist_name}` not found. Use `/playlistcreate` first.")
-        return
-    
-    playlist_id = pl[0]
-    track = player.current
-    
-    c.execute("SELECT MAX(position) FROM music_playlist_tracks WHERE playlist_id=?", (playlist_id,))
-    max_pos = c.fetchone()[0] or 0
-    
-    c.execute("INSERT INTO music_playlist_tracks (playlist_id, title, url, position, added_at) VALUES (?, ?, ?, ?, ?)",
-              (playlist_id, track.get('title', 'Unknown'), track.get('url', ''), max_pos + 1, datetime.now().isoformat()))
-    conn.commit()
-    
-    await interaction.response.send_message(f"➕ **Added to `{playlist_name}`:** {track.get('title', 'Unknown')}")
+# ─── BOT INITIALIZATION ──────────────────────────────────────────────────────
 
-@bot.tree.command(name="playlists", description="📁 Show your playlists")
-async def playlists_show(interaction: discord.Interaction):
-    c.execute("SELECT id, name, created_at FROM music_playlists WHERE guild_id=? AND user_id=? ORDER BY id DESC",
-              (interaction.guild.id, interaction.user.id))
-    playlists = c.fetchall()
-    
-    if not playlists:
-        await interaction.response.send_message("📁 You don't have any playlists. Use `/playlistcreate` to make one!")
-        return
-    
-    embed = discord.Embed(
-        title=f"📁 {interaction.user.display_name}'s Playlists",
-        color=discord.Color.blue()
-    )
-    
-    for pl_id, name, created_at in playlists:
-        c.execute("SELECT COUNT(*) FROM music_playlist_tracks WHERE playlist_id=?", (pl_id,))
-        track_count = c.fetchone()[0]
-        date_only = created_at[:10] if created_at else 'Unknown'
-        embed.add_field(name=f"📁 {name}", value=f"{track_count} tracks • Created {date_only}", inline=False)
-    
-    await interaction.response.send_message(embed=embed)
+async def main():
+    async with bot:
+        await bot.add_cog(Moderation(bot))
+        await bot.add_cog(Music(bot))
+        await bot.add_cog(Events(bot))
+        await bot.add_cog(Fun(bot))
+        await bot.add_cog(Economy(bot))
+        await bot.add_cog(Giveaway(bot))
+        await bot.add_cog(Ticket(bot))
+        await bot.add_cog(Leveling(bot))
+        await bot.add_cog(AI(bot))
+        await bot.add_cog(Help(bot))
+        await bot.add_cog(GroupCog(bot))
+        await bot.add_cog(CommandErrorHandler(bot))
+        
+        await bot.tree.sync()
+        print("✅ Slash commands synced")
+        await bot.start(TOKEN)
 
-@bot.tree.command(name="playlistplay", description="▶️ Play all songs from a playlist")
-async def playlist_play(interaction: discord.Interaction, name: str):
-    if not interaction.user.voice:
-        await interaction.response.send_message("❌ You must be in a voice channel first!", ephemeral=True)
-        return
-    
-    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
-              (interaction.guild.id, name, interaction.user.id))
-    pl = c.fetchone()
-    
-    if not pl:
-        await interaction.response.send_message(f"❌ Playlist `{name}` not found.")
-        return
-    
-    c.execute("SELECT title, url FROM music_playlist_tracks WHERE playlist_id=? ORDER BY position",
-              (pl[0],))
-    tracks = c.fetchall()
-    
-    if not tracks:
-        await interaction.response.send_message(f"❌ Playlist `{name}` is empty!")
-        return
-    
-    await interaction.response.defer()
-    
-    player = get_music_player(interaction.guild.id)
-    connected = await player.connect_voice(interaction.user.voice.channel)
-    if not connected:
-        await interaction.followup.send("❌ Could not connect to voice channel.")
-        return
-    
-    for title, url in tracks:
-        track_data = {
-            'title': title,
-            'url': url,
-            'duration': 0,
-            'thumbnail': '',
-            'channel': '',
-            'channel_url': '',
-            'uploader': '',
-            'views': 0,
-        }
-        await player.add_to_queue(track_data)
-    
-    embed = discord.Embed(
-        title="📁 Playlist Started",
-        description=f"**{name}**",
-        color=discord.Color.green()
-    )
-    embed.add_field(name="Tracks", value=f"{len(tracks)} songs added to queue", inline=False)
-    
-    await interaction.followup.send(embed=embed)
-    add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "MUSIC_PLAYLIST_PLAY", f"Playing playlist: {name} ({len(tracks)} tracks)")
 
-@bot.tree.command(name="playlistdelete", description="🗑️ Delete a playlist")
-async def playlist_delete(interaction: discord.Interaction, name: str):
-    c.execute("SELECT id FROM music_playlists WHERE guild_id=? AND name=? AND user_id=?",
-              (interaction.guild.id, name, interaction.user.id))
-    pl = c.fetchone()
-    
-    if not pl:
-        await interaction.response.send_message(f"❌ Playlist `{name}` not found.")
-        return
-    
-    playlist_id = pl[0]
-    c.execute("DELETE FROM music_playlist_tracks WHERE playlist_id=?", (playlist_id,))
-    c.execute("DELETE FROM music_playlists WHERE id=?", (playlist_id,))
-    conn.commit()
-    
-    await interaction.response.send_message(f"🗑️ **Deleted playlist:** `{name}`")
-
-# =========================
-# ADMIN COMMANDS
-# =========================
-@bot.tree.command(name="servers", description="List all servers the bot is in")
-@app_commands.check(owner_check)
-async def list_servers(interaction: discord.Interaction):
-    embed = discord.Embed(title="📋 Servers", color=discord.Color.blue())
-    for guild in bot.guilds:
-        embed.add_field(name=guild.name, value=f"ID: {guild.id}\nMembers: {guild.member_count}", inline=False)
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="leaveserver", description="Leave a server by ID")
-@app_commands.check(owner_check)
-async def leave_server(interaction: discord.Interaction, guild_id: str):
-    try:
-        guild = bot.get_guild(int(guild_id))
-        if guild:
-            add_history(guild.id, interaction.user.id, str(interaction.user), "BOT_LEAVE", f"Bot left server by admin request")
-            await guild.leave()
-            await interaction.response.send_message(f"✅ Left {guild.name}")
-        else:
-            await interaction.response.send_message("❌ Server not found.")
-    except ValueError:
-        await interaction.response.send_message("❌ Invalid server ID.")
-
-@bot.tree.command(name="reload", description="Reload bot commands")
-@app_commands.check(owner_check)
-async def reload_commands(interaction: discord.Interaction):
-    await bot.tree.sync()
-    await interaction.response.send_message("✅ Commands reloaded!")
-
-# =========================
-# REGISTER GROUPS
-# =========================
-bot.tree.add_command(mod_group)
-bot.tree.add_command(history_group)
-bot.tree.add_command(fun_group)
-bot.tree.add_command(ticket_group)
-bot.tree.add_command(level_group)
-bot.tree.add_command(eco_group)
-bot.tree.add_command(giveaway_group)
-
-# =========================
-# ERROR HANDLER
-# =========================
-@bot.tree.error
-async def error_handler(interaction: discord.Interaction, error):
-    if interaction.response.is_done():
-        await interaction.followup.send(
-            f"❌ Error: {error}",
-            ephemeral=True
-        )
-    else:
-        await interaction.response.send_message(
-            f"❌ Error: {error}",
-            ephemeral=True
-        )
-
-# =========================
-# RUN
-# =========================
-bot.run(TOKEN)
+if __name__ == "__main__":
+    asyncio.run(main())
