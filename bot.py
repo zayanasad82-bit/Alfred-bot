@@ -1728,7 +1728,7 @@ async def mod_warn(interaction: discord.Interaction, member: discord.Member, rea
 
 @mod_group.command(name="kick", description="Kick a member from the server")
 @app_commands.describe(member="Member to kick", reason="Reason for kicking")
-async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+async def mod_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     await interaction.response.defer(ephemeral=True)
     
     if not interaction.user.guild_permissions.kick_members:
@@ -1750,7 +1750,7 @@ async def mod_kick(self, interaction: discord.Interaction, member: discord.Membe
 
 @mod_group.command(name="clean", description="Clean a number of messages from a channel")
 @app_commands.describe(amount="Number of messages to delete", member="Only delete messages from this member (optional)")
-async def mod_clean(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
+async def mod_clean(interaction: discord.Interaction, amount: int, member: discord.Member = None):
     await interaction.response.defer(ephemeral=True)
     
     if not interaction.user.guild_permissions.manage_messages:
