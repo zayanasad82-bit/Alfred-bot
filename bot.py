@@ -1640,16 +1640,6 @@ async def mod_clearall(interaction: discord.Interaction):
     await interaction.followup.send(f"Cleared {total}", ephemeral=True)
     await log(interaction.guild, f"CLEARALL | {total}")
 
-@mod_group.command(name="kick", description="Kick member")
-@app_commands.check(owner_check)
-@app_commands.checks.has_permissions(kick_members=True)
-async def mod_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
-    await interaction.response.defer()
-    await member.kick(reason=reason)
-    add_history(interaction.guild.id, member.id, str(member), "KICK", f"Kicked by {interaction.user}: {reason}")
-    await interaction.followup.send(f"👢 Kicked {member}")
-    await log(interaction.guild, f"KICK | {member} | {reason}")
-
 @mod_group.command(name="ban", description="Ban member")
 @app_commands.check(owner_check)
 @app_commands.checks.has_permissions(ban_members=True)
@@ -1727,26 +1717,49 @@ async def mod_warn(interaction: discord.Interaction, member: discord.Member, rea
         await interaction.followup.send(embed=embed)
 
 @mod_group.command(name="kick", description="Kick a member from the server")
+@app_commands.check(owner_check)
+@app_commands.checks.has_permissions(kick_members=True)
 @app_commands.describe(member="Member to kick", reason="Reason for kicking")
 async def mod_kick(interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
     await interaction.response.defer(ephemeral=True)
-    
-    if not interaction.user.guild_permissions.kick_members:
-        return await interaction.followup.send("❌ You don't have permission to kick members.", ephemeral=True)
-    
+
     if member.top_role >= interaction.user.top_role:
-        return await interaction.followup.send("❌ You cannot kick this member (role hierarchy).", ephemeral=True)
-    
+        return await interaction.followup.send(
+            "❌ You cannot kick this member (role hierarchy).",
+            ephemeral=True
+        )
+
     try:
         await member.kick(reason=reason)
-        embed = discord.Embed(title="👢 Kicked User", color=discord.Color.red())
+
+        embed = discord.Embed(
+            title="👢 Kicked User",
+            color=discord.Color.red()
+        )
         embed.add_field(name="User", value=member.mention, inline=True)
         embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
         embed.add_field(name="Reason", value=reason, inline=False)
-        embed.set_footer(text=f"User ID: {member.id}")
+
         await interaction.followup.send(embed=embed)
+
+        add_history(
+            interaction.guild.id,
+            member.id,
+            str(member),
+            "KICK",
+            f"Kicked by {interaction.user}: {reason}"
+        )
+
+        await log(
+            interaction.guild,
+            f"KICK | {member} | {reason}"
+        )
+
     except discord.Forbidden:
-        await interaction.followup.send("❌ I don't have permission to kick that member.", ephemeral=True)
+        await interaction.followup.send(
+            "❌ I don't have permission to kick that member.",
+            ephemeral=True
+        )
 
 @mod_group.command(name="clean", description="Clean a number of messages from a channel")
 @app_commands.describe(amount="Number of messages to delete", member="Only delete messages from this member (optional)")
