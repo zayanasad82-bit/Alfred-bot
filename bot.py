@@ -1869,6 +1869,11 @@ class Music(commands.Cog, name="music"):
             await interaction.followup.send("❌ You must be in a voice channel first.", ephemeral=True)
             return False
         return True
+
+    music_group = app_commands.Group(
+    name="music",
+    description="Music commands"
+)
     
     @music_group.command(name="play", description="Play a song from a query or URL")
     @app_commands.describe(query="Song name or URL to play")
