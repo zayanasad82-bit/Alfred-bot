@@ -1281,11 +1281,17 @@ class PollView(discord.ui.View):
         return callback
 
 # =========================
-# BOT EVENTS
+# setup_hook - FIXED: Moved bot.tree.sync() here to prevent MissingApplicationID
 # =========================
 @bot.event
-async def on_wavelink_node_ready(node: wavelink.Node):
-    logger.info(f"✅ Lavalink node {node.identifier} ready!")
+async def setup_hook():
+    await bot.tree.sync()
+    logger.info("✅ Slash commands synced in setup_hook")
+
+# =========================
+# BOT EVENTS
+# =========================
+# REMOVED: Duplicate global on_wavelink_node_ready - already in WavelinkEvents cog
 
 @bot.event
 async def on_member_join(member):
@@ -1574,7 +1580,7 @@ Respond naturally and conversationally. If the user mentions something new about
     await bot.process_commands(message)
 
 # =========================
-# on_ready
+# on_ready - FIXED: Removed bot.tree.sync(), now handled in setup_hook
 # =========================
 _tasks_started = False
 
@@ -1602,10 +1608,10 @@ async def on_ready():
         consolidate_memories.start()
         clean_inactive_players.start()
     
-    await bot.tree.sync()
     logger.info(f"✅ ULTIMATE BOT ONLINE: {bot.user}")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
+
 
 # =========================
 # 🎮 MODERATION COG
@@ -2410,8 +2416,6 @@ class Economy(commands.Cog, name="economy"):
         
         await db.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id=?", (amount, interaction.user.id))
         await db.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id=?", (amount, member.id))
-        if db._conn.total_changes == 0:
-            await db.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (member.id, amount))
         await db.commit()
         
         embed = discord.Embed(title="💸 Payment Sent", color=discord.Color.green())
@@ -2475,8 +2479,6 @@ class Giveaway(commands.Cog, name="giveaway"):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # DO NOT create another asyncio.create_task for check_giveaways here
-        # The global @tasks.loop handles it already
 
     @giveaway_group.command(name="start", description="Start a giveaway")
     @app_commands.describe(
@@ -2951,11 +2953,7 @@ async def main():
         await bot.add_cog(CommandErrorHandler(bot))
         await bot.add_cog(HistoryCommands(bot))
         
-        # Sync slash commands
-        await bot.tree.sync()
-        logger.info("✅ Slash commands synced")
-        
-        # Start the bot
+        # Start the bot (sync is handled in setup_hook)
         await bot.start(TOKEN)
 
 
