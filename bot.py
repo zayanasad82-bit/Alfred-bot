@@ -2387,23 +2387,36 @@ class Events(commands.Cog):
 # ─── FUN COG ─────────────────────────────────────────────────────────────────
 
 class Fun(commands.Cog, name="fun"):
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-    
-    @fun_group.command(name="8ball", description="Ask the magic 8ball a question")
-    @app_commands.describe(question="Your question")
-    async def fun_8ball(self, interaction: discord.Interaction, question: str):
-        responses = [
-            "It is certain.", "It is decidedly so.", "Without a doubt.", "Yes definitely.",
-            "You may rely on it.", "As I see it, yes.", "Most likely.", "Outlook good.",
-            "Yes.", "Signs point to yes.", "Reply hazy, try again.", "Ask again later.",
-            "Better not tell you now.", "Cannot predict now.", "Concentrate and ask again.",
-            "Don't count on it.", "My reply is no.", "My sources say no.", "Outlook not so good.", "Very doubtful."
-        ]
-        embed = discord.Embed(title="🎱 Magic 8Ball", color=discord.Color.purple())
-        embed.add_field(name="Question", value=question, inline=False)
-        embed.add_field(name="Answer", value=random.choice(responses), inline=False)
-        await interaction.response.send_message(embed=embed)
+
+fun_group = app_commands.Group(
+    name="fun",
+    description="Fun commands"
+)
+
+def __init__(self, bot: commands.Bot):
+    self.bot = bot
+
+@fun_group.command(name="8ball", description="Ask the magic 8ball a question")
+@app_commands.describe(question="Your question")
+async def fun_8ball(self, interaction: discord.Interaction, question: str):
+    responses = [
+        "It is certain.", "It is decidedly so.", "Without a doubt.", "Yes definitely.",
+        "You may rely on it.", "As I see it, yes.", "Most likely.", "Outlook good.",
+        "Yes.", "Signs point to yes.", "Reply hazy, try again.", "Ask again later.",
+        "Better not tell you now.", "Cannot predict now.", "Concentrate and ask again.",
+        "Don't count on it.", "My reply is no.", "My sources say no.",
+        "Outlook not so good.", "Very doubtful."
+    ]
+
+    embed = discord.Embed(
+        title="🎱 Magic 8Ball",
+        color=discord.Color.purple()
+    )
+
+    embed.add_field(name="Question", value=question, inline=False)
+    embed.add_field(name="Answer", value=random.choice(responses), inline=False)
+
+    await interaction.response.send_message(embed=embed)
     
     @fun_group.command(name="dice", description="Roll a dice")
     @app_commands.describe(sides="Number of sides (default: 6)")
