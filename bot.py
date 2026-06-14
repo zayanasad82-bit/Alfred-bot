@@ -1004,89 +1004,91 @@ async def consolidate_memories():
 @tasks.loop(minutes=5)
 async def clean_inactive_players():
     for guild_id, player in list(music_players.items()):
-        if player.voice_client and player.voice_client.is_connected():
+        try:
+            if not player.voice_client or not player.voice_client.is_connected():
+                continue
+
             channel = player.voice_client.channel
+
+            # bot is alone in VC → cleanup
             if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
                 if not player.is_playing() and not player.is_paused:
                     await player.disconnect_voice()
                     music_players.pop(guild_id, None)
 
+        except Exception as e:
+            print(f"[clean task error] {e}")
+
 
 # =========================
-# 🎵 MUSIC SYSTEM - YT-DLP CONFIGURATION
+# 🎵 YT-DLP CONFIG
 # =========================
 
-yt_dlp.utils.bug_reports_message = lambda: ''
+yt_dlp.utils.bug_reports_message = lambda: ""
 
 YTDLP_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'nocheckcertificate': True,
-    'ignoreerrors': False,
-    'quiet': True,
-    'no_warnings': True,
-    'restrictfilenames': True,
-    'extract_flat': False,
-    'source_address': '0.0.0.0',
+    "format": "bestaudio/best",
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "nocheckcertificate": True,
+    "extract_flat": False,
+    "default_search": "ytsearch1",  # ✅ IMPORTANT FIX
 }
 
 FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn -dn',
+    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+    "options": "-vn",
 }
 
-URL_REGEX = re.compile(r'https?://')
+URL_REGEX = re.compile(r"https?://")
 
 
 # =========================
 # 🎧 YTDL SOURCE
 # =========================
 class YTDLSource(PCMVolumeTransformer):
-    def __init__(self, source: discord.FFmpegPCMAudio, *, data: dict, volume: float = 0.5):
+    def __init__(self, source, *, data: dict, volume: float = 0.5):
         super().__init__(source, volume)
         self.data = data
-        self.title = data.get('title', 'Unknown')
-        self.url = data.get('webpage_url', '')
-        self.duration = data.get('duration', 0)
-        self.thumbnail = data.get('thumbnail', '')
-        self.uploader = data.get('uploader', 'Unknown')
+        self.title = data.get("title", "Unknown")
+        self.url = data.get("webpage_url", "")
+        self.duration = data.get("duration", 0)
+        self.thumbnail = data.get("thumbnail", "")
+        self.uploader = data.get("uploader", "Unknown")
 
     @classmethod
     async def from_url(cls, url: str, *, loop=None, stream: bool = True):
         loop = loop or asyncio.get_event_loop()
 
-        partial = functools.partial(cls._extract_info, url, stream)
-        data = await loop.run_in_executor(None, partial)
+        def extract():
+            opts = YTDLP_OPTIONS.copy()
+
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+
+                    # 🔥 FIX: proper search handling
+                    if not url.startswith("http"):
+                        url = f"ytsearch1:{url}"
+
+                    return ydl.extract_info(url, download=not stream)
+
+            except Exception as e:
+                print(f"[yt-dlp ERROR] {e}")
+                return None
+
+        data = await loop.run_in_executor(None, extract)
 
         if not data:
-            raise ValueError("Could not find song.")
+            raise ValueError("❌ Could not find song (yt-dlp returned nothing)")
 
-        if 'entries' in data:
-            data = data['entries'][0]
+        if "entries" in data:
+            data = data["entries"][0]
 
-        filename = data['url'] if stream else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
+        filename = data["url"] if stream else yt_dlp.YoutubeDL(YTDLP_OPTIONS).prepare_filename(data)
 
         source = discord.FFmpegPCMAudio(filename, **FFMPEG_OPTIONS)
         return cls(source, data=data)
-
-    @staticmethod
-    def _extract_info(url: str, stream: bool, custom_opts: dict = None):
-        opts = YTDLP_OPTIONS.copy()
-        if custom_opts:
-            opts.update(custom_opts)
-
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-
-                # ONLY ONE SEARCH SYSTEM (FIXED)
-                if not url.startswith("http"):
-                    url = f"ytsearch1:{url}"
-
-                return ydl.extract_info(url, download=not stream)
-
-        except Exception as e:
-            print(f"yt-dlp error: {e}")
-            return None
 
 
 # =========================
@@ -1100,7 +1102,7 @@ class MusicPlayer:
         self.queue_history = []
         self.current = None
         self.voice_client = None
-        self.loop_mode = 'none'
+        self.loop_mode = "none"
         self.volume = 0.5
         self.is_paused = False
         self._task = None
@@ -1108,12 +1110,12 @@ class MusicPlayer:
     async def connect_voice(self, channel: discord.VoiceChannel):
         try:
             if self.voice_client and self.voice_client.is_connected():
-                if self.voice_client.channel.id != channel.id:
-                    await self.voice_client.move_to(channel)
+                await self.voice_client.move_to(channel)
                 return True
 
             self.voice_client = await channel.connect()
             return True
+
         except Exception as e:
             print(f"Voice connect error: {e}")
             return False
@@ -1121,13 +1123,13 @@ class MusicPlayer:
     async def disconnect_voice(self):
         if self.voice_client and self.voice_client.is_connected():
             await self.voice_client.disconnect()
-        self.voice_client = None
 
+        self.voice_client = None
         self.queue = asyncio.Queue()
         self.queue_history.clear()
         self.current = None
         self.is_paused = False
-        self.loop_mode = 'none'
+        self.loop_mode = "none"
 
     async def add_to_queue(self, track_data: dict):
         await self.queue.put(track_data)
@@ -1138,22 +1140,29 @@ class MusicPlayer:
 
     async def _playback_loop(self):
         while True:
-            self.current = await self.queue.get()
+            try:
+                self.current = await self.queue.get()
+            except Exception:
+                break
 
-            if self.current:
-                self.queue_history.append(self.current)
+            if not self.current:
+                continue
 
-                await self._play_track(self.current)
+            self.queue_history.append(self.current)
 
-                while self.voice_client and (self.voice_client.is_playing() or self.voice_client.is_paused()):
-                    await asyncio.sleep(1)
+            await self._play_track(self.current)
+
+            while self.voice_client and (
+                self.voice_client.is_playing() or self.voice_client.is_paused()
+            ):
+                await asyncio.sleep(1)
 
             if self.queue.empty():
                 break
 
     async def _play_track(self, track):
         try:
-            source = await YTDLSource.from_url(track['url'])
+            source = await YTDLSource.from_url(track["url"])
             source.volume = self.volume
 
             self.voice_client.play(source)
@@ -1165,12 +1174,12 @@ class MusicPlayer:
         return self.voice_client and self.voice_client.is_playing()
 
     def pause(self):
-        if self.voice_client:
+        if self.voice_client and self.voice_client.is_playing():
             self.voice_client.pause()
             self.is_paused = True
 
     def resume(self):
-        if self.voice_client:
+        if self.voice_client and self.voice_client.is_paused():
             self.voice_client.resume()
             self.is_paused = False
 
@@ -1184,7 +1193,7 @@ class MusicPlayer:
 
 
 # =========================
-# GLOBAL PLAYER STORE
+# GLOBAL STORE
 # =========================
 music_players: dict[int, MusicPlayer] = {}
 
