@@ -54,7 +54,7 @@ LAVALINK_URI = os.getenv("LAVALINK_URI", f"http://{LAVALINK_HOST}:{LAVALINK_PORT
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-MODEL_NAME = "gemini-1.5-flash"
+MODEL_NAME = "gemini-2.5-flash"
 
 # =========================
 # DISCORD BOT SETUP
