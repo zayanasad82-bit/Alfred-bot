@@ -2475,18 +2475,30 @@ class Fun(commands.Cog, name="fun"):
 # ─── ECONOMY COG ─────────────────────────────────────────────────────────────
 
 class Economy(commands.Cog, name="economy"):
+
+    economy_group = app_commands.Group(
+        name="economy",
+        description="Economy commands"
+    )
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.daily_cooldowns = {}
-    
+
     def get_balance(self, user_id: int) -> tuple:
         cur = conn.cursor()
         cur.execute("SELECT wallet, bank FROM economy WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
+
         if row:
             return row
-        cur.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, 0, 0)", (user_id,))
+
+        cur.execute(
+            "INSERT INTO economy (user_id, wallet, bank) VALUES (?, 0, 0)",
+            (user_id,)
+        )
         conn.commit()
+
         return (0, 0)
     
     @economy_group.command(name="balance", description="Check your or another user's balance")
