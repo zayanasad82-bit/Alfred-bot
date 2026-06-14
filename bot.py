@@ -1024,8 +1024,6 @@ async def clean_inactive_players():
 # 🎵 YT-DLP CONFIG
 # =========================
 
-yt_dlp.utils.bug_reports_message = lambda: ""
-
 YTDLP_OPTIONS = {
     "format": "bestaudio/best",
     "noplaylist": True,
