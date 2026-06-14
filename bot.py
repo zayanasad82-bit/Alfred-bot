@@ -1025,15 +1025,14 @@ async def clean_inactive_players():
 # =========================
 
 YTDLP_OPTIONS = {
-    "format": "bestaudio[ext=m4a]/bestaudio/best",
+    "format": "bestaudio",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "nocheckcertificate": True,
-    "extract_flat": False,
     "default_search": "ytsearch",
     "cookiefile": "cookies.txt",
-    "forceipv4": True
+    "force_ipv4": True,
 }
 
 FFMPEG_OPTIONS = {
@@ -1170,7 +1169,7 @@ class MusicPlayer:
 
     async def _play_track(self, track):
         try:
-            source = await YTDLSource.from_url(track["url"])
+            source = await YTDLSource.from_url(track["title"])
             source.volume = self.volume
 
             self.voice_client.play(source)
