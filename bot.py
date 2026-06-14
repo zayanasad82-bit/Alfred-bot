@@ -1021,7 +1021,7 @@ async def clean_inactive_players():
 
 
 # =========================
-# 🎵 YT-DLP CONFIG
+# 🎵 YT-DLP CONFIG (FIXED)
 # =========================
 
 YTDLP_OPTIONS = {
@@ -1031,7 +1031,8 @@ YTDLP_OPTIONS = {
     "no_warnings": True,
     "nocheckcertificate": True,
     "extract_flat": False,
-    "default_search": "ytsearch",  # ✅ IMPORTANT FIX
+    "default_search": "ytsearch",
+    "cookiefile": "cookies.txt",   # ✅ FIX: ADDED COOKIES SUPPORT
 }
 
 FFMPEG_OPTIONS = {
@@ -1063,8 +1064,9 @@ class YTDLSource(PCMVolumeTransformer):
             opts = YTDLP_OPTIONS.copy()
 
             try:
-                search_url = url  # <-- FIX
+                search_url = url
 
+                # FIX: proper search handling
                 if not search_url.startswith(("http://", "https://")):
                     search_url = f"ytsearch:{search_url}"
 
@@ -1207,7 +1209,6 @@ def get_music_player(guild_id: int):
     if guild_id not in music_players:
         music_players[guild_id] = MusicPlayer(bot, guild_id)
     return music_players[guild_id]
-
 
 # =========================
 # EVENTS
