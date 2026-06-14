@@ -1,4 +1,3 @@
-yt-dlp
 discord.py
 google-genai
 pypdf
@@ -7,3 +6,4 @@ aiohttp
 discord.py[voice]
 PyNaCl
 davey
+yt-dlp==2025.07.01
