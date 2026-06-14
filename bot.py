@@ -1693,7 +1693,7 @@ async def mod_unmute(interaction: discord.Interaction, member: discord.Member):
 
 @mod_group.command(name="warn", description="Warn a member")
 @app_commands.describe(member="Member to warn", reason="Reason for the warning")
-    async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
         
         if not interaction.user.guild_permissions.moderate_members:
