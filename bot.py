@@ -2617,57 +2617,85 @@ class GiveawayView(discord.ui.View):
     def __init__(self, giveaway_id: str):
         super().__init__(timeout=None)
         self.giveaway_id = giveaway_id
-    
-    @discord.ui.button(label="🎉 Enter Giveaway", style=discord.ButtonStyle.primary, custom_id=f"giveaway_enter")
+
+    @discord.ui.button(
+        label="🎉 Enter Giveaway",
+        style=discord.ButtonStyle.primary,
+        custom_id="giveaway_enter"
+    )
     async def enter_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+
         for guild_id, giveaways in active_giveaways.items():
             for g in giveaways:
                 if g["id"] == self.giveaway_id:
+
                     if interaction.user.id in g["entries"]:
-                        return await interaction.response.send_message("⚠️ You already entered!", ephemeral=True)
+                        return await interaction.response.send_message(
+                            "⚠️ You already entered!",
+                            ephemeral=True
+                        )
+
                     g["entries"].append(interaction.user.id)
-                    
-                    # Update embed
+
                     embed = interaction.message.embeds[0]
-                    embed.set_field_at(0, name="Entries", value=str(len(g["entries"])), inline=True)
+                    embed.set_field_at(
+                        0,
+                        name="Entries",
+                        value=str(len(g["entries"])),
+                        inline=True
+                    )
+
                     await interaction.message.edit(embed=embed)
-                    
-                    return await interaction.response.send_message("✅ You entered the giveaway!", ephemeral=True)
-        
-        await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
+
+                    return await interaction.response.send_message(
+                        "✅ You entered the giveaway!",
+                        ephemeral=True
+                    )
+
+        await interaction.response.send_message(
+            "❌ This giveaway has ended.",
+            ephemeral=True
+        )
 
 
 class Giveaway(commands.Cog, name="giveaway"):
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.bot.loop.create_task(self.check_giveaways())
-    
+
+        # safer than loop.create_task in Railway
+        asyncio.create_task(self.check_giveaways())
+
     async def check_giveaways(self):
         await self.bot.wait_until_ready()
+
         while not self.bot.is_closed():
             now = time.time()
+
             for guild_id, giveaways in list(active_giveaways.items()):
                 for g in giveaways[:]:
-                    if now >= g["end_time"] and not g.get("ended"):
+                    if now >= g.get("end_time", 0) and not g.get("ended"):
                         g["ended"] = True
                         await self.end_giveaway(guild_id, g)
+
             await asyncio.sleep(30)
-    
+
     async def end_giveaway(self, guild_id: int, g: dict):
         guild = self.bot.get_guild(guild_id)
         if not guild:
             return
-        
+
         channel = guild.get_channel(g["channel_id"])
         if not channel:
             return
-        
+
         try:
             msg = await channel.fetch_message(g["message_id"])
         except:
             return
-        
-        entries = g["entries"]
+
+        entries = g.get("entries", [])
+
         if not entries:
             embed = msg.embeds[0]
             embed.title = "🎉 Giveaway Ended - No Winners"
