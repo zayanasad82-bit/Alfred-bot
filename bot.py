@@ -14,6 +14,7 @@ import time
 import uuid
 import logging
 import traceback
+import wavelink
 from collections import defaultdict, deque
 from typing import Optional, List
 
