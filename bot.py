@@ -1025,14 +1025,15 @@ async def clean_inactive_players():
 # =========================
 
 YTDLP_OPTIONS = {
-    "format": "bestaudio/best",
+    "format": "bestaudio[ext=m4a]/bestaudio/best",
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
     "nocheckcertificate": True,
     "extract_flat": False,
     "default_search": "ytsearch",
-    "cookiefile": "cookies.txt",   # ✅ FIX: ADDED COOKIES SUPPORT
+    "cookiefile": "cookies.txt",
+    "forceipv4": True
 }
 
 FFMPEG_OPTIONS = {
