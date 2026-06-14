@@ -1309,7 +1309,7 @@ async def on_wavelink_node_ready(node: wavelink.Node):
     print(f"✅ Lavalink node {node.identifier} ready!")
 
 @bot.event
-async def on_wavelink_track_end(player: wavelink.Player, track: wavelink.Track, reason):
+async def on_wavelink_track_end(player, track, reason):
     """Handle track end events."""
     pass  # The playback loop handles this
 
