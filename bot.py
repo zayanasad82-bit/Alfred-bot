@@ -97,7 +97,7 @@ class MyBot(commands.Bot):
             logger.exception(f"❌ LAVALINK CONNECT ERROR: {e}")
 
         await self.tree.sync()
-        logger.info("✅ Slash commands synced in setup_hook")
+        logger.info("✅ Slash commands synced")
 
 # 🔥 BOT INSTANCE (REPLACES OLD ONE)
 bot = MyBot(
@@ -1322,10 +1322,6 @@ class PollView(discord.ui.View):
 # =========================
 # setup_hook - FIXED: Moved bot.tree.sync() here to prevent MissingApplicationID
 # =========================
-@bot.event
-async def setup_hook():
-    await bot.tree.sync()
-    logger.info("✅ Slash commands synced in setup_hook")
 
 # =========================
 # BOT EVENTS
