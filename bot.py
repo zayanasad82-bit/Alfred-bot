@@ -79,6 +79,10 @@ class MyBot(commands.Bot):
         try:
             logger.info("🔥 CONNECTING LAVALINK...")
 
+            # Debug environment variables
+            logger.info(f"LAVALINK_URI = {LAVALINK_URI}")
+            logger.info(f"LAVALINK_PASSWORD = {LAVALINK_PASSWORD}")
+
             node = wavelink.Node(
                 identifier="MAIN",
                 uri=LAVALINK_URI,
@@ -99,12 +103,7 @@ class MyBot(commands.Bot):
                 f"❌ LAVALINK CONNECT ERROR: {e}"
             )
 
-    
-        # =========================
-        # SYNC COMMANDS
-        # =========================
         await self.tree.sync()
-
         logger.info("✅ Slash commands synced")
 
 
