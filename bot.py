@@ -77,7 +77,7 @@ intents.voice_states = True
 class MyBot(commands.Bot):
     async def setup_hook(self):
         try:
-            print("CONNECTING LAVALINK...")
+            logger.info("CONNECTING LAVALINK...")
 
             node = wavelink.Node(
                 identifier="MAIN",
@@ -86,12 +86,15 @@ class MyBot(commands.Bot):
                 secure=False
             )
 
-            await wavelink.Pool.connect(nodes=[node], client=self)
+            await wavelink.Pool.connect(
+                nodes=[node],
+                client=self
+            )
 
-            print("POOL NODES:", wavelink.Pool.nodes)
+            logger.info(f"🎵 POOL NODES: {wavelink.Pool.nodes}")
 
         except Exception as e:
-            print("LAVALINK CONNECT ERROR:", e)
+            logger.exception(f"❌ LAVALINK CONNECT ERROR: {e}")
 
         await self.tree.sync()
 
