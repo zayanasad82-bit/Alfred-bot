@@ -99,12 +99,7 @@ class MyBot(commands.Bot):
                 f"❌ LAVALINK CONNECT ERROR: {e}"
             )
 
-        # =========================
-        # LOAD COGS
-        # =========================
-        await self.add_cog(Music(self))
-        await self.add_cog(WavelinkEvents(self))
-
+    
         # =========================
         # SYNC COMMANDS
         # =========================
