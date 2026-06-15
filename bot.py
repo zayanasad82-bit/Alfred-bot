@@ -1629,7 +1629,7 @@ async def on_ready():
 
     logger.info(f"🤖 Logged in as {bot.user}")
 
-    # Start background tasks safely (prevents AlreadyRunning errors)
+    # Start background tasks safely
     if not check_giveaways.is_running():
         check_giveaways.start()
 
@@ -1645,11 +1645,18 @@ async def on_ready():
     if not clean_inactive_players.is_running():
         clean_inactive_players.start()
 
+    # Lavalink debug
+    logger.info(f"🎵 Wavelink nodes: {wavelink.Pool.nodes}")
+
+    for identifier, node in wavelink.Pool.nodes.items():
+        logger.info(
+            f"🎵 Node '{identifier}' | Status: {node.status} | URI: {node.uri}"
+        )
+
     # Status logs
     logger.info("✅ Bot is fully online and tasks are running!")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
-
 
 # =========================
 # 🎮 MODERATION COG
