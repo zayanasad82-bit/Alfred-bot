@@ -46,15 +46,16 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 
-# Lavalink configuration via environment variables
-LAVALINK_HOST = os.getenv("LAVALINK_HOST")
-LAVALINK_PORT = int(os.getenv("LAVALINK_PORT", "2333"))
-LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD")
-LAVALINK_SECURE = os.getenv("LAVALINK_SECURE", "false").lower() == "true"
+# Lavalink configuration (FIXED for Railway + Lavalink v4)
 
-LAVALINK_URI = f"http://{LAVALINK_HOST}:{LAVALINK_PORT}"
-if LAVALINK_SECURE:
-    LAVALINK_URI = f"https://{LAVALINK_HOST}:{LAVALINK_PORT}"
+LAVALINK_URI = os.getenv("LAVALINK_URI")
+LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD")
+
+# fallback (only if you didn't set LAVALINK_URI in Railway)
+if not LAVALINK_URI:
+    LAVALINK_HOST = os.getenv("LAVALINK_HOST")
+    LAVALINK_PORT = os.getenv("LAVALINK_PORT", "2333")
+    LAVALINK_URI = f"http://{LAVALINK_HOST}:{LAVALINK_PORT}"
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -75,15 +76,24 @@ intents.voice_states = True
 # 🔥 NEW BOT CLASS (THIS is the fix)
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        lava_node = wavelink.Node(
-            identifier="MAIN",
-            uri=LAVALINK_URI,
-            password=LAVALINK_PASSWORD
-        )
+        try:
+            print("CONNECTING LAVALINK...")
 
-        await wavelink.Pool.connect(nodes=[lava_node], client=self)
+            node = wavelink.Node(
+                identifier="MAIN",
+                uri=LAVALINK_URI,
+                password=LAVALINK_PASSWORD,
+                secure=False
+            )
+
+            await wavelink.Pool.connect(nodes=[node], client=self)
+
+            print("POOL NODES:", wavelink.Pool.nodes)
+
+        except Exception as e:
+            print("LAVALINK CONNECT ERROR:", e)
+
         await self.tree.sync()
-
 
 # 🔥 BOT INSTANCE (REPLACES OLD ONE)
 bot = MyBot(
