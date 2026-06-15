@@ -1886,379 +1886,154 @@ class Music(commands.Cog, name="music"):
 
     music_group = app_commands.Group(name="music", description="Music commands")
 
-    # =========================
-    # PLAY COMMAND
-    # =========================
-    @music_group.command(name="play", description="Play a song from a query or URL")
-    async def music_play(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer()
+   # =========================
+# PLAY COMMAND
+# =========================
+@music_group.command(name="play", description="Play a song from a query or URL")
+async def music_play(self, interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
 
-        if not await self.ensure_voice(interaction):
-            return
+    if not await self.ensure_voice(interaction):
+        return
 
-        guild = interaction.guild
-        channel = interaction.user.voice.channel
+    guild = interaction.guild
+    channel = interaction.user.voice.channel
 
-        try:
-            # Connect / get player (IMPORTANT FIX)
-            player: wavelink.Player = interaction.guild.voice_client
+    try:
+        player: wavelink.Player = guild.voice_client
 
-            if not player:
-                player = await channel.connect(cls=wavelink.Player)
+        if not player:
+            player = await channel.connect(cls=wavelink.Player)
 
-            # Search tracks
-            tracks = await wavelink.Playable.search(query)
+        tracks = await wavelink.Playable.search(query)
 
-            if not tracks:
-                return await interaction.followup.send("❌ No results found.")
+        if not tracks:
+            return await interaction.followup.send("❌ No results found.")
 
-            # =========================
-            # HANDLE PLAYLIST
-            # =========================
-            if isinstance(tracks, wavelink.Playlist):
-                playlist_tracks = list(tracks)
+        # Playlist handling
+        if isinstance(tracks, wavelink.Playlist):
+            playlist_tracks = list(tracks)
 
-                queue = self.get_queue(guild.id)
-                queue.extend(playlist_tracks)
-
-                # If nothing playing, start first track
-                if not player.playing:
-                    self.current[guild.id] = playlist_tracks[0]
-                    await player.play(playlist_tracks[0])
-
-                    embed = discord.Embed(
-                        title="▶️ Now Playing (Playlist)",
-                        color=discord.Color.green()
-                    )
-                    embed.add_field(name="Title", value=playlist_tracks[0].title, inline=False)
-                    embed.add_field(name="Tracks", value=len(playlist_tracks), inline=True)
-
-                    if getattr(playlist_tracks[0], "artwork", None):
-                        embed.set_thumbnail(url=playlist_tracks[0].artwork)
-
-                    await interaction.followup.send(embed=embed)
-
-                else:
-                    embed = discord.Embed(
-                        title="📋 Playlist Added to Queue",
-                        color=discord.Color.blue()
-                    )
-                    embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
-                    await interaction.followup.send(embed=embed)
-
-                return
-
-            # =========================
-            # SINGLE TRACK
-            # =========================
-            track = tracks[0]
             queue = self.get_queue(guild.id)
+            queue.extend(playlist_tracks)
 
             if not player.playing:
-                self.current[guild.id] = track
-                await player.play(track)
+                self.current[guild.id] = playlist_tracks[0]
+                await player.play(playlist_tracks[0])
 
-                embed = discord.Embed(
-                    title="▶️ Now Playing",
-                    color=discord.Color.green()
-                )
-                embed.add_field(name="Title", value=track.title, inline=False)
-                embed.add_field(name="Artist", value=getattr(track, "author", "Unknown"), inline=True)
+                embed = discord.Embed(title="▶️ Now Playing (Playlist)", color=discord.Color.green())
+                embed.add_field(name="Title", value=playlist_tracks[0].title, inline=False)
+                embed.add_field(name="Tracks", value=len(playlist_tracks), inline=True)
 
-                if getattr(track, "length", None):
-                    embed.add_field(name="Duration", value=f"{track.length}s", inline=True)
+                if getattr(playlist_tracks[0], "artwork", None):
+                    embed.set_thumbnail(url=playlist_tracks[0].artwork)
 
-                if getattr(track, "artwork", None):
-                    embed.set_thumbnail(url=track.artwork)
+                return await interaction.followup.send(embed=embed)
 
-                await interaction.followup.send(embed=embed)
+            return await interaction.followup.send(
+                f"📋 Added playlist with **{len(playlist_tracks)} tracks** to queue."
+            )
 
-            else:
-                queue.append(track)
+        # Single track
+        track = tracks[0]
+        queue = self.get_queue(guild.id)
 
-                embed = discord.Embed(
-                    title="📋 Added to Queue",
-                    color=discord.Color.blue()
-                )
-                embed.add_field(name="Title", value=track.title, inline=False)
-                embed.add_field(name="Position", value=f"#{len(queue)}", inline=True)
+        if not player.playing:
+            self.current[guild.id] = track
+            await player.play(track)
 
-                await interaction.followup.send(embed=embed)
+            embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
+            embed.add_field(name="Title", value=track.title, inline=False)
+            embed.add_field(name="Artist", value=getattr(track, "author", "Unknown"), inline=True)
 
-        except Exception as e:
-            logger.error(f"Music play error: {e}")
-            await interaction.followup.send(f"❌ Error: {str(e)}")
-    
-    @music_group.command(name="search", description="Search for a song and select from results")
-    @app_commands.describe(query="Search query")
-    async def music_search(self, interaction: discord.Interaction, query: str):
-        await interaction.response.defer()
-        
-        if not await self.ensure_voice(interaction):
-            return
-        
-        try:
-            tracks = await wavelink.Playable.search(query)
-            if not tracks:
-                return await interaction.followup.send("❌ No results found.")
-            
-            tracks = tracks[:5]
-            
-            embed = discord.Embed(title="🔍 Search Results", color=discord.Color.blue())
-            for i, track in enumerate(tracks, 1):
-                embed.add_field(
-                    name=f"{i}. {track.title}",
-                    value=f"Artist: {track.author} | Duration: {format_duration(track.length)}",
-                    inline=False
-                )
-            
-            view = SearchSelect(tracks, self)
-            await interaction.followup.send(embed=embed, view=view)
-        
-        except Exception as e:
-            logger.error(f"Music search error: {e}")
-            await interaction.followup.send(f"❌ An error occurred: {str(e)}")
-    
-    @music_group.command(name="pause", description="Pause the current track")
-    async def music_pause(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        player = interaction.guild.voice_client
-        if not player or not isinstance(player, wavelink.Player) or not player.playing:
-            return await interaction.followup.send("❌ Nothing is playing.")
-        if player.paused:
-            return await interaction.followup.send("⚠️ Already paused.")
-        await player.pause()
-        await interaction.followup.send("⏸️ Paused")
-    
-    @music_group.command(name="resume", description="Resume the current track")
-    async def music_resume(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        player = interaction.guild.voice_client
-        if not player or not isinstance(player, wavelink.Player):
-            return await interaction.followup.send("❌ Not connected.")
-        if not player.paused:
-            return await interaction.followup.send("⚠️ Already playing.")
-        await player.resume()
-        await interaction.followup.send("▶️ Resumed")
-    
-@music_group.command(name="skip", description="Skip the current song")
+            if getattr(track, "length", None):
+                embed.add_field(name="Duration", value=f"{track.length}s", inline=True)
+
+            if getattr(track, "artwork", None):
+                embed.set_thumbnail(url=track.artwork)
+
+            return await interaction.followup.send(embed=embed)
+
+        queue.append(track)
+
+        await interaction.followup.send(f"📋 Added **{track.title}** to queue.")
+
+    except Exception as e:
+        logger.error(f"Music play error: {e}")
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+# =========================
+# SEARCH COMMAND
+# =========================
+@music_group.command(name="search", description="Search for a song and select from results")
+async def music_search(self, interaction: discord.Interaction, query: str):
+    await interaction.response.defer()
+
+    if not await self.ensure_voice(interaction):
+        return
+
+    try:
+        tracks = await wavelink.Playable.search(query)
+
+        if not tracks:
+            return await interaction.followup.send("❌ No results found.")
+
+        tracks = tracks[:5]
+
+        embed = discord.Embed(title="🔍 Search Results", color=discord.Color.blue())
+        for i, track in enumerate(tracks, 1):
+            embed.add_field(
+                name=f"{i}. {track.title}",
+                value=f"{track.author}",
+                inline=False
+            )
+
+        view = SearchSelect(tracks, self)
+        await interaction.followup.send(embed=embed, view=view)
+
+    except Exception as e:
+        logger.error(f"Music search error: {e}")
+        await interaction.followup.send(f"❌ Error: {str(e)}")
+
+
+# =========================
+# PAUSE / RESUME
+# =========================
+@music_group.command(name="pause")
+async def music_pause(self, interaction: discord.Interaction):
+    player = interaction.guild.voice_client
+
+    if not player or not isinstance(player, wavelink.Player) or not player.playing:
+        return await interaction.response.send_message("❌ Nothing playing.")
+
+    await player.pause()
+    await interaction.response.send_message("⏸️ Paused")
+
+
+@music_group.command(name="resume")
+async def music_resume(self, interaction: discord.Interaction):
+    player = interaction.guild.voice_client
+
+    if not player or not isinstance(player, wavelink.Player):
+        return await interaction.response.send_message("❌ Not connected.")
+
+    await player.resume()
+    await interaction.response.send_message("▶️ Resumed")
+
+
+# =========================
+# SKIP (FIXED PLACEMENT)
+# =========================
+@music_group.command(name="skip")
 async def skip(self, interaction: discord.Interaction):
-    guild = interaction.guild
-    player: wavelink.Player = guild.voice_client
+    player = interaction.guild.voice_client
 
     if not player or not player.playing:
         return await interaction.response.send_message("❌ Nothing is playing.")
 
     await player.stop()
-    await interaction.response.send_message("⏭️ Skipped song.")
-    
-    @music_group.command(name="stop", description="Stop playback and clear the queue")
-    async def music_stop(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        player = interaction.guild.voice_client
-        if not player or not isinstance(player, wavelink.Player):
-            return await interaction.followup.send("❌ Not connected.")
-        
-        player.queue.clear()
-        self.queue[interaction.guild.id] = []
-        self.current[interaction.guild.id] = None
-        await player.stop()
-        await player.disconnect()
-        await interaction.followup.send("⏹️ Stopped and disconnected")
-    
-    @music_group.command(name="queue", description="View the current music queue")
-    async def music_queue(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        
-        queue = self.get_queue(interaction.guild.id)
-        current = self.current.get(interaction.guild.id)
-        
-        embed = discord.Embed(title="📋 Music Queue", color=discord.Color.blue())
-        
-        if current:
-            embed.add_field(
-                name="▶️ Now Playing",
-                value=f"**{current.title}** by {current.author} [`{format_duration(current.length)}`]",
-                inline=False
-            )
-        
-        if not queue:
-            embed.description = "No songs in queue."
-        else:
-            total_tracks = len(queue)
-            total_duration = sum(t.length for t in queue if hasattr(t, 'length'))
-            
-            embed.set_footer(text=f"Total: {total_tracks} tracks | Duration: {format_duration(total_duration)}")
-            
-            show = queue[:15]
-            for i, track in enumerate(show, 1):
-                embed.add_field(
-                    name=f"{i}. {track.title}",
-                    value=f"{track.author} [`{format_duration(track.length)}`]",
-                    inline=False
-                )
-            
-            if len(queue) > 15:
-                embed.add_field(name="...", value=f"And {len(queue) - 15} more tracks", inline=False)
-        
-        await interaction.followup.send(embed=embed)
-    
-    @music_group.command(name="nowplaying", description="Show the currently playing track")
-    async def music_nowplaying(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        
-        player = interaction.guild.voice_client
-        current = self.current.get(interaction.guild.id)
-        
-        if not current or not player or not isinstance(player, wavelink.Player) or not player.playing:
-            return await interaction.followup.send("❌ Nothing is currently playing.")
-        
-        embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
-        embed.add_field(name="Title", value=current.title, inline=False)
-        embed.add_field(name="Artist", value=current.author, inline=True)
-        
-        if hasattr(player, 'position') and hasattr(current, 'length'):
-            elapsed = player.position
-            total = current.length
-            progress = min(elapsed / total, 1.0) if total > 0 else 0
-            bar_length = 20
-            filled = int(progress * bar_length)
-            bar = "█" * filled + "░" * (bar_length - filled)
-            embed.add_field(name="Progress", value=f"`{format_duration(elapsed)}` {bar} `{format_duration(total)}`", inline=False)
-        
-        if current.artwork:
-            embed.set_thumbnail(url=current.artwork)
-        view = MusicControls(self, current)
-        await interaction.followup.send(embed=embed, view=view)
-    
-    @music_group.command(name="shuffle", description="Shuffle the music queue")
-    async def music_shuffle(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        await self.shuffle_queue(interaction.guild.id)
-        await interaction.followup.send("🔀 Queue shuffled!")
-    
-    @music_group.command(name="remove", description="Remove a track from the queue by position")
-    @app_commands.describe(position="Position of the track to remove")
-    async def music_remove(self, interaction: discord.Interaction, position: int):
-        await interaction.response.defer()
-        queue = self.get_queue(interaction.guild.id)
-        
-        if position < 1 or position > len(queue):
-            return await interaction.followup.send(f"❌ Invalid position. Queue has {len(queue)} tracks.")
-        
-        removed = queue.pop(position - 1)
-        await interaction.followup.send(f"✅ Removed **{removed.title}** from the queue.")
-    
-    @music_group.command(name="previous", description="Play the previous track")
-    async def music_previous(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        
-        if not await self.ensure_voice(interaction):
-            return
-        
-        history = self.get_history(interaction.guild.id)
-        if not history:
-            return await interaction.followup.send("❌ No previous track.")
-        
-        voice_channel = interaction.user.voice.channel
-        guild = interaction.guild
-        player = await get_music_player(guild, voice_channel)
-        
-        prev_track = history.pop()
-        
-        current = self.current.get(guild.id)
-        if current:
-            queue = self.get_queue(guild.id)
-            queue.insert(0, current)
-        
-        self.current[guild.id] = prev_track
-        await player.play(prev_track)
-        
-        embed = discord.Embed(title="⏮️ Playing Previous Track", color=discord.Color.green())
-        embed.add_field(name="Title", value=prev_track.title, inline=False)
-        embed.add_field(name="Artist", value=prev_track.author, inline=True)
-        embed.add_field(name="Duration", value=format_duration(prev_track.length), inline=True)
-        if prev_track.artwork:
-            embed.set_thumbnail(url=prev_track.artwork)
-        view = MusicControls(self, prev_track)
-        await interaction.followup.send(embed=embed, view=view)
-    
-    @music_group.command(name="loop", description="Toggle looping for the current track")
-    async def music_loop(self, interaction: discord.Interaction):
-        await interaction.response.defer()
-        guild_id = interaction.guild.id
-        self.loop[guild_id] = not self.loop.get(guild_id, False)
-        state = "enabled" if self.loop[guild_id] else "disabled"
-        await interaction.followup.send(f"🔁 Loop {state}")
-    
-    @music_group.command(name="volume", description="Set the player volume")
-    @app_commands.describe(volume="Volume level (0-100)")
-    async def music_volume(self, interaction: discord.Interaction, volume: int):
-        await interaction.response.defer()
-        volume = max(0, min(100, volume))
-        
-        player = interaction.guild.voice_client
-        if player and isinstance(player, wavelink.Player):
-            await player.set_volume(volume)
-        
-        self.volume[interaction.guild.id] = volume
-        await interaction.followup.send(f"🔊 Volume set to {volume}%")
-    
-    @music_group.command(name="playlist", description="Load and play a playlist from a URL")
-    @app_commands.describe(url="Playlist URL")
-    async def music_playlist(self, interaction: discord.Interaction, url: str):
-        await interaction.response.defer()
-        
-        if not await self.ensure_voice(interaction):
-            return
-        
-        voice_channel = interaction.user.voice.channel
-        guild = interaction.guild
-        
-        try:
-            player = await get_music_player(guild, voice_channel)
-            tracks = await wavelink.Playable.search(url)
-            
-            if not tracks:
-                return await interaction.followup.send("❌ No tracks found in playlist.")
-            
-            if isinstance(tracks, wavelink.Playlist):
-                playlist_tracks = list(tracks)
-                queue = self.get_queue(guild.id)
-                
-                if not player.playing:
-                    first = playlist_tracks[0]
-                    self.current[guild.id] = first
-                    await player.play(first)
-                    queue.extend(playlist_tracks[1:])
-                    embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
-                    embed.add_field(name="Title", value=first.title, inline=False)
-                    embed.add_field(name="Playlist", value=tracks.name, inline=True)
-                    embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
-                    view = MusicControls(self, first)
-                    await interaction.followup.send(embed=embed, view=view)
-                else:
-                    queue.extend(playlist_tracks)
-                    embed = discord.Embed(title="📋 Added to Queue", color=discord.Color.blue())
-                    embed.add_field(name="Playlist", value=tracks.name, inline=False)
-                    embed.add_field(name="Tracks Added", value=len(playlist_tracks), inline=True)
-                    await interaction.followup.send(embed=embed)
-            else:
-                queue = self.get_queue(guild.id)
-                if not player.playing:
-                    self.current[guild.id] = tracks[0]
-                    await player.play(tracks[0])
-                    embed = discord.Embed(title="▶️ Now Playing", color=discord.Color.green())
-                    embed.add_field(name="Title", value=tracks[0].title, inline=False)
-                    view = MusicControls(self, tracks[0])
-                    await interaction.followup.send(embed=embed, view=view)
-                else:
-                    queue.append(tracks[0])
-                    await interaction.followup.send(f"✅ Added **{tracks[0].title}** to the queue.")
-        
-        except Exception as e:
-            logger.error(f"Music playlist error: {e}")
-            await interaction.followup.send(f"❌ Error: {str(e)}")
+    await interaction.response.send_message("⏭️ Skipped")
 
 
 # =========================
