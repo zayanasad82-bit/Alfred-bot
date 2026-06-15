@@ -82,8 +82,7 @@ class MyBot(commands.Bot):
             node = wavelink.Node(
                 identifier="MAIN",
                 uri=LAVALINK_URI,
-                password=LAVALINK_PASSWORD,
-                secure=False
+                password=LAVALINK_PASSWORD
             )
 
             await wavelink.Pool.connect(
