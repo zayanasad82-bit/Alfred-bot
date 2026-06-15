@@ -8,4 +8,4 @@ pypdf
 python-docx
 davey
 ffmpeg
-wavelink==3.3.0
+wavelink==3.5.0
