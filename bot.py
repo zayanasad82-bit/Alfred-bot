@@ -23,11 +23,6 @@ from docx import Document
 from discord.utils import utcnow
 
 # =========================
-# 🔥 MUSIC SYSTEM IMPORTS
-# =========================
-import wavelink
-
-# =========================
 # LOGGING CONFIGURATION
 # =========================
 logging.basicConfig(
@@ -46,17 +41,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 
-# Lavalink configuration (FIXED for Railway + Lavalink v4)
-
-LAVALINK_URI = os.getenv("LAVALINK_URI")
-LAVALINK_PASSWORD = os.getenv("LAVALINK_PASSWORD")
-
-# fallback (only if you didn't set LAVALINK_URI in Railway)
-if not LAVALINK_URI:
-    LAVALINK_HOST = os.getenv("LAVALINK_HOST")
-    LAVALINK_PORT = os.getenv("LAVALINK_PORT", "2333")
-    LAVALINK_URI = f"http://{LAVALINK_HOST}:{LAVALINK_PORT}"
-
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 MODEL_NAME = "gemini-2.5-flash"
@@ -73,41 +57,14 @@ intents.presences = True
 intents.voice_states = True
 
 
-# 🔥 NEW BOT CLASS
+# BOT CLASS
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        try:
-            logger.info("🔥 CONNECTING LAVALINK...")
-
-            # Debug environment variables
-            logger.info(f"LAVALINK_URI = {LAVALINK_URI}")
-            logger.info(f"LAVALINK_PASSWORD = {LAVALINK_PASSWORD}")
-
-            node = wavelink.Node(
-                identifier="MAIN",
-                uri=LAVALINK_URI,
-                password=LAVALINK_PASSWORD
-            )
-
-            await wavelink.Pool.connect(
-                nodes=[node],
-                client=self
-            )
-
-            logger.info(
-                f"🎵 POOL NODES AFTER CONNECT: {wavelink.Pool.nodes}"
-            )
-
-        except Exception as e:
-            logger.exception(
-                f"❌ LAVALINK CONNECT ERROR: {e}"
-            )
-
         await self.tree.sync()
         logger.info("✅ Slash commands synced")
 
 
-# 🔥 BOT INSTANCE
+# BOT INSTANCE
 bot = MyBot(
     command_prefix="!",
     intents=intents,
@@ -223,20 +180,6 @@ class AsyncDatabase:
                 guild_id INTEGER, user_id INTEGER,
                 trait TEXT, value TEXT,
                 PRIMARY KEY (guild_id, user_id, trait)
-            )""",
-            """CREATE TABLE IF NOT EXISTS music_favorites (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER, guild_id INTEGER,
-                title TEXT, url TEXT, added_at TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS music_playlists (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER, name TEXT, user_id INTEGER, created_at TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS music_playlist_tracks (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                playlist_id INTEGER, title TEXT, url TEXT,
-                position INTEGER, added_at TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS levels (
                 user_id INTEGER, guild_id INTEGER,
@@ -848,17 +791,6 @@ async def query_ai(prompt: str) -> str:
         logger.error(f"AI query error: {e}")
         return f"AI error: {str(e)}"
 
-def format_duration(ms: int) -> str:
-    """Format milliseconds to a time string."""
-    if ms <= 0:
-        return "Live"
-    seconds = ms // 1000
-    minutes, secs = divmod(seconds, 60)
-    hours, mins = divmod(minutes, 60)
-    if hours > 0:
-        return f"{hours}:{mins:02d}:{secs:02d}"
-    return f"{mins}:{secs:02d}"
-
 # =========================
 # DM MEMORY
 # =========================
@@ -876,11 +808,6 @@ welcome_configs = {}
 # GIVEAWAY TRACKING (in-memory)
 # =========================
 active_giveaways = {}  # guild_id -> list of giveaway dicts
-
-# =========================
-# MUSIC SYSTEM (WAVELINK ONLY - no old MusicPlayer)
-# =========================
-URL_REGEX = re.compile(r"https?://(?:www\.)?(?:youtube\.com|youtu\.be|soundcloud\.com|spotify\.com)/\S+")
 
 # =========================
 # BACKGROUND TASKS
@@ -1038,170 +965,6 @@ async def consolidate_memories():
     await db.commit()
     if deleted > 0:
         logger.info(f"🧹 Consolidated old memories")
-
-@tasks.loop(minutes=5)
-async def clean_inactive_players():
-    """Disconnect from empty voice channels."""
-    for voice_client in bot.voice_clients:
-        try:
-            if isinstance(voice_client, wavelink.Player):
-                channel = voice_client.channel
-                if channel and len(channel.members) == 1 and channel.members[0].id == bot.user.id:
-                    if not voice_client.playing and not voice_client.paused:
-                        await voice_client.disconnect()
-                        logger.info(f"Disconnected from empty voice channel in {voice_client.guild.id}")
-        except Exception as e:
-            logger.error(f"Clean inactive players error: {e}")
-
-# =========================
-# MUSIC CONTROLS VIEW
-# =========================
-class MusicControls(discord.ui.View):
-    """Interactive music controls view."""
-    def __init__(self, music_cog, track):
-        super().__init__(timeout=600)
-        self.music_cog = music_cog
-        self.track = track
-    
-    @discord.ui.button(label="⏸️", style=discord.ButtonStyle.secondary)
-    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        player = interaction.guild.voice_client
-        if not player or not isinstance(player, wavelink.Player):
-            return await interaction.response.send_message("Not connected.", ephemeral=True)
-        if player.paused:
-            await player.resume()
-            button.label = "⏸️"
-        else:
-            await player.pause()
-            button.label = "▶️"
-        await interaction.response.edit_message(view=self)
-    
-    @discord.ui.button(label="⏭️", style=discord.ButtonStyle.secondary)
-    async def skip_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        player = interaction.guild.voice_client
-        if not player or not isinstance(player, wavelink.Player):
-            return await interaction.response.send_message("Not connected.", ephemeral=True)
-        await player.stop()
-        await interaction.response.send_message("⏭️ Skipped", ephemeral=True)
-    
-    @discord.ui.button(label="🔀", style=discord.ButtonStyle.secondary)
-    async def shuffle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.music_cog.shuffle_queue(interaction.guild.id)
-        await interaction.response.send_message("🔀 Queue shuffled!", ephemeral=True)
-    
-    @discord.ui.button(label="⏹️", style=discord.ButtonStyle.danger)
-    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        player = interaction.guild.voice_client
-        if not player:
-            return await interaction.response.send_message("Not connected.", ephemeral=True)
-        player.queue.clear()
-        await player.stop()
-        await player.disconnect()
-        await interaction.response.send_message("⏹️ Stopped and disconnected.", ephemeral=True)
-
-# =========================
-# SEARCH SELECT VIEW
-# =========================
-class SearchSelect(discord.ui.View):
-    def __init__(self, tracks, music_cog):
-        super().__init__(timeout=30)
-
-        self.tracks = tracks
-        self.music_cog = music_cog
-
-        options = [
-            discord.SelectOption(
-                label=t.title[:50],
-                description=t.author[:50],
-                value=str(i)
-            )
-            for i, t in enumerate(tracks)
-        ]
-
-        select = discord.ui.Select(
-            placeholder="Choose a track...",
-            options=options
-        )
-
-        async def select_callback(interaction: discord.Interaction):
-            await interaction.response.defer()
-
-            if not interaction.user.voice or not interaction.user.voice.channel:
-                return await interaction.followup.send(
-                    "❌ You must be in a voice channel.",
-                    ephemeral=True
-                )
-
-            idx = int(select.values[0])
-            track = self.tracks[idx]
-
-            guild = interaction.guild
-            channel = interaction.user.voice.channel
-
-            try:
-                # Use helper instead of connecting directly
-                player = await get_music_player(guild, channel)
-
-                queue = self.music_cog.get_queue(guild.id)
-
-                if not player.playing:
-                    self.music_cog.current[guild.id] = track
-                    await player.play(track)
-
-                    embed = discord.Embed(
-                        title="▶️ Now Playing",
-                        color=discord.Color.green()
-                    )
-
-                    embed.add_field(
-                        name="Title",
-                        value=track.title,
-                        inline=False
-                    )
-
-                    embed.add_field(
-                        name="Artist",
-                        value=track.author,
-                        inline=True
-                    )
-
-                    if getattr(track, "length", None):
-                        embed.add_field(
-                            name="Duration",
-                            value=format_duration(track.length),
-                            inline=True
-                        )
-
-                    if getattr(track, "artwork", None):
-                        embed.set_thumbnail(url=track.artwork)
-
-                    view = MusicControls(self.music_cog, track)
-
-                    await interaction.followup.send(
-                        embed=embed,
-                        view=view
-                    )
-
-                else:
-                    queue.append(track)
-
-                    await interaction.followup.send(
-                        f"📋 Added **{track.title}** to queue (#{len(queue)})"
-                    )
-
-                try:
-                    await interaction.message.delete()
-                except:
-                    pass
-
-            except Exception as e:
-                logger.exception("SearchSelect error")
-                await interaction.followup.send(
-                    f"❌ Error: {e}"
-                )
-
-        select.callback = select_callback
-        self.add_item(select)
 
 # =========================
 # TICKET VIEWS
@@ -1370,13 +1133,8 @@ class PollView(discord.ui.View):
         return callback
 
 # =========================
-# setup_hook - FIXED: Moved bot.tree.sync() here to prevent MissingApplicationID
-# =========================
-
-# =========================
 # BOT EVENTS
 # =========================
-# REMOVED: Duplicate global on_wavelink_node_ready - already in WavelinkEvents cog
 
 @bot.event
 async def on_member_join(member):
@@ -1692,17 +1450,6 @@ async def on_ready():
     if not consolidate_memories.is_running():
         consolidate_memories.start()
 
-    if not clean_inactive_players.is_running():
-        clean_inactive_players.start()
-
-    # Lavalink debug
-    logger.info(f"🎵 Wavelink nodes: {wavelink.Pool.nodes}")
-
-    for identifier, node in wavelink.Pool.nodes.items():
-        logger.info(
-            f"🎵 Node '{identifier}' | Status: {node.status} | URI: {node.uri}"
-        )
-
     # Status logs
     logger.info("✅ Bot is fully online and tasks are running!")
     logger.info(f"   Servers: {len(bot.guilds)}")
@@ -1818,29 +1565,29 @@ class Moderation(commands.Cog, name="moderation"):
             return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
         
         try:
-            await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
-            await add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
-            
-            try:
-                dm_embed = discord.Embed(
-                    title=f"You were warned in {interaction.guild.name}",
-                    description=f"**Reason:** {reason}",
-                    color=discord.Color.orange()
-                )
-                await member.send(embed=dm_embed)
-            except:
-                pass
-            
-            embed = discord.Embed(title="⚠️ Warned User", color=discord.Color.orange())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.set_footer(text=f"User ID: {member.id}")
-            
-            await interaction.followup.send(embed=embed)
-        except Exception as e:
-            logger.error(f"Warn error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+                await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
+                await add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
+                
+                try:
+                    dm_embed = discord.Embed(
+                        title=f"You were warned in {interaction.guild.name}",
+                        description=f"**Reason:** {reason}",
+                        color=discord.Color.orange()
+                    )
+                    await member.send(embed=dm_embed)
+                except:
+                    pass
+                
+                embed = discord.Embed(title="⚠️ Warned User", color=discord.Color.orange())
+                embed.add_field(name="User", value=member.mention, inline=True)
+                embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+                embed.add_field(name="Reason", value=reason, inline=False)
+                embed.set_footer(text=f"User ID: {member.id}")
+                
+                await interaction.followup.send(embed=embed)
+            except Exception as e:
+                logger.error(f"Warn error: {e}")
+                await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="kick", description="Kick a member from the server")
     @app_commands.check(owner_check)
@@ -1906,344 +1653,6 @@ class Moderation(commands.Cog, name="moderation"):
         except Exception as e:
             logger.error(f"Clean error: {e}")
             await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
-
-
-# =========================
-# 🎵 MUSIC COG
-# =========================
-
-async def get_music_player(
-    guild: discord.Guild,
-    voice_channel: discord.VoiceChannel
-) -> wavelink.Player:
-    """Get or create a Wavelink player."""
-
-    player = guild.voice_client
-
-    # Already connected
-    if player and isinstance(player, wavelink.Player):
-        if player.channel != voice_channel:
-            await player.move_to(voice_channel)
-
-        return player
-
-    # Disconnect non-Wavelink clients
-    if player:
-        await player.disconnect(force=True)
-
-    # Create new player
-    player: wavelink.Player = await voice_channel.connect(
-        cls=wavelink.Player
-    )
-
-    return player
-
-
-class Music(commands.Cog, name="music"):
-
-    music_group = app_commands.Group(
-        name="music",
-        description="Music commands"
-    )
-
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-
-        self.queue = {}
-        self.current = {}
-        self.history = {}
-        self.loop = {}
-        self.volume = {}
-
-    def get_queue(self, guild_id: int):
-        return self.queue.setdefault(guild_id, [])
-
-    def get_history(self, guild_id: int):
-        return self.history.setdefault(guild_id, [])
-
-    async def ensure_voice(self, interaction: discord.Interaction) -> bool:
-        if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.followup.send(
-                "❌ You must be in a voice channel first.",
-                ephemeral=True
-            )
-            return False
-
-        return True
-
-    # =========================
-    # PLAY
-    # =========================
-    @music_group.command(
-        name="play",
-        description="Play a song from a query or URL"
-    )
-    async def music_play(
-        self,
-        interaction: discord.Interaction,
-        query: str
-    ):
-        await interaction.response.defer()
-
-        if not await self.ensure_voice(interaction):
-            return
-
-        guild = interaction.guild
-        channel = interaction.user.voice.channel
-
-        try:
-            player = await get_music_player(guild, channel)
-
-            tracks = await wavelink.Playable.search(query)
-
-            if not tracks:
-                return await interaction.followup.send(
-                    "❌ No results found."
-                )
-
-            track = tracks[0]
-
-            if not player.playing:
-                self.current[guild.id] = track
-
-                await player.play(track)
-
-                embed = discord.Embed(
-                    title="▶️ Now Playing",
-                    description=track.title,
-                    color=discord.Color.green()
-                )
-
-                embed.add_field(
-                    name="Artist",
-                    value=getattr(track, "author", "Unknown"),
-                    inline=True
-                )
-
-                await interaction.followup.send(embed=embed)
-
-            else:
-                self.get_queue(guild.id).append(track)
-
-                await interaction.followup.send(
-                    f"📋 Added **{track.title}** to queue."
-                )
-
-        except Exception:
-            logger.exception("Music play error")
-            await interaction.followup.send(
-                "❌ Failed to play track."
-            )
-
-    # =========================
-    # SEARCH
-    # =========================
-    @music_group.command(
-        name="search",
-        description="Search for songs"
-    )
-    async def music_search(
-        self,
-        interaction: discord.Interaction,
-        query: str
-    ):
-        await interaction.response.defer()
-
-        if not await self.ensure_voice(interaction):
-            return
-
-        try:
-            tracks = await wavelink.Playable.search(query)
-
-            if not tracks:
-                return await interaction.followup.send(
-                    "❌ No results found."
-                )
-
-            tracks = tracks[:5]
-
-            embed = discord.Embed(
-                title="🔍 Search Results",
-                color=discord.Color.blue()
-            )
-
-            for i, track in enumerate(tracks, 1):
-                embed.add_field(
-                    name=f"{i}. {track.title}",
-                    value=getattr(track, "author", "Unknown"),
-                    inline=False
-                )
-
-            await interaction.followup.send(embed=embed)
-
-        except Exception:
-            logger.exception("Music search error")
-            await interaction.followup.send(
-                "❌ Search failed."
-            )
-
-    # =========================
-    # PAUSE
-    # =========================
-    @music_group.command(
-        name="pause",
-        description="Pause playback"
-    )
-    async def music_pause(
-        self,
-        interaction: discord.Interaction
-    ):
-        player = interaction.guild.voice_client
-
-        if (
-            not player
-            or not isinstance(player, wavelink.Player)
-            or not player.playing
-        ):
-            return await interaction.response.send_message(
-                "❌ Nothing playing."
-            )
-
-        await player.pause()
-
-        await interaction.response.send_message(
-            "⏸️ Paused"
-        )
-
-    # =========================
-    # RESUME
-    # =========================
-    @music_group.command(
-        name="resume",
-        description="Resume playback"
-    )
-    async def music_resume(
-        self,
-        interaction: discord.Interaction
-    ):
-        player = interaction.guild.voice_client
-
-        if (
-            not player
-            or not isinstance(player, wavelink.Player)
-        ):
-            return await interaction.response.send_message(
-                "❌ Not connected."
-            )
-
-        await player.resume()
-
-        await interaction.response.send_message(
-            "▶️ Resumed"
-        )
-
-    # =========================
-    # SKIP
-    # =========================
-    @music_group.command(
-        name="skip",
-        description="Skip the current song"
-    )
-    async def skip(
-        self,
-        interaction: discord.Interaction
-    ):
-        player = interaction.guild.voice_client
-
-        if (
-            not player
-            or not isinstance(player, wavelink.Player)
-            or not player.playing
-        ):
-            return await interaction.response.send_message(
-                "❌ Nothing is playing."
-            )
-
-        await player.stop()
-
-        await interaction.response.send_message(
-            "⏭️ Skipped"
-        )
-
-
-# =========================
-# 🎵 WAVELINK EVENTS
-# =========================
-
-class WavelinkEvents(commands.Cog):
-
-    def __init__(self, bot: commands.Bot):
-        self.bot = bot
-
-    @commands.Cog.listener()
-    async def on_wavelink_track_start(
-        self,
-        payload: wavelink.TrackStartEventPayload
-    ):
-        guild = self.bot.get_guild(payload.player.guild.id)
-
-        if not guild:
-            return
-
-        music_cog = self.bot.get_cog("music")
-
-        if music_cog:
-            music_cog.current[guild.id] = payload.track
-
-    @commands.Cog.listener()
-    async def on_wavelink_track_end(
-        self,
-        payload: wavelink.TrackEndEventPayload
-    ):
-        guild = self.bot.get_guild(payload.player.guild.id)
-
-        if not guild:
-            return
-
-        music_cog = self.bot.get_cog("music")
-
-        if not music_cog:
-            return
-
-        if (
-            music_cog.loop.get(guild.id, False)
-            and music_cog.current.get(guild.id)
-        ):
-            await payload.player.play(
-                music_cog.current[guild.id]
-            )
-            return
-
-        if guild.id in music_cog.current:
-            current = music_cog.current[guild.id]
-
-            if current:
-                history = music_cog.get_history(guild.id)
-                history.append(current)
-
-                if len(history) > 20:
-                    history.pop(0)
-
-        queue = music_cog.get_queue(guild.id)
-
-        if queue:
-            next_track = queue.pop(0)
-
-            music_cog.current[guild.id] = next_track
-
-            await payload.player.play(next_track)
-
-        else:
-            music_cog.current[guild.id] = None
-
-    @commands.Cog.listener()
-    async def on_wavelink_node_ready(
-        self,
-        payload: wavelink.NodeReadyEventPayload
-    ):
-        logger.info(
-            f"✅ Wavelink node {payload.node.identifier} is ready!"
-        )
 
 
 # =========================
@@ -2789,11 +2198,6 @@ class Help(commands.Cog, name="help"):
             inline=False
         )
         embed.add_field(
-            name="🎵 Music",
-            value="`/music play`, `/music search`, `/music pause`, `/music resume`, `/music skip`, `/music previous`, `/music stop`, `/music queue`, `/music nowplaying`, `/music shuffle`, `/music remove`, `/music loop`, `/music volume`, `/music playlist`",
-            inline=False
-        )
-        embed.add_field(
             name="🎮 Fun",
             value="`/fun 8ball`, `/fun dice`, `/fun coinflip`, `/fun meme`, `/fun rps`",
             inline=False
@@ -2920,8 +2324,6 @@ async def main():
         
         # Register all cogs
         await bot.add_cog(Moderation(bot))
-        await bot.add_cog(Music(bot))
-        await bot.add_cog(WavelinkEvents(bot))
         await bot.add_cog(Fun(bot))
         await bot.add_cog(Economy(bot))
         await bot.add_cog(Giveaway(bot))
