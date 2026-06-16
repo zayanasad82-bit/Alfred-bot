@@ -1584,10 +1584,12 @@ class Moderation(commands.Cog, name="moderation"):
                 embed.add_field(name="Reason", value=reason, inline=False)
                 embed.set_footer(text=f"User ID: {member.id}")
                 
-                await interaction.followup.send(embed=embed)
-            except Exception as e:
-                logger.error(f"Warn error: {e}")
-                await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+                try:
+                   await interaction.followup.send(embed=embed)
+
+                except Exception as e:
+                    logger.error(f"Warn error: {e}")
+                    await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="kick", description="Kick a member from the server")
     @app_commands.check(owner_check)
