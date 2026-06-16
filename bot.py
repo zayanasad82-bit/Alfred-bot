@@ -2240,6 +2240,33 @@ class Utility(commands.Cog, name="utility"):
         embed.add_field(name="Bot", value="Yes" if target.bot else "No", inline=True)
         await interaction.response.send_message(embed=embed)
 
+# =========================
+    # VOICE COMMANDS
+    # =========================
+    @app_commands.command(name="join", description="Make the bot join your voice channel")
+    async def join(self, interaction: discord.Interaction):
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            return await interaction.response.send_message("❌ You must be in a voice channel first.", ephemeral=True)
+        
+        channel = interaction.user.voice.channel
+        
+        if interaction.guild.voice_client:
+            if interaction.guild.voice_client.channel.id == channel.id:
+                return await interaction.response.send_message("✅ I'm already in that voice channel.", ephemeral=True)
+            await interaction.guild.voice_client.move_to(channel)
+            await interaction.response.send_message(f"✅ Moved to {channel.mention}")
+        else:
+            await channel.connect()
+            await interaction.response.send_message(f"✅ Joined {channel.mention}")
+    
+    @app_commands.command(name="leave", description="Make the bot leave the voice channel")
+    async def leave(self, interaction: discord.Interaction):
+        voice_client = interaction.guild.voice_client
+        if not voice_client:
+            return await interaction.response.send_message("❌ I'm not in a voice channel.", ephemeral=True)
+        
+        await voice_client.disconnect(force=True)
+        await interaction.response.send_message("👋 Disconnected from voice channel.")
 
 # =========================
 # 📋 HELP COG
