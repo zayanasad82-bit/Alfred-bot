@@ -1456,15 +1456,21 @@ async def on_ready():
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
 
 # =========================
-# 🎮 MODERATION COG
+# 🎮 MODERATION COG (FIXED)
 # =========================
 
 class Moderation(commands.Cog, name="moderation"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-    
-    mod_group = app_commands.Group(name="mod", description="Moderation commands")
 
+    mod_group = app_commands.Group(
+        name="mod",
+        description="Moderation commands"
+    )
+
+    # =========================
+    # 🧹 CLEAR
+    # =========================
     @mod_group.command(name="clear", description="Delete messages")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -1478,180 +1484,237 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Clear error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
+    # =========================
+    # 🧹 CLEAR ALL
+    # =========================
     @mod_group.command(name="clearall", description="Wipe channel")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_clearall(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         total = 0
+
         try:
             while True:
                 deleted = await interaction.channel.purge(limit=100)
                 total += len(deleted)
                 if not deleted:
                     break
-            await interaction.followup.send(f"Cleared {total}", ephemeral=True)
+
+            await interaction.followup.send(f"🧹 Cleared {total} messages", ephemeral=True)
             await log(interaction.guild, f"CLEARALL | {total}")
+
         except Exception as e:
             logger.error(f"Clearall error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
+    # =========================
+    # 🔨 BAN
+    # =========================
     @mod_group.command(name="ban", description="Ban member")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(ban_members=True)
     async def mod_ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
+
         try:
             await member.ban(reason=reason)
-            await add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
+
+            await add_history(
+                interaction.guild.id,
+                member.id,
+                str(member),
+                "BAN",
+                f"Banned by {interaction.user}: {reason}"
+            )
+
             await interaction.followup.send(f"🔨 Banned {member}")
             await log(interaction.guild, f"BAN | {member} | {reason}")
+
         except Exception as e:
             logger.error(f"Ban error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="softban", description="Ban and immediately unban to clear messages")
+    # =========================
+    # 🧹 SOFTBAN
+    # =========================
+    @mod_group.command(name="softban", description="Ban and unban user")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(ban_members=True)
     async def mod_softban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
+
         try:
             await member.ban(reason=reason)
-            await member.unban(reason="Softban complete")
-            await add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
+            await interaction.guild.unban(member, reason="Softban complete")
+
+            await add_history(
+                interaction.guild.id,
+                member.id,
+                str(member),
+                "SOFTBAN",
+                f"Softbanned by {interaction.user}: {reason}"
+            )
+
             await interaction.followup.send(f"🧹 Softbanned {member}")
             await log(interaction.guild, f"SOFTBAN | {member}")
+
         except Exception as e:
             logger.error(f"Softban error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
+    # =========================
+    # 🔇 MUTE
+    # =========================
     @mod_group.command(name="mute", description="Timeout member")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_mute(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
+
         try:
-            await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
-            await add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
+            await member.timeout(
+                utcnow() + timedelta(minutes=minutes),
+                reason=reason
+            )
+
+            await add_history(
+                interaction.guild.id,
+                member.id,
+                str(member),
+                "MUTE",
+                f"Muted for {minutes}min by {interaction.user}: {reason}"
+            )
+
             await interaction.followup.send(f"🔇 Muted {member.mention} for {minutes} minutes")
-            await log(interaction.guild, f"MUTE | {member} | {minutes}min | {reason}")
+            await log(interaction.guild, f"MUTE | {member} | {minutes}min")
+
         except Exception as e:
             logger.error(f"Mute error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="unmute", description="Unmute member")
+    # =========================
+    # 🔊 UNMUTE
+    # =========================
+    @mod_group.command(name="unmute", description="Remove timeout")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_unmute(self, interaction: discord.Interaction, member: discord.Member):
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
+
         try:
             await member.timeout(None)
-            await add_history(interaction.guild.id, member.id, str(member), "UNMUTE", f"Unmuted by {interaction.user}")
+
+            await add_history(
+                interaction.guild.id,
+                member.id,
+                str(member),
+                "UNMUTE",
+                f"Unmuted by {interaction.user}"
+            )
+
             await interaction.followup.send(f"🔊 Unmuted {member.mention}")
             await log(interaction.guild, f"UNMUTE | {member}")
+
         except Exception as e:
             logger.error(f"Unmute error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
+    # =========================
+    # ⚠️ WARN
+    # =========================
     @mod_group.command(name="warn", description="Warn a member")
-    @app_commands.describe(member="Member to warn", reason="Reason for the warning")
     async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
-        
-        if not interaction.user.guild_permissions.moderate_members:
-            return await interaction.followup.send("❌ You don't have permission to warn members.", ephemeral=True)
-        
-        if member.top_role >= interaction.user.top_role:
-            return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
-        
+
         try:
-                await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
-                await add_history(interaction.guild.id, member.id, str(member), "WARN", f"Warned by {interaction.user}: {reason}")
-                
-                try:
-                    dm_embed = discord.Embed(
-                        title=f"You were warned in {interaction.guild.name}",
-                        description=f"**Reason:** {reason}",
-                        color=discord.Color.orange()
-                    )
-                    await member.send(embed=dm_embed)
-                except:
-                    pass
-                
-                embed = discord.Embed(title="⚠️ Warned User", color=discord.Color.orange())
-                embed.add_field(name="User", value=member.mention, inline=True)
-                embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-                embed.add_field(name="Reason", value=reason, inline=False)
-                embed.set_footer(text=f"User ID: {member.id}")
-                
-                try:
-                   await interaction.followup.send(embed=embed)
+            await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
+            await add_history(interaction.guild.id, member.id, str(member), "WARN", reason)
 
-                except Exception as e:
-                    logger.error(f"Warn error: {e}")
-                    await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+            try:
+                dm_embed = discord.Embed(
+                    title=f"You were warned in {interaction.guild.name}",
+                    description=f"Reason: {reason}",
+                    color=discord.Color.orange()
+                )
+                await member.send(embed=dm_embed)
+            except:
+                pass
 
-    @mod_group.command(name="kick", description="Kick a member from the server")
+            embed = discord.Embed(
+                title="⚠️ Warned User",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            await log(interaction.guild, f"WARN | {member} | {reason}")
+
+        except Exception as e:
+            logger.error(f"Warn error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    # =========================
+    # 👢 KICK
+    # =========================
+    @mod_group.command(name="kick", description="Kick a member")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(kick_members=True)
-    @app_commands.describe(member="Member to kick", reason="Reason for kicking")
     async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
 
-        if member.top_role >= interaction.user.top_role:
-            return await interaction.followup.send(
-                "❌ You cannot kick this member (role hierarchy).",
-                ephemeral=True
-            )
-
         try:
+            if member.top_role >= interaction.user.top_role:
+                return await interaction.followup.send(
+                    "❌ You cannot kick this member (role hierarchy).",
+                    ephemeral=True
+                )
+
             await member.kick(reason=reason)
 
             embed = discord.Embed(
                 title="👢 Kicked User",
                 color=discord.Color.red()
             )
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="User", value=member.mention)
+            embed.add_field(name="Moderator", value=interaction.user.mention)
             embed.add_field(name="Reason", value=reason, inline=False)
 
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
             await add_history(
                 interaction.guild.id,
                 member.id,
                 str(member),
                 "KICK",
-                f"Kicked by {interaction.user}: {reason}"
+                reason
             )
 
             await log(interaction.guild, f"KICK | {member} | {reason}")
 
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "❌ I don't have permission to kick that member.",
-                ephemeral=True
-            )
         except Exception as e:
             logger.error(f"Kick error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="clean", description="Clean a number of messages from a channel")
-    @app_commands.describe(amount="Number of messages to delete", member="Only delete messages from this member (optional)")
+    # =========================
+    # 🧽 CLEAN
+    # =========================
+    @mod_group.command(name="clean", description="Delete messages (optional user filter)")
     async def mod_clean(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
         await interaction.response.defer(ephemeral=True)
-        
-        if not interaction.user.guild_permissions.manage_messages:
-            return await interaction.followup.send("❌ You don't have permission to manage messages.", ephemeral=True)
-        
-        amount = min(amount, 100)
-        
-        def check(msg):
-            return True if member is None else msg.author.id == member.id
-        
+
         try:
+            amount = min(amount, 100)
+
+            def check(msg):
+                return True if member is None else msg.author.id == member.id
+
             deleted = await interaction.channel.purge(limit=amount, check=check)
-            await interaction.followup.send(f"✅ Deleted {len(deleted)} messages.", ephemeral=True)
+
+            await interaction.followup.send(f"✅ Deleted {len(deleted)} messages", ephemeral=True)
+
         except Exception as e:
             logger.error(f"Clean error: {e}")
             await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
