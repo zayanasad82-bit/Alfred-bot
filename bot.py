@@ -1729,7 +1729,7 @@ class Moderation(commands.Cog, name="moderation"):
     msg_group = app_commands.Group(name="msg", description="Message commands", parent=mod_group)
     logs_group = app_commands.Group(name="logs", description="Mod logs configuration", parent=mod_group)
     automod_group = app_commands.Group(name="automod", description="AutoModeration configuration", parent=mod_group)
-    warn_group = app_commands.Group(name="warn", description="Warning management", parent=mod_group)
+    warn_group = app_commands.Group(name="addwarn", description="Warning management", parent=mod_group)
 
     # =========================
     # MOD MAIN GROUP COMMANDS (ALL OWNER ONLY)
