@@ -1621,19 +1621,25 @@ _tasks_started = True
 
 logger.info(f"🤖 Logged in as {bot.user}")
 
-if not check_birthdays.is_running():
-    check_birthdays.start()
+try:
+    if "check_birthdays" in globals():
+        if not check_birthdays.is_running():
+            check_birthdays.start()
 
-if not generate_daily_summary.is_running():
-    generate_daily_summary.start()
+    if "generate_daily_summary" in globals():
+        if not generate_daily_summary.is_running():
+            generate_daily_summary.start()
 
-if not consolidate_memories.is_running():
-    consolidate_memories.start()
+    if "consolidate_memories" in globals():
+        if not consolidate_memories.is_running():
+            consolidate_memories.start()
+
+except Exception as e:
+    logger.error(f"Task startup error: {e}")
 
 logger.info("✅ Bot is fully online and tasks are running!")
 logger.info(f"   Servers: {len(bot.guilds)}")
 logger.info(f"   Commands: {len(bot.tree.get_commands())}")
-
 
 # =========================
 # 🛡️ MODERATION COG - ACTIONS
