@@ -1609,37 +1609,37 @@ Respond naturally and conversationally. If the user mentions something new about
     
     await bot.process_commands(message)
 
-#on ready
+# on ready
 @bot.event
 async def on_ready():
-global _tasks_started
+    global _tasks_started
 
-if _tasks_started:
-    return
+    if _tasks_started:
+        return
 
-_tasks_started = True
+    _tasks_started = True
 
-logger.info(f"🤖 Logged in as {bot.user}")
+    logger.info(f"🤖 Logged in as {bot.user}")
 
-try:
-    if "check_birthdays" in globals():
-        if not check_birthdays.is_running():
-            check_birthdays.start()
+    try:
+        if "check_birthdays" in globals():
+            if not check_birthdays.is_running():
+                check_birthdays.start()
 
-    if "generate_daily_summary" in globals():
-        if not generate_daily_summary.is_running():
-            generate_daily_summary.start()
+        if "generate_daily_summary" in globals():
+            if not generate_daily_summary.is_running():
+                generate_daily_summary.start()
 
-    if "consolidate_memories" in globals():
-        if not consolidate_memories.is_running():
-            consolidate_memories.start()
+        if "consolidate_memories" in globals():
+            if not consolidate_memories.is_running():
+                consolidate_memories.start()
 
-except Exception as e:
-    logger.error(f"Task startup error: {e}")
+    except Exception as e:
+        logger.error(f"Task startup error: {e}")
 
-logger.info("✅ Bot is fully online and tasks are running!")
-logger.info(f"   Servers: {len(bot.guilds)}")
-logger.info(f"   Commands: {len(bot.tree.get_commands())}")
+    logger.info("✅ Bot is fully online and tasks are running!")
+    logger.info(f"   Servers: {len(bot.guilds)}")
+    logger.info(f"   Commands: {len(bot.tree.get_commands())}")
 
 # =========================
 # 🛡️ MODERATION COG - ACTIONS
