@@ -1609,37 +1609,30 @@ Respond naturally and conversationally. If the user mentions something new about
     
     await bot.process_commands(message)
 
-# =========================
-# on_ready
-# =========================
-_tasks_started = False
-
+#on ready
 @bot.event
 async def on_ready():
-    global _tasks_started
+global _tasks_started
 
-    if _tasks_started:
-        return
-    _tasks_started = True
+if _tasks_started:
+    return
 
-    logger.info(f"🤖 Logged in as {bot.user}")
+_tasks_started = True
 
-    # Start background tasks safely
-    if not check_giveaways.is_running():
-        check_giveaways.start()
+logger.info(f"🤖 Logged in as {bot.user}")
 
-    if not check_birthdays.is_running():
-        check_birthdays.start()
+if not check_birthdays.is_running():
+    check_birthdays.start()
 
-    if not generate_daily_summary.is_running():
-        generate_daily_summary.start()
+if not generate_daily_summary.is_running():
+    generate_daily_summary.start()
 
-    if not consolidate_memories.is_running():
-        consolidate_memories.start()
+if not consolidate_memories.is_running():
+    consolidate_memories.start()
 
-    logger.info("✅ Bot is fully online and tasks are running!")
-    logger.info(f"   Servers: {len(bot.guilds)}")
-    logger.info(f"   Commands: {len(bot.tree.get_commands())}")
+logger.info("✅ Bot is fully online and tasks are running!")
+logger.info(f"   Servers: {len(bot.guilds)}")
+logger.info(f"   Commands: {len(bot.tree.get_commands())}")
 
 
 # =========================
