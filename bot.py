@@ -947,7 +947,6 @@ async def generate_daily_summary():
     
     for guild in bot.guilds:
         try:
-            most_active = await get_most_active_user(guild.id)
             
             joins = await count_events_for_date(guild.id, yesterday, "JOIN")
             leaves = await count_events_for_date(guild.id, yesterday, "LEAVE")
