@@ -68,7 +68,7 @@ class MyBot(commands.Bot):
 bot = MyBot(
     command_prefix="!",
     intents=intents,
-    application_id=1502734801696854139
+    application_id=1513901589570523216
 )
 
 START_TIME = datetime.now()
