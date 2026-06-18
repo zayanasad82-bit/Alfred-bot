@@ -1708,33 +1708,19 @@ async def on_ready():
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
 
+
 # =========================
-# 🎮 MODERATION COG (COMPLETE - ALL OWNER ONLY)
+# 🛡️ MODERATION COG - ACTIONS
 # =========================
 
-class Moderation(commands.Cog, name="moderation"):
-    """Complete moderation commands with owner-only access."""
+class ModerationActions(commands.Cog, name="moderation_actions"):
+    """Moderation action commands (ban, kick, mute, warn, etc.)."""
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-
-    # Main group
-    mod_group = app_commands.Group(name="mod", description="Moderation commands - Owner Only")
     
-    # Subgroups
-    role_group = app_commands.Group(name="role", description="Role management", parent=mod_group)
-    voice_group = app_commands.Group(name="voice", description="Voice moderation", parent=mod_group)
-    purge_group = app_commands.Group(name="purge", description="Message purging", parent=mod_group)
-    info_group = app_commands.Group(name="info", description="Server information", parent=mod_group)
-    msg_group = app_commands.Group(name="msg", description="Message commands", parent=mod_group)
-    logs_group = app_commands.Group(name="logs", description="Mod logs configuration", parent=mod_group)
-    automod_group = app_commands.Group(name="automod", description="AutoModeration configuration", parent=mod_group)
-    warn_group = app_commands.Group(name="addwarn", description="Warning management", parent=mod_group)
-
-    # =========================
-    # MOD MAIN GROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
-
+    mod_group = app_commands.Group(name="mod", description="Moderation actions - Owner Only")
+    
     @mod_group.command(name="clear", description="Delete messages")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -1803,7 +1789,6 @@ class Moderation(commands.Cog, name="moderation"):
             embed.add_field(name="Reason", value=reason, inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True)
             
-            # Log to mod channel
             log_embed = discord.Embed(
                 title="🔨 Member Banned",
                 color=discord.Color.red(),
@@ -2308,10 +2293,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Edit snipe error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # ROLE SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 🎭 ROLE MANAGEMENT COG
+# =========================
+
+class RoleManagement(commands.Cog, name="role_management"):
+    """Role management commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    role_group = app_commands.Group(name="role", description="Role management - Owner Only")
+    
     @role_group.command(name="nick", description="Change a member's nickname")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_nicknames=True)
@@ -2413,10 +2407,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Remove role error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # VOICE SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 🔊 VOICE MODERATION COG
+# =========================
+
+class VoiceModeration(commands.Cog, name="voice_moderation"):
+    """Voice moderation commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    voice_group = app_commands.Group(name="voice", description="Voice moderation - Owner Only")
+    
     @voice_group.command(name="kick", description="Disconnect a member from voice")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(move_members=True)
@@ -2560,10 +2563,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Voice unmute error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # PURGE SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 🧹 CHANNEL MANAGEMENT COG (Purge Commands)
+# =========================
+
+class ChannelManagement(commands.Cog, name="channel_management"):
+    """Channel management and purge commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    purge_group = app_commands.Group(name="purge", description="Message purging - Owner Only")
+    
     @purge_group.command(name="user", description="Delete messages from a specific user")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -2715,10 +2727,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Purge links error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # INFO SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 📊 INFORMATION COG
+# =========================
+
+class Information(commands.Cog, name="information"):
+    """Information and utility commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    info_group = app_commands.Group(name="info", description="Server information - Owner Only")
+    
     @info_group.command(name="server", description="Display detailed server information")
     @app_commands.check(owner_check)
     async def info_server(self, interaction: discord.Interaction):
@@ -2821,10 +2842,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Avatar error: {e}")
             await interaction.followup.send(f"❌ Error: {e}")
 
-    # =========================
-    # MESSAGE SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 💬 MESSAGE COMMANDS COG
+# =========================
+
+class MessageCommands(commands.Cog, name="message_commands"):
+    """Message-related commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    msg_group = app_commands.Group(name="msg", description="Message commands - Owner Only")
+    
     @msg_group.command(name="announce", description="Send an announcement embed")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -2913,10 +2943,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Poll error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # LOGS SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 📋 LOGS CONFIGURATION COG
+# =========================
+
+class LogsConfig(commands.Cog, name="logs_config"):
+    """Logs configuration commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    logs_group = app_commands.Group(name="logs", description="Mod logs configuration - Owner Only")
+    
     @logs_group.command(name="set", description="Set the mod logs channel")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(administrator=True)
@@ -3000,10 +3039,19 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"Logs status error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # AUTOMOD SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# 🛡️ AUTOMOD CONFIGURATION COG
+# =========================
+
+class AutoModConfig(commands.Cog, name="automod_config"):
+    """AutoMod configuration commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    automod_group = app_commands.Group(name="automod", description="AutoModeration configuration - Owner Only")
+    
     @automod_group.command(name="antispam", description="Configure anti-spam protection")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(administrator=True)
@@ -3132,21 +3180,78 @@ class Moderation(commands.Cog, name="moderation"):
             logger.error(f"AutoMod status error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    # =========================
-    # WARN SUBGROUP COMMANDS (ALL OWNER ONLY)
-    # =========================
 
+# =========================
+# ⚠️ WARNING MANAGEMENT COG
+# =========================
+
+class WarningManagement(commands.Cog, name="warning_management"):
+    """Warning management commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    warn_group = app_commands.Group(name="warn", description="Warning management - Owner Only")
+    
     @warn_group.command(name="add", description="Warn a member")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warn_add(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-        await self.mod_warn(interaction, member, reason)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
+                return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
+            
+            await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
+            await add_history(interaction.guild.id, member.id, str(member), "WARN", reason)
+            
+            try:
+                dm_embed = discord.Embed(title=f"You were warned in {interaction.guild.name}", description=f"Reason: {reason}", color=discord.Color.orange())
+                await member.send(embed=dm_embed)
+            except:
+                pass
+            
+            embed = discord.Embed(title="⚠️ User Warned", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="⚠️ Member Warned",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Warn add error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @warn_group.command(name="list", description="View a member's warnings")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warn_list(self, interaction: discord.Interaction, member: discord.Member):
-        await self.mod_warnings(interaction, member)
+        await interaction.response.defer(ephemeral=True)
+        try:
+            warnings = await get_warnings(member.id, interaction.guild.id)
+            if not warnings:
+                embed = discord.Embed(title=f"📋 Warnings for {member.display_name}", description="No warnings found.", color=discord.Color.green())
+                return await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            embed = discord.Embed(title=f"📋 Warnings for {member.display_name}", color=discord.Color.orange())
+            embed.set_footer(text=f"Total: {len(warnings)} warnings")
+            for i, (wid, reason, timestamp) in enumerate(warnings[:10], 1):
+                embed.add_field(name=f"#{i}", value=f"Reason: {reason}\nTime: {timestamp}", inline=False)
+            if len(warnings) > 10:
+                embed.add_field(name="...", value=f"And {len(warnings) - 10} more warnings.", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Warn list error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @warn_group.command(name="clear", description="Clear all warnings from a member")
     @app_commands.check(owner_check)
@@ -3715,14 +3820,14 @@ class Help(commands.Cog, name="help"):
         embed.add_field(
             name="🛡️ Moderation (Owner Only)",
             value="`/mod clear`, `/mod clearall`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod timeout`, `/mod untimeout`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
-                  "`/mod role nick`, `/mod role resetnick`, `/mod role give`, `/mod role remove`\n"
-                  "`/mod voice kick`, `/mod voice move`, `/mod voice deafen`, `/mod voice undeafen`, `/mod voice mute`, `/mod voice unmute`\n"
-                  "`/mod purge user`, `/mod purge bots`, `/mod purge images`, `/mod purge attachments`, `/mod purge embeds`, `/mod purge contains`, `/mod purge links`\n"
-                  "`/mod info server`, `/mod info user`, `/mod info role`, `/mod info channel`, `/mod info avatar`\n"
-                  "`/mod msg announce`, `/mod msg say`, `/mod msg poll`\n"
-                  "`/mod logs set`, `/mod logs disable`, `/mod logs status`\n"
-                  "`/mod automod antispam`, `/mod automod antiinvite`, `/mod automod antimentions`, `/mod automod badwords`, `/mod automod status`\n"
-                  "`/mod warn add`, `/mod warn list`, `/mod warn clear`, `/mod warn remove`",
+                  "`/role nick`, `/role resetnick`, `/role give`, `/role remove`\n"
+                  "`/voice kick`, `/voice move`, `/voice deafen`, `/voice undeafen`, `/voice mute`, `/voice unmute`\n"
+                  "`/purge user`, `/purge bots`, `/purge images`, `/purge attachments`, `/purge embeds`, `/purge contains`, `/purge links`\n"
+                  "`/info server`, `/info user`, `/info role`, `/info channel`, `/info avatar`\n"
+                  "`/msg announce`, `/msg say`, `/msg poll`\n"
+                  "`/logs set`, `/logs disable`, `/logs status`\n"
+                  "`/automod antispam`, `/automod antiinvite`, `/automod antimentions`, `/automod badwords`, `/automod status`\n"
+                  "`/warn add`, `/warn list`, `/warn clear`, `/warn remove`",
             inline=False
         )
         embed.add_field(
@@ -3842,7 +3947,15 @@ class HistoryCommands(commands.Cog, name="history"):
 async def main():
     async with bot:
         await db.connect()
-        await bot.add_cog(Moderation(bot))
+        await bot.add_cog(ModerationActions(bot))
+        await bot.add_cog(RoleManagement(bot))
+        await bot.add_cog(VoiceModeration(bot))
+        await bot.add_cog(ChannelManagement(bot))
+        await bot.add_cog(Information(bot))
+        await bot.add_cog(MessageCommands(bot))
+        await bot.add_cog(LogsConfig(bot))
+        await bot.add_cog(AutoModConfig(bot))
+        await bot.add_cog(WarningManagement(bot))
         await bot.add_cog(Fun(bot))
         await bot.add_cog(Economy(bot))
         await bot.add_cog(Giveaway(bot))
