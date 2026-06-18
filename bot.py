@@ -848,160 +848,95 @@ welcome_configs = {}
 active_giveaways = {}  # guild_id -> list of giveaway dicts
 
 # =========================
-# BACKGROUND TASKS
+# DAILY SUMMARY TASK
 # =========================
-@tasks.loop(minutes=1)
-async def check_giveaways():
-    """Check and end expired giveaways."""
-    now_ts = time.time()
-    
-    for guild_id, giveaways in list(active_giveaways.items()):
-        for g in giveaways[:]:
-            if now_ts >= g.get("end_time", 0) and not g.get("ended"):
-                g["ended"] = True
-                try:
-                    await end_giveaway(guild_id, g)
-                except Exception as e:
-                    logger.error(f"Error ending giveaway in guild {guild_id}: {e}")
-
-async def end_giveaway(guild_id: int, g: dict):
-    """End a giveaway and announce winners."""
-    guild = bot.get_guild(guild_id)
-    if not guild:
-        return
-    
-    channel = guild.get_channel(g["channel_id"])
-    if not channel:
-        return
-    
-    try:
-        msg = await channel.fetch_message(g["message_id"])
-    except Exception as e:
-        logger.error(f"Could not fetch giveaway message {g['message_id']}: {e}")
-        return
-    
-    entries = g.get("entries", [])
-    
-    if not entries:
-        try:
-            embed = msg.embeds[0]
-            embed.title = "🎉 Giveaway Ended - No Winners"
-            embed.color = discord.Color.red()
-            await msg.edit(embed=embed, view=None)
-        except Exception as e:
-            logger.error(f"Error updating giveaway message: {e}")
-        return
-    
-    winners_count = min(g["winners"], len(entries))
-    winners = random.sample(entries, winners_count)
-    
-    try:
-        embed = msg.embeds[0]
-        embed.title = "🎉 Giveaway Ended"
-        embed.color = discord.Color.red()
-        embed.clear_fields()
-        embed.add_field(name="Winner(s)", value=", ".join(f"<@{w}>" for w in winners), inline=False)
-        embed.add_field(name="Prize", value=g["prize"], inline=False)
-        await msg.edit(embed=embed, view=None)
-        
-        await channel.send(f"🎉 Congratulations {' '.join(f'<@{w}>' for w in winners)}! You won **{g['prize']}**!")
-        
-        for winner_id in winners:
-            try:
-                winner = guild.get_member(winner_id)
-                if winner:
-                    await add_history(guild_id, winner_id, str(winner), "GIVEAWAY_WIN", f"Won {g['prize']}")
-            except Exception as e:
-                logger.error(f"Error logging giveaway win for {winner_id}: {e}")
-    except Exception as e:
-        logger.error(f"Error during giveaway conclusion: {e}")
-    
-    # Remove from active list
-    for gid, giveaways in active_giveaways.items():
-        if g in giveaways:
-            giveaways.remove(g)
-
-@tasks.loop(minutes=5)
-async def check_birthdays():
-    """Check for birthdays and announce them."""
-    today = datetime.now().strftime("%m-%d")
-    results = await db.fetchall(
-        "SELECT user_id, guild_id FROM birthdays WHERE date=?",
-        (today,)
-    )
-    for user_id, guild_id in results:
-        guild = bot.get_guild(guild_id)
-        if guild:
-            channel = discord.utils.get(guild.text_channels, name="general")
-            if channel:
-                try:
-                    await channel.send(f"🎂 Happy Birthday <@{user_id}>! 🎉")
-                    await add_history(guild_id, user_id, str(user_id), "BIRTHDAY", "Birthday announced")
-                except Exception as e:
-                    logger.error(f"Birthday announcement error: {e}")
-
 @tasks.loop(hours=24)
 async def generate_daily_summary():
     """Generate and post daily server summary."""
     yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-    
+
     for guild in bot.guilds:
         try:
-            
             joins = await count_events_for_date(guild.id, yesterday, "JOIN")
             leaves = await count_events_for_date(guild.id, yesterday, "LEAVE")
             warns = await count_events_for_date(guild.id, yesterday, "WARN")
             deletes = await count_events_for_date(guild.id, yesterday, "DELETE")
             kicks = await count_events_for_date(guild.id, yesterday, "KICK")
             bans = await count_events_for_date(guild.id, yesterday, "BAN")
-            
+
             result = await db.fetchone(
                 "SELECT SUM(count) FROM message_stats WHERE guild_id=? AND date=?",
                 (guild.id, yesterday)
             )
-            total_msgs = result[0] or 0
-            
+            total_msgs = result[0] if result and result[0] else 0
+
+            # Find most active user
             most_active_name = "No one"
-            if most_active:
-                user = guild.get_member(most_active[0])
-                if user:
-                    most_active_name = user.display_name
-            
+            most_active_user_id = 0
+
+            result = await db.fetchone(
+                """
+                SELECT user_id, count
+                FROM message_stats
+                WHERE guild_id=? AND date=?
+                ORDER BY count DESC
+                LIMIT 1
+                """,
+                (guild.id, yesterday)
+            )
+
+            if result:
+                most_active_user_id = result[0]
+                member = guild.get_member(most_active_user_id)
+
+                if member:
+                    most_active_name = member.display_name
+                else:
+                    most_active_name = f"User ID {most_active_user_id}"
+
             summary = (
                 f"📊 **Daily Summary - {yesterday}**\n"
                 f"📝 Total Messages: {total_msgs:,}\n"
-                f"👋 Joins: {joins} | 👋 Leaves: {leaves}\n"
+                f"👋 Joins: {joins} | 🚪 Leaves: {leaves}\n"
                 f"⚠️ Warnings: {warns} | 🗑️ Deleted: {deletes}\n"
                 f"👢 Kicks: {kicks} | 🔨 Bans: {bans}\n"
                 f"🏆 Most Active: {most_active_name}"
             )
-            
+
             await db.execute(
-                """INSERT INTO daily_summaries (guild_id, date, summary, total_messages, most_active_user_id, top_topic, generated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (guild.id, yesterday, summary, total_msgs, most_active[0] if most_active else 0, "", datetime.now().isoformat())
+                """
+                INSERT INTO daily_summaries
+                (
+                    guild_id,
+                    date,
+                    summary,
+                    total_messages,
+                    most_active_user_id,
+                    top_topic,
+                    generated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild.id,
+                    yesterday,
+                    summary,
+                    total_msgs,
+                    most_active_user_id,
+                    "",
+                    datetime.now().isoformat()
+                )
             )
+
             await db.commit()
-            
+
             channel = discord.utils.get(guild.text_channels, name="mod-logs")
             if channel and total_msgs > 0:
                 await channel.send(summary)
+
         except Exception as e:
             logger.error(f"Error generating daily summary for {guild.id}: {e}")
-
-@tasks.loop(hours=6)
-async def consolidate_memories():
-    """Clean up old, low-importance memories."""
-    cutoff = (datetime.now() - timedelta(days=30)).isoformat()
-    await db.execute(
-        "DELETE FROM ai_memories WHERE importance <= 1 AND last_accessed < ?",
-        (cutoff,)
-    )
-    deleted = db._conn.total_changes if db._conn else 0
-    await db.commit()
-    if deleted > 0:
-        logger.info(f"🧹 Consolidated old memories")
-
+            
 # =========================
 # TICKET VIEWS
 # =========================
