@@ -1675,7 +1675,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Clear error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name=thanos_snap", description="Wipe channel")
+    @mod_group.command(name="thanos_snap", description="Boom Bazooka, Channel Gone")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_clearall(self, interaction: discord.Interaction):
