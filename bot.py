@@ -1675,7 +1675,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Clear error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="clearall", description="Wipe channel")
+    @mod_group.command(name="ThanosSnap", description="Wipe channel")
     @app_commands.check(owner_check)
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_clearall(self, interaction: discord.Interaction):
@@ -3751,7 +3751,7 @@ class Help(commands.Cog, name="help"):
         )
         embed.add_field(
             name="🛡️ Moderation (Owner Only)",
-            value="`/mod clear`, `/mod clearall`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod timeout`, `/mod untimeout`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
+            value="`/mod clear`, `/mod ThanosSnap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod timeout`, `/mod untimeout`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
                   "`/role nick`, `/role resetnick`, `/role give`, `/role remove`\n"
                   "`/voice kick`, `/voice move`, `/voice deafen`, `/voice undeafen`, `/voice mute`, `/voice unmute`\n"
                   "`/purge user`, `/purge bots`, `/purge images`, `/purge attachments`, `/purge embeds`, `/purge contains`, `/purge links`\n"
