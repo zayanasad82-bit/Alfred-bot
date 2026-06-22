@@ -555,166 +555,152 @@ async def log_event(guild, event_type, title, description, color=discord.Color.b
 # =========================
 # AI CONTEXT BUILDING
 # =========================
-async def build_ai_context(guild_id, channel_id, user_id, username, message_content):
-    mem = await get_memory(user_id)
-    user_name = mem[0] if mem else username
-    bot_name = mem[1] if mem else "AI Bot"
-    
-    ai_memories = await get_ai_memories(guild_id, user_id)
-    traits = await get_user_personality(guild_id, user_id)
-    recent_msgs = await get_recent_conversation(guild_id, channel_id, limit=10)
-    user_events = await get_user_history(user_id, guild_id, limit=5)
-    
-    result = await db.fetchone(
-        "SELECT level FROM leveling WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
-    )
-    level = result[0] if result else 0
-    
-    bal = await get_balance_db(user_id, guild_id)
-    
-    await extract_memory_facts(guild_id, user_id, message_content)
-    
-    context_parts = []
-    context_parts.append(f"User's name: {user_name}")
-    context_parts.append(f"Bot's name: {bot_name}")
-    guild_obj = bot.get_guild(guild_id)
-    context_parts.append(f"Server: {guild_obj.name if guild_obj else 'Unknown'}")
-    context_parts.append(f"User's Level: {level}")
-    context_parts.append(f"User's Wallet Balance: ${bal['wallet']:,}")
-    context_parts.append(f"User's Bank Balance: ${bal['bank']:,}")
-    
-    if traits:
-        trait_str = " | ".join([f"{t}: {v}" for t, v in traits])
-        context_parts.append(f"Known traits about user: {trait_str}")
-    
-    if ai_memories:
-        memory_str = "; ".join([f"{k}: {v}" for k, v, imp, _, _ in ai_memories if imp >= 2])
-        if memory_str:
-            context_parts.append(f"Things I remember about this user: {memory_str}")
-    
-    if recent_msgs:
-        conv_lines = []
-        for role, content, ts, uid in recent_msgs:
-            name = "User" if role == "user" else bot_name
-            conv_lines.append(f"{name}: {content[:200]}")
-        context_parts.append(f"Recent conversation:\n" + "\n".join(conv_lines))
-    
-    if user_events:
-        event_lines = [f"- {e}: {d[:80]}" for e, d, _ in user_events[:3]]
-        context_parts.append(f"Recent user activity: " + " | ".join(event_lines))
-    
-    return "\n".join(context_parts)
+async def build_ai_context(
+    guild_id: int,
+    channel_id: int,
+    user_id: int,
+    username: str,
+    message_content: str
+):
+    # Default names
+    user_name = username
+    bot_name = "AI Bot"
 
-async def extract_memory_facts(guild_id, user_id, message):
-    msg_lower = message.lower()
-    
-    name_patterns = [
-        (r"my name is (\w+)", "preferred_name"),
-        (r"call me (\w+)", "preferred_name"),
-        (r"i'm (\w+)", "preferred_name"),
-        (r"i am (\w+)", "preferred_name"),
-    ]
-    for pattern, key in name_patterns:
-        m = re.search(pattern, msg_lower)
-        if m and m.group(1).lower() not in ("a", "the", "an", "just", "not", "going", "trying"):
-            await save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=5)
-            break
-    
-    age_m = re.search(r"i(?:')?m (\d+) (?:years old|yr old|yo)", msg_lower)
-    if age_m:
-        await save_ai_memory(guild_id, user_id, "age", age_m.group(1), importance=4)
-    
-    loc_m = re.search(r"i(?:')?m (?:from|in) (\w+(?:\s+\w+)?)", msg_lower)
-    if loc_m:
-        await save_ai_memory(guild_id, user_id, "location", loc_m.group(1).title(), importance=3)
-    
-    hobby_patterns = [
-        (r"i (?:like|love|enjoy) (\w+(?: \w+)?)", "hobby"),
-        (r"my (?:hobby|favorite) (?:is|are) (\w+(?: \w+)?)", "hobby"),
-        (r"i (?:play|code|draw|write|read|game|stream) (\w+(?: \w+)?)", "interest"),
-    ]
-    for pattern, key in hobby_patterns:
-        m = re.search(pattern, msg_lower)
-        if m:
-            await save_ai_memory(guild_id, user_id, key, m.group(1).title(), importance=2)
-    
-    mood_m = re.search(r"i(?:')?m (?:feeling|so|very|really) (\w+)", msg_lower)
-    if mood_m:
-        await save_ai_memory(guild_id, user_id, "current_mood", mood_m.group(1), importance=1)
-        await save_personality_trait(guild_id, user_id, "recent_mood", mood_m.group(1))
-    
-    pref_patterns = [
-        (r"i (?:don't|do not) like (\w+(?: \w+)?)", "dislikes"),
-        (r"i love (\w+(?: \w+)?)", "likes"),
-    ]
-    for pattern, default_key in pref_patterns:
-        m = re.search(pattern, msg_lower)
-        if m:
-            await save_ai_memory(guild_id, user_id, default_key, m.group(1).title(), importance=2)
-    
-    work_m = re.search(r"i (?:work|study) (?:at|in|as) (\w+(?: \w+)?)", msg_lower)
-    if work_m:
-        await save_ai_memory(guild_id, user_id, "occupation", work_m.group(1).title(), importance=3)
-
-_ai_response_cache = {}
-_ai_rate_limit = defaultdict(float)
-
-async def get_ai_response(prompt, temperature=0.7, max_retries=2):
-    if not client:
-        return "⚠️ AI is not configured (missing GEMINI_API_KEY)."
-    
-    cache_key = hash(prompt[:500])
-    
-    if cache_key in _ai_response_cache:
-        cached_time, cached_response = _ai_response_cache[cache_key]
-        if (datetime.now() - cached_time).seconds < 5:
-            return cached_response
-    
-    last_error = None
-    for attempt in range(max_retries):
-        try:
-            response = client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-                config={"temperature": temperature, "max_output_tokens": 500}
-            )
-            reply = response.text
-            
-            _ai_response_cache[cache_key] = (datetime.now(), reply)
-            
-            if len(_ai_response_cache) > 100:
-                oldest_key = min(_ai_response_cache.keys(), key=lambda k: _ai_response_cache[k][0])
-                del _ai_response_cache[oldest_key]
-            
-            return reply
-            
-        except Exception as e:
-            last_error = e
-            logger.error(f"AI response attempt {attempt+1} failed: {e}")
-            await asyncio.sleep(0.5 * (attempt + 1))
-    
-    return f"⚠️ AI Error: {last_error}"
-
-async def summarize_conversation(conversation_text):
-    if len(conversation_text) < 500:
-        return conversation_text
-    
-    if not client:
-        return conversation_text[-500:]
-    
-    prompt = f"""Summarize this conversation concisely, keeping key facts, preferences, and topics discussed:
-
-{conversation_text}
-
-Summary:"""
-    
+    # Get AI memories safely
     try:
-        response = client.models.generate_content(model=MODEL_NAME, contents=prompt)
-        return response.text[:500]
+        ai_memories = await get_ai_memories(guild_id, user_id)
+    except Exception:
+        ai_memories = []
+
+    # Use preferred name from memories if available
+    for key, value, *_ in ai_memories:
+        if key == "preferred_name":
+            user_name = value
+            break
+
+    # Get personality traits
+    try:
+        traits = await get_user_personality(guild_id, user_id)
+    except Exception:
+        traits = []
+
+    # Get recent conversation
+    try:
+        recent_msgs = await get_recent_conversation(
+            guild_id,
+            channel_id,
+            limit=10
+        )
+    except Exception:
+        recent_msgs = []
+
+    # Get user history
+    try:
+        user_events = await get_user_history(
+            user_id,
+            guild_id,
+            limit=5
+        )
+    except Exception:
+        user_events = []
+
+    # Level
+    level = 0
+    try:
+        result = await db.fetchone(
+            "SELECT level FROM leveling WHERE user_id=? AND guild_id=?",
+            (user_id, guild_id)
+        )
+        if result:
+            level = result[0]
+    except Exception:
+        pass
+
+    # Balance
+    try:
+        bal = await get_balance_db(user_id, guild_id)
+    except Exception:
+        bal = {"wallet": 0, "bank": 0}
+
+    # Extract memory facts
+    try:
+        await extract_memory_facts(
+            guild_id,
+            user_id,
+            message_content
+        )
     except Exception as e:
-        logger.error(f"Summarize error: {e}")
-        return conversation_text[-500:]
+        logger.error(f"Memory extraction error: {e}")
+
+    guild_obj = bot.get_guild(guild_id)
+
+    context_parts = [
+        f"User name: {user_name}",
+        f"Bot name: {bot_name}",
+        f"Server: {guild_obj.name if guild_obj else 'Unknown'}",
+        f"User Level: {level}",
+        f"Wallet Balance: ${bal['wallet']:,}",
+        f"Bank Balance: ${bal['bank']:,}"
+    ]
+
+    # Traits
+    if traits:
+        trait_str = " | ".join(
+            f"{trait}: {value}"
+            for trait, value in traits
+        )
+        context_parts.append(
+            f"Known traits: {trait_str}"
+        )
+
+    # Memories
+    if ai_memories:
+        memory_list = []
+
+        for memory in ai_memories:
+            key, value, importance, *_ = memory
+
+            if importance >= 2:
+                memory_list.append(
+                    f"{key}: {value}"
+                )
+
+        if memory_list:
+            context_parts.append(
+                "Memories: " + "; ".join(memory_list)
+            )
+
+    # Conversation history
+    if recent_msgs:
+        lines = []
+
+        for role, content, ts, uid in recent_msgs:
+            speaker = user_name if role == "user" else bot_name
+
+            lines.append(
+                f"{speaker}: {content[:200]}"
+            )
+
+        context_parts.append(
+            "Recent conversation:\n" +
+            "\n".join(lines)
+        )
+
+    # Events
+    if user_events:
+        event_lines = []
+
+        for event, description, _ in user_events[:3]:
+            event_lines.append(
+                f"{event}: {description[:80]}"
+            )
+
+        context_parts.append(
+            "Recent activity: " +
+            " | ".join(event_lines)
+        )
+
+    return "\n".join(context_parts)
 
 # =========================
 # XP SYSTEM
