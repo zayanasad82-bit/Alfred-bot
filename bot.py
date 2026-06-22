@@ -15,7 +15,7 @@ import uuid
 import logging
 import traceback
 from collections import defaultdict, deque
-from typing import Optional, List
+from typing import Optional, List, Dict, Any, Tuple
 
 from google import genai
 from pypdf import PdfReader
@@ -48,7 +48,6 @@ MODEL_NAME = "gemini-2.5-flash"
 # =========================
 # DISCORD BOT SETUP
 # =========================
-
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
@@ -56,15 +55,11 @@ intents.guilds = True
 intents.presences = True
 intents.voice_states = True
 
-
-# BOT CLASS
 class MyBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
         logger.info("✅ Slash commands synced")
 
-
-# BOT INSTANCE
 bot = MyBot(
     command_prefix="!",
     intents=intents,
@@ -72,6 +67,7 @@ bot = MyBot(
 )
 
 START_TIME = datetime.now()
+_tasks_started = False
 
 # =========================
 # ASYNC DATABASE WRAPPER
@@ -180,12 +176,6 @@ class AsyncDatabase:
                 guild_id INTEGER, user_id INTEGER,
                 trait TEXT, value TEXT,
                 PRIMARY KEY (guild_id, user_id, trait)
-            )""",
-            """CREATE TABLE IF NOT EXISTS levels (
-                user_id INTEGER, guild_id INTEGER,
-                xp INTEGER DEFAULT 0, level INTEGER DEFAULT 1,
-                total_messages INTEGER DEFAULT 0, last_message INTEGER DEFAULT 0,
-                PRIMARY KEY (user_id, guild_id)
             )""",
             """CREATE TABLE IF NOT EXISTS mod_logs_config (
                 guild_id INTEGER PRIMARY KEY,
@@ -553,6 +543,151 @@ async def log_event(guild, event_type, title, description, color=discord.Color.b
     await log_to_mod_channel(guild, embed)
 
 # =========================
+# AI MEMORY FUNCTIONS
+# =========================
+
+async def get_memory(user_id: int) -> Tuple[Optional[str], Optional[str]]:
+    """Get user's memory from database."""
+    result = await db.fetchone("SELECT user_name, bot_name FROM memory WHERE user_id=?", (user_id,))
+    if result:
+        return result[0], result[1]
+    return None, None
+
+async def save_memory(user_id: int, user_name: str = None, bot_name: str = None):
+    """Save or update user's memory."""
+    existing = await db.fetchone("SELECT user_name, bot_name FROM memory WHERE user_id=?", (user_id,))
+    if existing:
+        current_user, current_bot = existing
+        new_user = user_name if user_name is not None else current_user
+        new_bot = bot_name if bot_name is not None else current_bot
+        await db.execute(
+            "UPDATE memory SET user_name=?, bot_name=? WHERE user_id=?",
+            (new_user, new_bot, user_id)
+        )
+    else:
+        await db.execute(
+            "INSERT INTO memory (user_id, user_name, bot_name) VALUES (?, ?, ?)",
+            (user_id, user_name or "User", bot_name or "AI Bot")
+        )
+    await db.commit()
+
+async def get_ai_memories(guild_id: int, user_id: int, limit: int = 20):
+    """Get AI memories for a user."""
+    return await db.fetchall(
+        """SELECT key, value, importance, created_at, last_accessed 
+           FROM ai_memories 
+           WHERE guild_id=? AND user_id=? 
+           ORDER BY importance DESC, last_accessed DESC 
+           LIMIT ?""",
+        (guild_id, user_id, limit)
+    )
+
+async def save_ai_memory(guild_id: int, user_id: int, key: str, value: str, importance: int = 1):
+    """Save or update an AI memory."""
+    await db.execute(
+        """INSERT INTO ai_memories (guild_id, user_id, key, value, importance, created_at, last_accessed)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(guild_id, user_id, key) 
+           DO UPDATE SET value=?, importance=?, last_accessed=?""",
+        (guild_id, user_id, key, value, importance, datetime.now().isoformat(), datetime.now().isoformat(),
+         value, importance, datetime.now().isoformat())
+    )
+    await db.commit()
+
+async def get_user_personality(guild_id: int, user_id: int):
+    """Get user personality traits."""
+    return await db.fetchall(
+        "SELECT trait, value FROM ai_personality WHERE guild_id=? AND user_id=?",
+        (guild_id, user_id)
+    )
+
+async def save_user_personality(guild_id: int, user_id: int, trait: str, value: str):
+    """Save a personality trait for a user."""
+    await db.execute(
+        """INSERT INTO ai_personality (guild_id, user_id, trait, value)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(guild_id, user_id, trait)
+           DO UPDATE SET value=?""",
+        (guild_id, user_id, trait, value, value)
+    )
+    await db.commit()
+
+async def get_recent_conversation(guild_id: int, channel_id: int, limit: int = 10):
+    """Get recent conversation history."""
+    return await db.fetchall(
+        """SELECT role, content, timestamp, user_id 
+           FROM ai_conversations 
+           WHERE guild_id=? AND channel_id=? 
+           ORDER BY id DESC LIMIT ?""",
+        (guild_id, channel_id, limit)
+    )
+
+async def save_conversation(guild_id: int, channel_id: int, user_id: int, role: str, content: str):
+    """Save a conversation message."""
+    await db.execute(
+        """INSERT INTO ai_conversations (guild_id, channel_id, user_id, role, content, timestamp)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (guild_id, channel_id, user_id, role, content[:1000], datetime.now().isoformat())
+    )
+    await db.commit()
+
+async def extract_memory_facts(guild_id: int, user_id: int, content: str):
+    """Extract and store memory facts from user messages."""
+    # Simple pattern-based memory extraction
+    patterns = {
+        "name": r"(?:my name is|call me|I'm|i am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        "age": r"(?:i am|I'm|age)\s+(\d+)\s+(?:years old|yo|y/o)",
+        "birthday": r"(?:my birthday is|born on)\s+([A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th)?)",
+        "location": r"(?:i (?:live|am) (?:in|from)|location is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        "job": r"(?:my job is|i work (?:as|in)|profession|occupation)\s+(?:a|an)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        "favorite": r"(?:my favorite|i love|i like)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+        "preferred_name": r"(?:call me|prefer|preferred name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
+    }
+    
+    content_lower = content.lower()
+    for key, pattern in patterns.items():
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            importance = 2 if key in ["name", "preferred_name"] else 1
+            await save_ai_memory(guild_id, user_id, key, value, importance)
+            
+            # Also save as personality trait
+            if key in ["name", "age", "location", "job", "preferred_name"]:
+                trait_name = "preferred_name" if key == "name" else key
+                await save_user_personality(guild_id, user_id, trait_name, value)
+
+async def query_ai(prompt: str) -> str:
+    """Query the AI API for a response."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful Discord bot assistant. Keep responses concise and friendly."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            
+            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    error_text = await resp.text()
+                    logger.error(f"AI API error: {resp.status} - {error_text}")
+                    return f"AI service returned status {resp.status}"
+    except Exception as e:
+        logger.error(f"AI query error: {e}")
+        return f"AI error: {str(e)}"
+
+# =========================
 # AI CONTEXT BUILDING
 # =========================
 async def build_ai_context(
@@ -560,51 +695,33 @@ async def build_ai_context(
     channel_id: int,
     user_id: int,
     username: str,
-    message_content: str
-):
-    # Default names
+    message_content: str,
+    conversation_history: List[Dict] = None
+) -> Tuple[str, Dict]:
+    """Build comprehensive AI context with memory, personality, and history."""
     user_name = username
     bot_name = "AI Bot"
-
-    # Get AI memories safely
+    memories = []
+    traits = []
+    
+    # Get AI memories
     try:
-        ai_memories = await get_ai_memories(guild_id, user_id)
-    except Exception:
-        ai_memories = []
-
-    # Use preferred name from memories if available
-    for key, value, *_ in ai_memories:
-        if key == "preferred_name":
-            user_name = value
-            break
-
+        ai_memories = await get_ai_memories(guild_id, user_id, limit=15)
+        for key, value, importance, created_at, last_accessed in ai_memories:
+            memories.append({"key": key, "value": value, "importance": importance})
+            if key == "preferred_name":
+                user_name = value
+    except Exception as e:
+        logger.error(f"Error getting AI memories: {e}")
+    
     # Get personality traits
     try:
-        traits = await get_user_personality(guild_id, user_id)
-    except Exception:
-        traits = []
-
-    # Get recent conversation
-    try:
-        recent_msgs = await get_recent_conversation(
-            guild_id,
-            channel_id,
-            limit=10
-        )
-    except Exception:
-        recent_msgs = []
-
-    # Get user history
-    try:
-        user_events = await get_user_history(
-            user_id,
-            guild_id,
-            limit=5
-        )
-    except Exception:
-        user_events = []
-
-    # Level
+        traits_data = await get_user_personality(guild_id, user_id)
+        traits = [{"trait": t[0], "value": t[1]} for t in traits_data]
+    except Exception as e:
+        logger.error(f"Error getting personality: {e}")
+    
+    # Get level
     level = 0
     try:
         result = await db.fetchone(
@@ -615,92 +732,72 @@ async def build_ai_context(
             level = result[0]
     except Exception:
         pass
-
-    # Balance
+    
+    # Get balance
     try:
-        bal = await get_balance_db(user_id, guild_id)
-    except Exception:
-        bal = {"wallet": 0, "bank": 0}
-
-    # Extract memory facts
-    try:
-        await extract_memory_facts(
-            guild_id,
-            user_id,
-            message_content
+        bal_result = await db.fetchone(
+            "SELECT balance, bank FROM economy WHERE user_id=? AND guild_id=?",
+            (user_id, guild_id)
         )
+        if bal_result:
+            wallet, bank = bal_result
+        else:
+            wallet, bank = 0, 0
+    except Exception:
+        wallet, bank = 0, 0
+    
+    # Extract memory facts from current message
+    try:
+        await extract_memory_facts(guild_id, user_id, message_content)
     except Exception as e:
         logger.error(f"Memory extraction error: {e}")
-
-    guild_obj = bot.get_guild(guild_id)
-
+    
+    # Build context
     context_parts = [
-        f"User name: {user_name}",
-        f"Bot name: {bot_name}",
-        f"Server: {guild_obj.name if guild_obj else 'Unknown'}",
-        f"User Level: {level}",
-        f"Wallet Balance: ${bal['wallet']:,}",
-        f"Bank Balance: ${bal['bank']:,}"
+        f"User: {user_name}",
+        f"Bot: {bot_name}",
+        f"Level: {level}",
+        f"Wallet: ${wallet:,}",
+        f"Bank: ${bank:,}"
     ]
-
-    # Traits
+    
+    # Add personality traits
     if traits:
-        trait_str = " | ".join(
-            f"{trait}: {value}"
-            for trait, value in traits
-        )
-        context_parts.append(
-            f"Known traits: {trait_str}"
-        )
-
-    # Memories
-    if ai_memories:
-        memory_list = []
-
-        for memory in ai_memories:
-            key, value, importance, *_ = memory
-
-            if importance >= 2:
-                memory_list.append(
-                    f"{key}: {value}"
-                )
-
-        if memory_list:
-            context_parts.append(
-                "Memories: " + "; ".join(memory_list)
-            )
-
-    # Conversation history
-    if recent_msgs:
-        lines = []
-
-        for role, content, ts, uid in recent_msgs:
-            speaker = user_name if role == "user" else bot_name
-
-            lines.append(
-                f"{speaker}: {content[:200]}"
-            )
-
-        context_parts.append(
-            "Recent conversation:\n" +
-            "\n".join(lines)
-        )
-
-    # Events
-    if user_events:
-        event_lines = []
-
-        for event, description, _ in user_events[:3]:
-            event_lines.append(
-                f"{event}: {description[:80]}"
-            )
-
-        context_parts.append(
-            "Recent activity: " +
-            " | ".join(event_lines)
-        )
-
-    return "\n".join(context_parts)
+        trait_str = " | ".join(f"{t['trait']}: {t['value']}" for t in traits[:5])
+        context_parts.append(f"Personality: {trait_str}")
+    
+    # Add important memories
+    important_memories = [m for m in memories if m["importance"] >= 2]
+    if important_memories:
+        memory_str = "; ".join(f"{m['key']}: {m['value']}" for m in important_memories[:5])
+        context_parts.append(f"Memories: {memory_str}")
+    
+    # Add conversation history
+    if conversation_history:
+        recent = conversation_history[-10:] if len(conversation_history) > 10 else conversation_history
+        history_lines = []
+        for entry in recent:
+            role = "User" if entry.get("role") == "user" else "Bot"
+            content = entry.get("content", "")[:200]
+            if content:
+                history_lines.append(f"{role}: {content}")
+        if history_lines:
+            context_parts.append("Recent conversation:\n" + "\n".join(history_lines))
+    
+    context = "\n".join(context_parts)
+    
+    # Return context and metadata
+    metadata = {
+        "user_name": user_name,
+        "bot_name": bot_name,
+        "memories": memories,
+        "traits": traits,
+        "level": level,
+        "wallet": wallet,
+        "bank": bank
+    }
+    
+    return context, metadata
 
 # =========================
 # XP SYSTEM
@@ -751,26 +848,28 @@ async def add_xp(user_id, guild_id):
     await db.commit()
     return None
 
-async def get_balance(user_id, guild_id):
+async def get_balance_simple(user_id: int) -> Tuple[int, int]:
+    """Get user's balance from database."""
     result = await db.fetchone(
-        "SELECT balance, bank FROM economy WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
+        "SELECT balance, bank FROM economy WHERE user_id=?",
+        (user_id,)
     )
     if result:
-        return {'wallet': result[0], 'bank': result[1]}
+        return result[0], result[1]
     await db.execute(
-        "INSERT INTO economy (user_id, guild_id, balance, bank) VALUES (?, ?, 0, 0)",
-        (user_id, guild_id)
+        "INSERT INTO economy (user_id, balance, bank) VALUES (?, 0, 0)",
+        (user_id,)
     )
     await db.commit()
-    return {'wallet': 0, 'bank': 0}
+    return 0, 0
 
-async def update_balance(user_id, guild_id, amount, account='wallet'):
-    await db.execute(
-        f"UPDATE economy SET {account} = {account} + ? WHERE user_id=? AND guild_id=?",
-        (amount, user_id, guild_id)
+async def count_events_for_date(guild_id: int, date: str, event_type: str) -> int:
+    """Count events of a specific type for a date."""
+    result = await db.fetchone(
+        "SELECT COUNT(*) FROM history WHERE guild_id=? AND event_type=? AND timestamp LIKE ?",
+        (guild_id, event_type, f"{date}%")
     )
-    await db.commit()
+    return result[0] if result else 0
 
 # =========================
 # OWNER CHECK
@@ -784,43 +883,8 @@ def is_owner():
     return app_commands.check(predicate)
 
 # =========================
-# HELPER FUNCTIONS
+# CONSTANTS
 # =========================
-async def query_ai(prompt: str) -> str:
-    """Query the AI API for a response."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "Authorization": f"Bearer {AI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful Discord bot assistant. Keep responses concise and friendly."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            
-            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"AI API error: {resp.status} - {error_text}")
-                    return f"AI service returned status {resp.status}"
-    except Exception as e:
-        logger.error(f"AI query error: {e}")
-        return f"AI error: {str(e)}"
-
-# =========================
-# DM MEMORY
-# =========================
-dm_memory = {}
-
 INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
 
 # =========================
@@ -922,7 +986,51 @@ async def generate_daily_summary():
 
         except Exception as e:
             logger.error(f"Error generating daily summary for {guild.id}: {e}")
+
+# =========================
+# CONSOLIDATE MEMORIES TASK
+# =========================
+@tasks.loop(hours=6)
+async def consolidate_memories():
+    """Periodically consolidate and clean up AI memories."""
+    try:
+        # Delete old low-importance memories
+        await db.execute(
+            """DELETE FROM ai_memories 
+               WHERE importance <= 1 
+               AND last_accessed < datetime('now', '-30 days')"""
+        )
+        await db.commit()
+        logger.info("🧠 Consolidated AI memories")
+    except Exception as e:
+        logger.error(f"Memory consolidation error: {e}")
+
+# =========================
+# CHECK BIRTHDAYS TASK
+# =========================
+@tasks.loop(hours=24)
+async def check_birthdays():
+    """Check for birthdays and send announcements."""
+    today = datetime.now().strftime("%m-%d")
+    
+    for guild in bot.guilds:
+        try:
+            results = await db.fetchall(
+                "SELECT user_id FROM birthdays WHERE guild_id=? AND date LIKE ?",
+                (guild.id, f"%{today}%")
+            )
             
+            for (user_id,) in results:
+                member = guild.get_member(user_id)
+                if member:
+                    channel = discord.utils.get(guild.text_channels, name="general")
+                    if not channel:
+                        channel = guild.system_channel
+                    if channel:
+                        await channel.send(f"🎂 Happy Birthday {member.mention}! 🎉")
+        except Exception as e:
+            logger.error(f"Birthday check error for {guild.id}: {e}")
+
 # =========================
 # TICKET VIEWS
 # =========================
@@ -1462,112 +1570,7 @@ async def on_message(message):
         # DM AI
         # =========================
         if isinstance(message.channel, discord.DMChannel):
-            if message.author.id != OWNER_ID:
-                await message.channel.send("👋 Only owner can use AI.")
-                return
-            
-            user_id = message.author.id
-            key = str(user_id)
-            
-            if key not in dm_memory:
-                dm_memory[key] = ""
-            
-            mem = await get_memory(user_id)
-            if not mem:
-                await save_memory(user_id, user_name=message.author.name, bot_name="AI Bot")
-            
-            dm_memory[key] += f"User: {message.content}\n"
-            
-            await extract_memory_facts(0, user_id, message.content)
-            
-            msg = message.content.lower()
-            m1 = re.search(r"my name is (.+)", msg)
-            if m1:
-                await save_memory(user_id, user_name=m1.group(1).strip().title())
-            
-            m2 = re.search(r"your name is (.+)", msg)
-            if m2:
-                await save_memory(user_id, bot_name=m2.group(1).strip().title())
-            
-            mem = await get_memory(user_id)
-            user_name, bot_name = mem if mem else (None, None)
-            
-            ai_mems = await get_ai_memories(0, user_id, limit=15)
-            memory_context = ""
-            if ai_mems:
-                facts = [f"- {k}: {v}" for k, v, imp, _, _ in ai_mems if imp >= 2]
-                if facts:
-                    memory_context = "Things I remember about you:\n" + "\n".join(facts) + "\n"
-            
-            prompt = f"""
-You are a Discord AI bot. You have persistent memory and learn about the user over time.
-
-User name: {user_name or "unknown"}
-Bot name: {bot_name or "AI Bot"}
-
-{memory_context}
-
-Recent conversation:
-{dm_memory[key][-2000:]}
-
-Respond naturally and conversationally. If the user mentions something new about themselves, remember it for next time.
-"""
-            
-            try:
-                if message.attachments:
-                    attachment = message.attachments[0]
-                    
-                    if attachment.content_type and attachment.content_type.startswith("image/"):
-                        if client:
-                            img = await attachment.read()
-                            uploaded = client.files.upload(file=img, config={"mime_type": attachment.content_type})
-                            response = client.models.generate_content(model=MODEL_NAME, contents=[prompt, uploaded])
-                            reply = response.text
-                        else:
-                            reply = "⚠️ AI not configured for image analysis."
-                    
-                    elif attachment.filename.endswith(".pdf"):
-                        pdf_data = await attachment.read()
-                        pdf = PdfReader(io.BytesIO(pdf_data))
-                        text = ""
-                        for page in pdf.pages:
-                            t = page.extract_text()
-                            if t:
-                                text += t + "\n"
-                        reply = await get_ai_response(f"{prompt}\nPDF:\n{text}")
-                    
-                    elif attachment.filename.endswith(".docx"):
-                        doc_data = await attachment.read()
-                        doc = Document(io.BytesIO(doc_data))
-                        text = "\n".join(p.text for p in doc.paragraphs)
-                        reply = await get_ai_response(f"{prompt}\nDOCX:\n{text}")
-                    
-                    elif attachment.filename.endswith(".txt"):
-                        txt = await attachment.read()
-                        text = txt.decode("utf-8", errors="ignore")
-                        reply = await get_ai_response(f"{prompt}\nTXT:\n{text}")
-                    
-                    else:
-                        reply = await get_ai_response(prompt)
-                
-                else:
-                    reply = await get_ai_response(prompt)
-            
-            except Exception as e:
-                logger.error(f"DM AI error: {e}")
-                reply = f"⚠️ AI error: {e}"
-            
-            await save_conversation(0, 0, user_id, "user", message.content)
-            await save_conversation(0, 0, user_id, "assistant", reply)
-            
-            dm_memory[key] += f"Bot: {reply}\n"
-            dm_memory[key] = dm_memory[key][-8000:]
-            
-            while len(reply) > 1900:
-                await message.channel.send(reply[:1900])
-                reply = reply[1900:]
-            
-            await message.channel.send(reply)
+            await handle_dm_message(message)
             return
         
         # =========================
@@ -1595,7 +1598,155 @@ Respond naturally and conversationally. If the user mentions something new about
     
     await bot.process_commands(message)
 
-# on ready
+async def handle_dm_message(message):
+    """Handle DM messages with AI."""
+    if message.author.id != OWNER_ID:
+        await message.channel.send("👋 Only the owner can use AI in DMs.")
+        return
+    
+    user_id = message.author.id
+    
+    # Get or create memory
+    mem = await get_memory(user_id)
+    if not mem or not mem[0]:
+        await save_memory(user_id, user_name=message.author.name, bot_name="AI Bot")
+    
+    user_name, bot_name = await get_memory(user_id) or ("User", "AI Bot")
+    
+    # Extract memory facts
+    await extract_memory_facts(0, user_id, message.content)
+    
+    # Handle name changes
+    content_lower = message.content.lower()
+    name_match = re.search(r"my name is (.+)", content_lower)
+    if name_match:
+        await save_memory(user_id, user_name=name_match.group(1).strip().title())
+        user_name = name_match.group(1).strip().title()
+    
+    bot_name_match = re.search(r"your name is (.+)", content_lower)
+    if bot_name_match:
+        await save_memory(user_id, bot_name=bot_name_match.group(1).strip().title())
+        bot_name = bot_name_match.group(1).strip().title()
+    
+    # Get AI memories
+    memories = await get_ai_memories(0, user_id, limit=15)
+    
+    # Build prompt
+    memory_lines = []
+    if memories:
+        for key, value, importance, _, _ in memories:
+            if importance >= 2:
+                memory_lines.append(f"- {key}: {value}")
+    
+    memory_context = ""
+    if memory_lines:
+        memory_context = "Things I remember:\n" + "\n".join(memory_lines) + "\n"
+    
+    prompt = f"""You are a Discord AI bot with persistent memory.
+
+User: {user_name}
+Bot: {bot_name}
+
+{memory_context}
+
+Respond naturally and conversationally. If the user mentions something new, remember it."""
+    
+    try:
+        # Handle attachments
+        if message.attachments:
+            reply = await handle_dm_attachment(message, prompt)
+        else:
+            reply = await get_ai_response(prompt)
+        
+        await save_conversation(0, 0, user_id, "user", message.content)
+        await save_conversation(0, 0, user_id, "assistant", reply)
+        
+        # Send reply in chunks
+        while len(reply) > 1900:
+            await message.channel.send(reply[:1900])
+            reply = reply[1900:]
+        await message.channel.send(reply)
+        
+    except Exception as e:
+        logger.error(f"DM AI error: {e}")
+        await message.channel.send(f"⚠️ AI error: {str(e)}")
+
+async def handle_dm_attachment(message, prompt):
+    """Handle attachments in DMs."""
+    attachment = message.attachments[0]
+    
+    # Image analysis with Gemini
+    if attachment.content_type and attachment.content_type.startswith("image/"):
+        if client:
+            img = await attachment.read()
+            uploaded = client.files.upload(file=img, config={"mime_type": attachment.content_type})
+            response = client.models.generate_content(
+                model=MODEL_NAME, 
+                contents=[prompt, uploaded]
+            )
+            return response.text
+        else:
+            return "⚠️ AI not configured for image analysis."
+    
+    # PDF handling
+    elif attachment.filename.endswith(".pdf"):
+        pdf_data = await attachment.read()
+        pdf = PdfReader(io.BytesIO(pdf_data))
+        text = ""
+        for page in pdf.pages:
+            t = page.extract_text()
+            if t:
+                text += t + "\n"
+        return await get_ai_response(f"{prompt}\n\nPDF content:\n{text[:3000]}")
+    
+    # DOCX handling
+    elif attachment.filename.endswith(".docx"):
+        doc_data = await attachment.read()
+        doc = Document(io.BytesIO(doc_data))
+        text = "\n".join(p.text for p in doc.paragraphs)
+        return await get_ai_response(f"{prompt}\n\nDOCX content:\n{text[:3000]}")
+    
+    # Text file handling
+    elif attachment.filename.endswith(".txt"):
+        txt = await attachment.read()
+        text = txt.decode("utf-8", errors="ignore")
+        return await get_ai_response(f"{prompt}\n\nTXT content:\n{text[:3000]}")
+    
+    # Default
+    else:
+        return await get_ai_response(f"{prompt}\n\nThe user sent a file: {attachment.filename}")
+
+async def get_ai_response(prompt: str) -> str:
+    """Get AI response using the configured AI service."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {
+                "Authorization": f"Bearer {AI_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "gpt-3.5-turbo",
+                "messages": [
+                    {"role": "system", "content": "You are a helpful AI assistant. Keep responses concise and friendly."},
+                    {"role": "user", "content": prompt}
+                ],
+                "max_tokens": 500,
+                "temperature": 0.7
+            }
+            
+            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"].strip()
+                else:
+                    return f"⚠️ AI service error: {resp.status}"
+    except Exception as e:
+        logger.error(f"AI response error: {e}")
+        return f"⚠️ AI error: {str(e)}"
+
+# =========================
+# ON READY
+# =========================
 @bot.event
 async def on_ready():
     global _tasks_started
@@ -1608,17 +1759,17 @@ async def on_ready():
     logger.info(f"🤖 Logged in as {bot.user}")
 
     try:
-        if "check_birthdays" in globals():
-            if not check_birthdays.is_running():
-                check_birthdays.start()
+        if not generate_daily_summary.is_running():
+            generate_daily_summary.start()
+            logger.info("✅ Started daily summary task")
 
-        if "generate_daily_summary" in globals():
-            if not generate_daily_summary.is_running():
-                generate_daily_summary.start()
+        if not consolidate_memories.is_running():
+            consolidate_memories.start()
+            logger.info("✅ Started memory consolidation task")
 
-        if "consolidate_memories" in globals():
-            if not consolidate_memories.is_running():
-                consolidate_memories.start()
+        if not check_birthdays.is_running():
+            check_birthdays.start()
+            logger.info("✅ Started birthday check task")
 
     except Exception as e:
         logger.error(f"Task startup error: {e}")
@@ -3326,14 +3477,11 @@ class Economy(commands.Cog, name="economy"):
         self.bot = bot
         self.daily_cooldowns = {}
 
-    async def get_balance(self, user_id: int) -> tuple:
-        return await get_balance_simple(user_id)
-    
     @economy_group.command(name="balance", description="Check your or another user's balance")
     @app_commands.describe(member="Member to check (optional)")
     async def economy_balance(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
-        wallet, bank = await self.get_balance(target.id)
+        wallet, bank = await get_balance_simple(target.id)
         embed = discord.Embed(title=f"💰 {target.display_name}'s Balance", color=discord.Color.gold())
         embed.add_field(name="Wallet", value=f"${wallet:,}", inline=True)
         embed.add_field(name="Bank", value=f"${bank:,}", inline=True)
@@ -3546,25 +3694,24 @@ class Leveling(commands.Cog, name="leveling"):
     async def leveling_rank(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
         row = await db.fetchone(
-            "SELECT xp, level, total_messages FROM levels WHERE user_id=? AND guild_id=?",
+            "SELECT xp, level FROM leveling WHERE user_id=? AND guild_id=?",
             (target.id, interaction.guild.id)
         )
         if not row:
             return await interaction.response.send_message(f"{target.mention} has no XP yet.", ephemeral=True)
-        xp, level, total_messages = row
+        xp, level = row
         rank_result = await db.fetchone(
-            "SELECT COUNT(*) FROM levels WHERE guild_id=? AND (xp + (level * (100 + (level - 1) * 50))) > (SELECT xp + (level * (100 + (level - 1) * 50)) FROM levels WHERE user_id=? AND guild_id=?)",
+            "SELECT COUNT(*) FROM leveling WHERE guild_id=? AND (xp + (level * 100)) > (SELECT xp + (level * 100) FROM leveling WHERE user_id=? AND guild_id=?)",
             (interaction.guild.id, target.id, interaction.guild.id)
         )
         rank = (rank_result[0] if rank_result else 0) + 1
-        total_users_result = await db.fetchone("SELECT COUNT(*) FROM levels WHERE guild_id=?", (interaction.guild.id,))
+        total_users_result = await db.fetchone("SELECT COUNT(*) FROM leveling WHERE guild_id=?", (interaction.guild.id,))
         total_users = total_users_result[0] if total_users_result else 0
-        needed = 100 + (level * 50)
+        needed = (level + 1) * 100
         embed = discord.Embed(title=f"📊 {target.display_name}'s Rank", color=discord.Color.blue())
         embed.add_field(name="Level", value=str(level), inline=True)
         embed.add_field(name="Rank", value=f"#{rank}/{total_users}", inline=True)
         embed.add_field(name="XP", value=f"{xp}/{needed}", inline=False)
-        embed.add_field(name="Total Messages", value=str(total_messages), inline=True)
         progress = min(xp / needed, 1.0) if needed > 0 else 0
         bar_length = 15
         filled = int(progress * bar_length)
@@ -3575,7 +3722,7 @@ class Leveling(commands.Cog, name="leveling"):
     @leveling_group.command(name="leaderboard", description="View the leveling leaderboard")
     async def leveling_leaderboard(self, interaction: discord.Interaction):
         rows = await db.fetchall(
-            "SELECT user_id, level, xp FROM levels WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10",
+            "SELECT user_id, level, xp FROM leveling WHERE guild_id=? ORDER BY level DESC, xp DESC LIMIT 10",
             (interaction.guild.id,)
         )
         embed = discord.Embed(title=f"🏆 Leveling Leaderboard - {interaction.guild.name}", color=discord.Color.gold())
@@ -3697,6 +3844,11 @@ class Utility(commands.Cog, name="utility"):
 # =========================
 # VOICE COMMANDS (NO OWNER CHECK - PUBLIC)
 # =========================
+
+class VoiceCommands(commands.Cog, name="voice_commands"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
     @app_commands.command(name="join", description="Make the bot join your voice channel")
     async def join(self, interaction: discord.Interaction):
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -3732,7 +3884,7 @@ class Help(commands.Cog, name="help"):
     async def help_command(self, interaction: discord.Interaction):
         embed = discord.Embed(
             title=f"🤖 {self.bot.user.name} Help",
-            description="A multi-purpose Discord bot with moderation, music, economy, and more!",
+            description="A multi-purpose Discord bot with moderation, economy, and more!",
             color=discord.Color.blue()
         )
         embed.add_field(
@@ -3859,7 +4011,7 @@ class HistoryCommands(commands.Cog, name="history"):
 
 
 # =========================
-# 🎵 MAIN BOT INITIALIZATION
+# MAIN BOT INITIALIZATION
 # =========================
 
 async def main():
@@ -3881,6 +4033,7 @@ async def main():
         await bot.add_cog(Leveling(bot))
         await bot.add_cog(AI(bot))
         await bot.add_cog(Utility(bot))
+        await bot.add_cog(VoiceCommands(bot))
         await bot.add_cog(Help(bot))
         await bot.add_cog(CommandErrorHandler(bot))
         await bot.add_cog(HistoryCommands(bot))
