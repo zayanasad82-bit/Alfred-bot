@@ -9,7 +9,6 @@ import os
 import io
 import json
 import asyncio
-import aiohttp
 import time
 import uuid
 import logging
@@ -40,8 +39,6 @@ logger = logging.getLogger("HackerBot")
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_BASE_URL = os.getenv("AI_BASE_URL", "https://api.openai.com/v1")
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -659,35 +656,24 @@ async def extract_memory_facts(guild_id: int, user_id: int, content: str):
                 trait_name = "preferred_name" if key == "name" else key
                 await save_user_personality(guild_id, user_id, trait_name, value)
 
-async def query_ai(prompt: str) -> str:
-    """Query the AI API for a response."""
+async def get_ai_response(prompt: str) -> str:
+    """Get a response from Google Gemini."""
     try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "Authorization": f"Bearer {AI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful Discord bot assistant. Keep responses concise and friendly."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            
-            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    error_text = await resp.text()
-                    logger.error(f"AI API error: {resp.status} - {error_text}")
-                    return f"AI service returned status {resp.status}"
+        if not client:
+            return "⚠️ GEMINI_API_KEY is missing. Please set the GEMINI_API_KEY environment variable."
+
+        response = await asyncio.to_thread(
+            lambda: client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt
+            )
+        )
+
+        return response.text.strip()
+
     except Exception as e:
-        logger.error(f"AI query error: {e}")
-        return f"AI error: {str(e)}"
+        logger.error(f"AI response error: {e}")
+        return f"⚠️ AI error: {str(e)}"
 
 # =========================
 # AI CONTEXT BUILDING
@@ -1688,7 +1674,7 @@ async def handle_dm_attachment(message, prompt):
             )
             return response.text
         else:
-            return "⚠️ AI not configured for image analysis."
+            return "⚠️ GEMINI_API_KEY is missing. Please set the GEMINI_API_KEY environment variable."
     
     # PDF handling
     elif attachment.filename.endswith(".pdf"):
@@ -1717,34 +1703,6 @@ async def handle_dm_attachment(message, prompt):
     # Default
     else:
         return await get_ai_response(f"{prompt}\n\nThe user sent a file: {attachment.filename}")
-
-async def get_ai_response(prompt: str) -> str:
-    """Get AI response using the configured AI service."""
-    try:
-        async with aiohttp.ClientSession() as session:
-            headers = {
-                "Authorization": f"Bearer {AI_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "gpt-3.5-turbo",
-                "messages": [
-                    {"role": "system", "content": "You are a helpful AI assistant. Keep responses concise and friendly."},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 500,
-                "temperature": 0.7
-            }
-            
-            async with session.post(f"{AI_BASE_URL}/chat/completions", headers=headers, json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data["choices"][0]["message"]["content"].strip()
-                else:
-                    return f"⚠️ AI service error: {resp.status}"
-    except Exception as e:
-        logger.error(f"AI response error: {e}")
-        return f"⚠️ AI error: {str(e)}"
 
 # =========================
 # ON READY
@@ -3765,8 +3723,9 @@ class AI(commands.Cog, name="ai"):
         if len(history) > 20:
             history = history[-20:]
             self.conversation_history[interaction.channel_id] = history
+        
         try:
-            response = await query_ai(message)
+            response = await get_ai_response(message)
             history.append({"role": "assistant", "content": response})
             if len(response) > 1900:
                 parts = [response[i:i+1900] for i in range(0, len(response), 1900)]
@@ -3788,7 +3747,7 @@ class AI(commands.Cog, name="ai"):
     async def ai_ask(self, interaction: discord.Interaction, question: str):
         await interaction.response.defer()
         try:
-            response = await query_ai(question)
+            response = await get_ai_response(question)
             if len(response) > 1900:
                 parts = [response[i:i+1900] for i in range(0, len(response), 1900)]
                 for part in parts:
