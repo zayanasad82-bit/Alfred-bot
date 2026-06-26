@@ -103,9 +103,9 @@ class AsyncDatabase:
                 user_id INTEGER PRIMARY KEY, user_name TEXT, bot_name TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS tickets (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, user_id INTEGER,
-                channel_id INTEGER, status TEXT DEFAULT 'open', created_at TEXT
+                channel_id INTEGER, status TEXT DEFAULT 'open', created_at TEXT,
+                PRIMARY KEY (guild_id, channel_id)
             )""",
             """CREATE TABLE IF NOT EXISTS giveaways (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -114,9 +114,9 @@ class AsyncDatabase:
                 end_time TEXT, host_id INTEGER, message_id INTEGER
             )""",
             """CREATE TABLE IF NOT EXISTS reaction_roles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, channel_id INTEGER,
-                message_id INTEGER, emoji TEXT, role_id INTEGER
+                message_id INTEGER, emoji TEXT, role_id INTEGER,
+                PRIMARY KEY (guild_id, message_id, emoji)
             )""",
             """CREATE TABLE IF NOT EXISTS leveling (
                 user_id INTEGER, guild_id INTEGER,
@@ -134,8 +134,8 @@ class AsyncDatabase:
                 PRIMARY KEY (guild_id, name)
             )""",
             """CREATE TABLE IF NOT EXISTS playlists (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER, name TEXT, url TEXT, added_by INTEGER
+                guild_id INTEGER, name TEXT, url TEXT, added_by INTEGER,
+                PRIMARY KEY (guild_id, name)
             )""",
             """CREATE TABLE IF NOT EXISTS birthdays (
                 user_id INTEGER PRIMARY KEY, guild_id INTEGER,
@@ -147,30 +147,30 @@ class AsyncDatabase:
                 question TEXT, options TEXT, votes TEXT
             )""",
             """CREATE TABLE IF NOT EXISTS history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, user_id INTEGER, username TEXT,
-                event_type TEXT, details TEXT, timestamp TEXT
+                event_type TEXT, details TEXT, timestamp TEXT,
+                PRIMARY KEY (guild_id, user_id, event_type, timestamp)
             )""",
             """CREATE TABLE IF NOT EXISTS daily_summaries (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, date TEXT, summary TEXT,
                 total_messages INTEGER, most_active_user_id INTEGER,
-                top_topic TEXT, generated_at TEXT
+                top_topic TEXT, generated_at TEXT,
+                PRIMARY KEY (guild_id, date)
             )""",
             """CREATE TABLE IF NOT EXISTS message_stats (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, channel_id INTEGER, user_id INTEGER,
-                date TEXT, count INTEGER DEFAULT 0, topics TEXT
+                date TEXT, count INTEGER DEFAULT 0, topics TEXT,
+                PRIMARY KEY (guild_id, channel_id, user_id, date)
             )""",
             """CREATE TABLE IF NOT EXISTS ai_conversations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, channel_id INTEGER, user_id INTEGER,
-                role TEXT, content TEXT, timestamp TEXT
+                role TEXT, content TEXT, timestamp TEXT,
+                PRIMARY KEY (guild_id, user_id, timestamp)
             )""",
             """CREATE TABLE IF NOT EXISTS ai_memories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
                 guild_id INTEGER, user_id INTEGER, key TEXT, value TEXT,
-                importance INTEGER DEFAULT 1, created_at TEXT, last_accessed TEXT
+                importance INTEGER DEFAULT 1, created_at TEXT, last_accessed TEXT,
+                PRIMARY KEY (guild_id, user_id, key)
             )""",
             """CREATE TABLE IF NOT EXISTS ai_personality (
                 guild_id INTEGER, user_id INTEGER,
