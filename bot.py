@@ -22,6 +22,13 @@ from pypdf import PdfReader
 from docx import Document
 from discord.utils import utcnow
 
+# TEMPORARY DATABASE RESET
+if os.getenv("RESET_DATABASE") == "true":
+    if os.path.exists("moderation.db"):
+        os.remove("moderation.db")
+        print("✅ Database reset completed.")
+
+
 # =========================
 # LOGGING CONFIGURATION
 # =========================
