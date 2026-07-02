@@ -1439,76 +1439,121 @@ class ControlPanelDropdown(discord.ui.Select):
                 await handle_toggle_modules(interaction)
 
 class ControlPanelView(discord.ui.View):
-    """Main control panel view with all interactive components."""
-    
+    """Owner-only control panel."""
+
     def __init__(self, bot_instance, owner_id: int):
         super().__init__(timeout=None)
+
         self.bot = bot_instance
         self.owner_id = owner_id
-        self._setup_components()
-    
-    def _setup_components(self):
-        """Set up all control panel components."""
-        # Row 1: Moderation Tools (4 items)
-        self.add_item(ControlPanelButton("⚠️ Warn", "warn_user", discord.ButtonStyle.primary))
-        self.add_item(ControlPanelButton("🔨 Ban", "ban_user", discord.ButtonStyle.danger))
-        self.add_item(ControlPanelButton("👢 Kick", "kick_user", discord.ButtonStyle.danger))
-        self.add_item(ControlPanelButton("🔇 Mute", "mute_user", discord.ButtonStyle.secondary))
-        
-        # Row 2: More Moderation (4 items)
-        self.add_item(ControlPanelButton("🔊 Unmute", "unmute_user", discord.ButtonStyle.success))
-        self.add_item(ControlPanelButton("⏰ Timeout", "timeout_user", discord.ButtonStyle.primary))
-        self.add_item(ControlPanelButton("🗑️ Clear", "clear_messages", discord.ButtonStyle.primary))
-        self.add_item(ControlPanelButton("🔒 Lock", "lock_channel", discord.ButtonStyle.danger))
-        
-        # Row 3: Channel Controls (4 items)
-        self.add_item(ControlPanelButton("🔓 Unlock", "unlock_channel", discord.ButtonStyle.success))
-        self.add_item(ControlPanelButton("⏱️ Slowmode", "set_slowmode", discord.ButtonStyle.secondary))
-        self.add_item(ControlPanelButton("🧠 Reset AI", "reset_ai", discord.ButtonStyle.danger))
-        self.add_item(ControlPanelButton("📚 View Memories", "view_memories", discord.ButtonStyle.primary))
-        
-        # Row 4: AI & System (4 items)
-        self.add_item(ControlPanelButton("🧹 Clear Memories", "clear_memories", discord.ButtonStyle.danger))
-        self.add_item(ControlPanelButton("💬 Chat History", "chat_history", discord.ButtonStyle.secondary))
-        self.add_item(ControlPanelButton("📊 Stats", "show_stats", discord.ButtonStyle.primary))
-        self.add_item(ControlPanelButton("🔄 Refresh", "refresh_panel", discord.ButtonStyle.secondary))
-        
-        # Row 5: Database & Cache (4 items)
-        self.add_item(ControlPanelButton("🗑️ Clear Cache", "clear_cache", discord.ButtonStyle.danger))
-        self.add_item(ControlPanelButton("💾 DB Status", "db_status", discord.ButtonStyle.primary))
-        self.add_item(ControlPanelButton("🔄 DB Optimize", "db_optimize", discord.ButtonStyle.secondary))
-        self.add_item(ControlPanelButton("📊 DB Stats", "db_stats", discord.ButtonStyle.primary))
-        
-        # Row 6: System Controls (3 items)
-        self.add_item(ControlPanelButton("🔄 Toggle Modules", "toggle_modules", discord.ButtonStyle.secondary))
-        self.add_item(ControlPanelButton("🔧 Maintenance", "maintenance_mode", discord.ButtonStyle.danger))
-        self.add_item(ControlPanelButton("🔄 Restart Bot", "restart_bot", discord.ButtonStyle.danger))
-        
-        # Row 7: Dropdown 1 - Moderation (1 item)
-        self.add_item(ControlPanelDropdown(self.bot, "Moderation", [
-            discord.SelectOption(label="Warn", value="warn", emoji="⚠️"),
-            discord.SelectOption(label="Ban", value="ban", emoji="🔨"),
-            discord.SelectOption(label="Kick", value="kick", emoji="👢"),
-            discord.SelectOption(label="Mute", value="mute", emoji="🔇"),
-            discord.SelectOption(label="Unmute", value="unmute", emoji="🔊"),
-            discord.SelectOption(label="Timeout", value="timeout", emoji="⏰"),
-        ]))
-        
-        # Row 8: Dropdown 2 - AI Actions (1 item)
-        self.add_item(ControlPanelDropdown(self.bot, "AI Actions", [
-            discord.SelectOption(label="Reset AI", value="reset", emoji="🧠"),
-            discord.SelectOption(label="View Memories", value="view_memories", emoji="📚"),
-            discord.SelectOption(label="Clear Memories", value="clear_memories", emoji="🧹"),
-            discord.SelectOption(label="Chat History", value="chat_history", emoji="💬"),
-        ]))
-        
-        # Row 9: Dropdown 3 - Quick Actions (1 item)
-        self.add_item(ControlPanelDropdown(self.bot, "Quick Actions", [
-            discord.SelectOption(label="Show Stats", value="stats", emoji="📊"),
-            discord.SelectOption(label="Clear Cache", value="clear_cache", emoji="🗑️"),
-            discord.SelectOption(label="Database Status", value="db_status", emoji="💾"),
-            discord.SelectOption(label="Toggle Modules", value="toggle_modules", emoji="🔄"),
-        ]))
+
+        # Row 0
+        self.add_item(ControlPanelButton(
+            "🛡 Moderation",
+            "open_moderation_panel",
+            discord.ButtonStyle.primary,
+            row=0
+        ))
+
+        self.add_item(ControlPanelButton(
+            "🤖 AI",
+            "open_ai_panel",
+            discord.ButtonStyle.primary,
+            row=0
+        ))
+
+        self.add_item(ControlPanelButton(
+            "📊 Stats",
+            "show_stats",
+            discord.ButtonStyle.success,
+            row=0
+        ))
+
+        self.add_item(ControlPanelButton(
+            "💾 Database",
+            "open_database_panel",
+            discord.ButtonStyle.secondary,
+            row=0
+        ))
+
+        self.add_item(ControlPanelButton(
+            "🎵 Music",
+            "open_music_panel",
+            discord.ButtonStyle.primary,
+            row=0
+        ))
+
+        # Row 1
+        self.add_item(ControlPanelButton(
+            "🧹 Clear Cache",
+            "clear_cache",
+            discord.ButtonStyle.danger,
+            row=1
+        ))
+
+        self.add_item(ControlPanelButton(
+            "🔄 Refresh",
+            "refresh_panel",
+            discord.ButtonStyle.secondary,
+            row=1
+        ))
+
+        self.add_item(ControlPanelButton(
+            "🔧 Maintenance",
+            "maintenance_mode",
+            discord.ButtonStyle.danger,
+            row=1
+        ))
+
+        self.add_item(ControlPanelButton(
+            "🔄 Restart",
+            "restart_bot",
+            discord.ButtonStyle.danger,
+            row=1
+        ))
+
+        self.add_item(ControlPanelButton(
+            "⚙ Modules",
+            "toggle_modules",
+            discord.ButtonStyle.secondary,
+            row=1
+        ))
+
+        # Row 2
+        self.add_item(
+            ControlPanelDropdown(
+                self.bot,
+                "Quick Actions",
+                [
+                    discord.SelectOption(
+                        label="Database Status",
+                        value="db_status",
+                        emoji="💾"
+                    ),
+                    discord.SelectOption(
+                        label="Database Stats",
+                        value="db_stats",
+                        emoji="📊"
+                    ),
+                    discord.SelectOption(
+                        label="Optimize Database",
+                        value="db_optimize",
+                        emoji="🔄"
+                    ),
+                    discord.SelectOption(
+                        label="Clear Cache",
+                        value="clear_cache",
+                        emoji="🗑️"
+                    ),
+                    discord.SelectOption(
+                        label="Refresh Panel",
+                        value="refresh_panel",
+                        emoji="🔄"
+                    ),
+                ],
+                row=2
+            )
+        )
         
 # =========================
 # CONTROL PANEL HANDLERS
