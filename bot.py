@@ -1232,107 +1232,122 @@ class ModerationChannelSelectView(discord.ui.View):
 
 class ModerationPanelView(discord.ui.View):
     """The complete moderation panel view with all moderation commands."""
-    
+
     def __init__(self, bot_instance, guild: discord.Guild, return_to_main_callback):
         super().__init__(timeout=None)
+
         self.bot = bot_instance
         self.guild = guild
         self.return_to_main_callback = return_to_main_callback
-        
+
         # ===== ROW 0 - User Moderation Actions =====
         self.add_item(ModerationPanelButton(
             "⚠️ Warn", "warn",
             discord.ButtonStyle.danger, row=0
         ))
+
         self.add_item(ModerationPanelButton(
             "🔨 Ban", "ban",
             discord.ButtonStyle.danger, row=0
         ))
+
         self.add_item(ModerationPanelButton(
             "👢 Kick", "kick",
             discord.ButtonStyle.danger, row=0
         ))
+
         self.add_item(ModerationPanelButton(
             "⏰ Timeout", "timeout",
             discord.ButtonStyle.danger, row=0
         ))
-        
+
         # ===== ROW 1 - More User Actions =====
         self.add_item(ModerationPanelButton(
             "🔊 Unmute", "unmute",
             discord.ButtonStyle.success, row=1
         ))
+
         self.add_item(ModerationPanelButton(
             "🔨 Softban", "softban",
             discord.ButtonStyle.danger, row=1
         ))
+
         self.add_item(ModerationPanelButton(
             "🔓 Unban", "unban",
             discord.ButtonStyle.success, row=1
         ))
-        
+
+        self.add_item(ModerationPanelButton(
+            "📜 History", "history",
+            discord.ButtonStyle.secondary, row=1
+        ))
+
         # ===== ROW 2 - Channel Actions =====
         self.add_item(ModerationPanelButton(
             "🧹 Clear", "clear",
             discord.ButtonStyle.secondary, row=2
         ))
+
         self.add_item(ModerationPanelButton(
             "💥 Thanos Snap", "thanos_snap",
             discord.ButtonStyle.danger, row=2
         ))
+
         self.add_item(ModerationPanelButton(
             "🔒 Lock", "lock",
             discord.ButtonStyle.danger, row=2
         ))
+
         self.add_item(ModerationPanelButton(
             "🔓 Unlock", "unlock",
             discord.ButtonStyle.success, row=2
         ))
-        
+
         # ===== ROW 3 - Channel Settings =====
         self.add_item(ModerationPanelButton(
             "⏱️ Slowmode", "slowmode",
             discord.ButtonStyle.primary, row=3
         ))
+
         self.add_item(ModerationPanelButton(
             "👁️ Hide", "hide",
             discord.ButtonStyle.secondary, row=3
         ))
+
         self.add_item(ModerationPanelButton(
             "👁️ Show", "show",
             discord.ButtonStyle.secondary, row=3
         ))
-        
+
+        self.add_item(ModerationPanelButton(
+            "🕵️ Snipe", "snipe",
+            discord.ButtonStyle.secondary, row=3
+        ))
+
+        self.add_item(ModerationPanelButton(
+            "✏️ Edit Snipe", "editsnipe",
+            discord.ButtonStyle.secondary, row=3
+        ))
+
         # ===== ROW 4 - Warning Management =====
         self.add_item(ModerationPanelButton(
             "📋 View Warnings", "view_warnings",
             discord.ButtonStyle.secondary, row=4
         ))
+
         self.add_item(ModerationPanelButton(
             "🗑️ Remove Warning", "remove_warning",
             discord.ButtonStyle.danger, row=4
         ))
+
         self.add_item(ModerationPanelButton(
             "🧹 Clear Warnings", "clear_warnings",
             discord.ButtonStyle.danger, row=4
         ))
-        
-        # ===== ROW 5 - Info & Back =====
-        self.add_item(ModerationPanelButton(
-            "📜 History", "history",
-            discord.ButtonStyle.secondary, row=5
-        ))
-        self.add_item(ModerationPanelButton(
-            "🕵️ Snipe", "snipe",
-            discord.ButtonStyle.secondary, row=5
-        ))
-        self.add_item(ModerationPanelButton(
-            "✏️ Edit Snipe", "editsnipe",
-            discord.ButtonStyle.secondary, row=5
-        ))
+
         self.add_item(ModerationPanelButton(
             "🔙 Back", "back_to_main",
-            discord.ButtonStyle.secondary, row=5
+            discord.ButtonStyle.secondary, row=4
         ))
 
     async def button_callback(self, interaction: discord.Interaction, action: str):
