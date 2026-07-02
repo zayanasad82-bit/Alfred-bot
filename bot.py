@@ -20,6 +20,7 @@ from google import genai
 from pypdf import PdfReader
 from docx import Document
 from discord.utils import utcnow
+import aiohttp
 
 
 
@@ -58,6 +59,9 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         await self.tree.sync()
         logger.info("✅ Slash commands synced")
+        
+        # Restore control panel on startup
+        await self.restore_control_panel()
 
 bot = MyBot(
     command_prefix="!",
@@ -223,6 +227,12 @@ class AsyncDatabase:
                 message_count INTEGER DEFAULT 0,
                 last_message_time TEXT,
                 PRIMARY KEY (user_id, guild_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS control_panel (
+                guild_id INTEGER PRIMARY KEY,
+                channel_id INTEGER,
+                message_id INTEGER,
+                last_updated TEXT
             )""",
         ]
         for query in queries:
@@ -504,6 +514,38 @@ async def get_message_count(user_id, guild_id, window_seconds=5):
         (user_id, guild_id, datetime.now().isoformat(), window_seconds)
     )
     return result[0] if result else 0
+
+# =========================
+# CONTROL PANEL DATABASE FUNCTIONS
+# =========================
+
+async def save_control_panel(guild_id: int, channel_id: int, message_id: int):
+    """Save control panel configuration to database."""
+    await db.execute(
+        """INSERT OR REPLACE INTO control_panel (guild_id, channel_id, message_id, last_updated)
+           VALUES (?, ?, ?, ?)""",
+        (guild_id, channel_id, message_id, datetime.now().isoformat())
+    )
+    await db.commit()
+
+async def get_control_panel(guild_id: int):
+    """Get control panel configuration from database."""
+    result = await db.fetchone(
+        "SELECT channel_id, message_id, last_updated FROM control_panel WHERE guild_id=?",
+        (guild_id,)
+    )
+    if result:
+        return {
+            "channel_id": result[0],
+            "message_id": result[1],
+            "last_updated": result[2]
+        }
+    return None
+
+async def delete_control_panel(guild_id: int):
+    """Delete control panel configuration from database."""
+    await db.execute("DELETE FROM control_panel WHERE guild_id=?", (guild_id,))
+    await db.commit()
 
 # =========================
 # MOD LOGS FUNCTIONS
@@ -1271,6 +1313,490 @@ class AutoMod:
 automod = AutoMod()
 
 # =========================
+# CONTROL PANEL VIEWS
+# =========================
+
+class ControlPanelButton(discord.ui.Button):
+    """Custom button for the control panel."""
+    
+    def __init__(self, label: str, custom_id: str, style: discord.ButtonStyle = discord.ButtonStyle.secondary):
+        super().__init__(label=label, style=style, custom_id=custom_id)
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Handle button press."""
+        view = self.view
+        if not hasattr(view, 'bot'):
+            return await interaction.response.send_message("❌ Bot instance not found.", ephemeral=True)
+        
+        # Check if user is owner
+        if interaction.user.id != view.owner_id:
+            return await interaction.response.send_message("❌ This control panel is owner-only.", ephemeral=True)
+        
+        command = self.custom_id
+        
+        # Handle different commands
+        if command == "warn_user":
+            await interaction.response.send_message("⚠️ Use `/mod warn` to warn a user.", ephemeral=True)
+        elif command == "ban_user":
+            await interaction.response.send_message("🔨 Use `/mod ban` to ban a user.", ephemeral=True)
+        elif command == "kick_user":
+            await interaction.response.send_message("👢 Use `/mod kick` to kick a user.", ephemeral=True)
+        elif command == "mute_user":
+            await interaction.response.send_message("🔇 Use `/mod mute` to mute a user.", ephemeral=True)
+        elif command == "unmute_user":
+            await interaction.response.send_message("🔊 Use `/mod unmute` to unmute a user.", ephemeral=True)
+        elif command == "timeout_user":
+            await interaction.response.send_message("⏰ Use `/mod timeout` to timeout a user.", ephemeral=True)
+        elif command == "clear_messages":
+            await interaction.response.send_message("🗑️ Use `/mod clear` to clear messages.", ephemeral=True)
+        elif command == "lock_channel":
+            await interaction.response.send_message("🔒 Use `/mod lock` to lock a channel.", ephemeral=True)
+        elif command == "unlock_channel":
+            await interaction.response.send_message("🔓 Use `/mod unlock` to unlock a channel.", ephemeral=True)
+        elif command == "set_slowmode":
+            await interaction.response.send_message("⏱️ Use `/mod slowmode` to set slowmode.", ephemeral=True)
+        elif command == "reset_ai":
+            await interaction.response.send_message("🧠 AI conversation history reset.", ephemeral=True)
+        elif command == "view_memories":
+            await handle_view_memories(interaction)
+        elif command == "clear_memories":
+            await handle_clear_memories(interaction)
+        elif command == "chat_history":
+            await handle_chat_history(interaction)
+        elif command == "show_stats":
+            await handle_show_stats(interaction)
+        elif command == "refresh_panel":
+            await handle_refresh_panel(interaction)
+        elif command == "clear_cache":
+            await handle_clear_cache(interaction)
+        elif command == "db_status":
+            await handle_db_status(interaction)
+        elif command == "db_optimize":
+            await handle_db_optimize(interaction)
+        elif command == "db_stats":
+            await handle_db_stats(interaction)
+        elif command == "toggle_modules":
+            await handle_toggle_modules(interaction)
+        elif command == "maintenance_mode":
+            await handle_maintenance(interaction)
+        elif command == "restart_bot":
+            await handle_restart_bot(interaction)
+        else:
+            await interaction.response.send_message(f"⚠️ Unknown command: {command}", ephemeral=True)
+
+class ControlPanelDropdown(discord.ui.Select):
+    """Custom dropdown for the control panel."""
+    
+    def __init__(self, bot_instance, placeholder: str, options: List[discord.SelectOption]):
+        super().__init__(placeholder=placeholder, options=options)
+        self.bot = bot_instance
+        self.owner_id = OWNER_ID
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Handle dropdown selection."""
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message("❌ This control panel is owner-only.", ephemeral=True)
+        
+        value = self.values[0]
+        
+        # Route to appropriate handler based on dropdown
+        if self.placeholder == "Moderation":
+            if value == "warn":
+                await interaction.response.send_message("⚠️ Use `/mod warn` to warn a user.", ephemeral=True)
+            elif value == "ban":
+                await interaction.response.send_message("🔨 Use `/mod ban` to ban a user.", ephemeral=True)
+            elif value == "kick":
+                await interaction.response.send_message("👢 Use `/mod kick` to kick a user.", ephemeral=True)
+            elif value == "mute":
+                await interaction.response.send_message("🔇 Use `/mod mute` to mute a user.", ephemeral=True)
+            elif value == "unmute":
+                await interaction.response.send_message("🔊 Use `/mod unmute` to unmute a user.", ephemeral=True)
+            elif value == "timeout":
+                await interaction.response.send_message("⏰ Use `/mod timeout` to timeout a user.", ephemeral=True)
+        elif self.placeholder == "AI Actions":
+            if value == "reset":
+                await interaction.response.send_message("🧠 AI conversation history reset.", ephemeral=True)
+            elif value == "view_memories":
+                await handle_view_memories(interaction)
+            elif value == "clear_memories":
+                await handle_clear_memories(interaction)
+            elif value == "chat_history":
+                await handle_chat_history(interaction)
+        elif self.placeholder == "Quick Actions":
+            if value == "stats":
+                await handle_show_stats(interaction)
+            elif value == "clear_cache":
+                await handle_clear_cache(interaction)
+            elif value == "db_status":
+                await handle_db_status(interaction)
+            elif value == "toggle_modules":
+                await handle_toggle_modules(interaction)
+
+class ControlPanelView(discord.ui.View):
+    """Main control panel view with all interactive components."""
+    
+    def __init__(self, bot_instance, owner_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot_instance
+        self.owner_id = owner_id
+        self._setup_components()
+    
+    def _setup_components(self):
+        """Set up all control panel components."""
+        # Row 1: Moderation Tools
+        row1 = discord.ui.Row()
+        row1.add_item(ControlPanelButton("⚠️ Warn", "warn_user", discord.ButtonStyle.warning))
+        row1.add_item(ControlPanelButton("🔨 Ban", "ban_user", discord.ButtonStyle.danger))
+        row1.add_item(ControlPanelButton("👢 Kick", "kick_user", discord.ButtonStyle.danger))
+        row1.add_item(ControlPanelButton("🔇 Mute", "mute_user", discord.ButtonStyle.secondary))
+        
+        # Row 2: More Moderation
+        row2 = discord.ui.Row()
+        row2.add_item(ControlPanelButton("🔊 Unmute", "unmute_user", discord.ButtonStyle.success))
+        row2.add_item(ControlPanelButton("⏰ Timeout", "timeout_user", discord.ButtonStyle.warning))
+        row2.add_item(ControlPanelButton("🗑️ Clear", "clear_messages", discord.ButtonStyle.primary))
+        row2.add_item(ControlPanelButton("🔒 Lock", "lock_channel", discord.ButtonStyle.danger))
+        
+        # Row 3: Channel Controls
+        row3 = discord.ui.Row()
+        row3.add_item(ControlPanelButton("🔓 Unlock", "unlock_channel", discord.ButtonStyle.success))
+        row3.add_item(ControlPanelButton("⏱️ Slowmode", "set_slowmode", discord.ButtonStyle.secondary))
+        row3.add_item(ControlPanelButton("🧠 Reset AI", "reset_ai", discord.ButtonStyle.danger))
+        row3.add_item(ControlPanelButton("📚 View Memories", "view_memories", discord.ButtonStyle.primary))
+        
+        # Row 4: AI & System
+        row4 = discord.ui.Row()
+        row4.add_item(ControlPanelButton("🧹 Clear Memories", "clear_memories", discord.ButtonStyle.danger))
+        row4.add_item(ControlPanelButton("💬 Chat History", "chat_history", discord.ButtonStyle.secondary))
+        row4.add_item(ControlPanelButton("📊 Stats", "show_stats", discord.ButtonStyle.primary))
+        row4.add_item(ControlPanelButton("🔄 Refresh", "refresh_panel", discord.ButtonStyle.secondary))
+        
+        # Row 5: Database & Cache
+        row5 = discord.ui.Row()
+        row5.add_item(ControlPanelButton("🗑️ Clear Cache", "clear_cache", discord.ButtonStyle.danger))
+        row5.add_item(ControlPanelButton("💾 DB Status", "db_status", discord.ButtonStyle.primary))
+        row5.add_item(ControlPanelButton("🔄 DB Optimize", "db_optimize", discord.ButtonStyle.secondary))
+        row5.add_item(ControlPanelButton("📊 DB Stats", "db_stats", discord.ButtonStyle.primary))
+        
+        # Row 6: System Controls
+        row6 = discord.ui.Row()
+        row6.add_item(ControlPanelButton("🔄 Toggle Modules", "toggle_modules", discord.ButtonStyle.secondary))
+        row6.add_item(ControlPanelButton("🔧 Maintenance", "maintenance_mode", discord.ButtonStyle.danger))
+        row6.add_item(ControlPanelButton("🔄 Restart Bot", "restart_bot", discord.ButtonStyle.danger))
+        
+        # Add all rows
+        self.add_row(row1)
+        self.add_row(row2)
+        self.add_row(row3)
+        self.add_row(row4)
+        self.add_row(row5)
+        self.add_row(row6)
+        
+        # Add dropdown menus
+        dropdown_row = discord.ui.Row()
+        dropdown_row.add_item(ControlPanelDropdown(self.bot, "Moderation", [
+            discord.SelectOption(label="Warn", value="warn", emoji="⚠️"),
+            discord.SelectOption(label="Ban", value="ban", emoji="🔨"),
+            discord.SelectOption(label="Kick", value="kick", emoji="👢"),
+            discord.SelectOption(label="Mute", value="mute", emoji="🔇"),
+            discord.SelectOption(label="Unmute", value="unmute", emoji="🔊"),
+            discord.SelectOption(label="Timeout", value="timeout", emoji="⏰"),
+        ]))
+        
+        dropdown_row.add_item(ControlPanelDropdown(self.bot, "AI Actions", [
+            discord.SelectOption(label="Reset AI", value="reset", emoji="🧠"),
+            discord.SelectOption(label="View Memories", value="view_memories", emoji="📚"),
+            discord.SelectOption(label="Clear Memories", value="clear_memories", emoji="🧹"),
+            discord.SelectOption(label="Chat History", value="chat_history", emoji="💬"),
+        ]))
+        
+        dropdown_row.add_item(ControlPanelDropdown(self.bot, "Quick Actions", [
+            discord.SelectOption(label="Show Stats", value="stats", emoji="📊"),
+            discord.SelectOption(label="Clear Cache", value="clear_cache", emoji="🗑️"),
+            discord.SelectOption(label="Database Status", value="db_status", emoji="💾"),
+            discord.SelectOption(label="Toggle Modules", value="toggle_modules", emoji="🔄"),
+        ]))
+        
+        self.add_row(dropdown_row)
+
+# =========================
+# CONTROL PANEL HANDLERS
+# =========================
+
+async def handle_view_memories(interaction: discord.Interaction):
+    """Handle view memories command."""
+    memories = await get_ai_memories(interaction.guild_id, interaction.user.id, limit=20)
+    if not memories:
+        await interaction.response.send_message("📚 No memories found for you.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="📚 Your AI Memories",
+        description="Here are the things I remember about you:",
+        color=discord.Color.blue()
+    )
+    
+    for key, value, importance, created_at, last_accessed in memories[:10]:
+        embed.add_field(
+            name=f"{key} (Importance: {importance})",
+            value=f"{value[:100]}\n*Last accessed: {last_accessed[:10]}*",
+            inline=False
+        )
+    
+    if len(memories) > 10:
+        embed.set_footer(text=f"Showing 10 of {len(memories)} memories")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+async def handle_clear_memories(interaction: discord.Interaction):
+    """Handle clear memories command."""
+    await db.execute(
+        "DELETE FROM ai_memories WHERE guild_id=? AND user_id=?",
+        (interaction.guild_id, interaction.user.id)
+    )
+    await db.commit()
+    await interaction.response.send_message("🧹 All your AI memories have been cleared.", ephemeral=True)
+
+async def handle_chat_history(interaction: discord.Interaction):
+    """Handle chat history command."""
+    history = await get_recent_conversation(interaction.guild_id, interaction.channel_id, limit=10)
+    if not history:
+        await interaction.response.send_message("💬 No recent chat history in this channel.", ephemeral=True)
+        return
+    
+    embed = discord.Embed(
+        title="💬 Recent Chat History",
+        color=discord.Color.blue()
+    )
+    
+    for role, content, timestamp, user_id in history[:10]:
+        user = interaction.guild.get_member(user_id)
+        name = user.display_name if user else f"User {user_id}"
+        embed.add_field(
+            name=f"{name} ({role})",
+            value=f"{content[:200]}...",
+            inline=False
+        )
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+async def handle_show_stats(interaction: discord.Interaction):
+    """Handle show stats command."""
+    # Get bot stats
+    total_members = sum(guild.member_count for guild in bot.guilds)
+    total_guilds = len(bot.guilds)
+    total_commands = len(bot.tree.get_commands())
+    uptime = datetime.now() - START_TIME
+    
+    # Get database stats
+    warnings_count = await db.fetchone("SELECT COUNT(*) FROM warnings")
+    warnings_count = warnings_count[0] if warnings_count else 0
+    
+    memories_count = await db.fetchone("SELECT COUNT(*) FROM ai_memories")
+    memories_count = memories_count[0] if memories_count else 0
+    
+    economy_count = await db.fetchone("SELECT COUNT(*) FROM economy")
+    economy_count = economy_count[0] if economy_count else 0
+    
+    embed = discord.Embed(
+        title="📊 Bot Statistics",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="🤖 Bot Name", value=bot.user.name, inline=True)
+    embed.add_field(name="🆔 Bot ID", value=bot.user.id, inline=True)
+    embed.add_field(name="📈 Guilds", value=total_guilds, inline=True)
+    embed.add_field(name="👥 Total Members", value=total_members, inline=True)
+    embed.add_field(name="⚙️ Commands", value=total_commands, inline=True)
+    embed.add_field(name="⏱️ Uptime", value=str(uptime).split('.')[0], inline=True)
+    embed.add_field(name="⚠️ Warnings", value=warnings_count, inline=True)
+    embed.add_field(name="🧠 AI Memories", value=memories_count, inline=True)
+    embed.add_field(name="💰 Economy Users", value=economy_count, inline=True)
+    embed.set_footer(text=f"Owner: <@{OWNER_ID}>")
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+async def handle_refresh_panel(interaction: discord.Interaction):
+    """Handle refresh panel command."""
+    config = await get_control_panel(interaction.guild_id)
+    if not config:
+        await interaction.response.send_message("❌ No control panel configured in this server.", ephemeral=True)
+        return
+    
+    channel = interaction.guild.get_channel(config["channel_id"])
+    if not channel:
+        await interaction.response.send_message("❌ Configured channel not found.", ephemeral=True)
+        return
+    
+    try:
+        old_message = await channel.fetch_message(config["message_id"])
+        await old_message.delete()
+    except:
+        pass
+    
+    # Create new panel
+    embed = discord.Embed(
+        title="🎛️ Bot Control Panel",
+        description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
+    embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+    embed.add_field(name="📊 Commands", value=f"{len(bot.tree.get_commands())} total", inline=True)
+    embed.set_footer(text="Control Panel • Owner Only")
+    
+    view = ControlPanelView(bot, OWNER_ID)
+    new_message = await channel.send(embed=embed, view=view)
+    
+    await save_control_panel(interaction.guild_id, channel.id, new_message.id)
+    await interaction.response.send_message("✅ Control panel refreshed!", ephemeral=True)
+
+async def handle_clear_cache(interaction: discord.Interaction):
+    """Handle clear cache command."""
+    await db.execute("DELETE FROM message_cache")
+    await db.execute("DELETE FROM snipe_cache")
+    await db.execute("DELETE FROM edit_snipe_cache")
+    await db.commit()
+    
+    await interaction.response.send_message("🗑️ All caches cleared successfully!", ephemeral=True)
+
+async def handle_db_status(interaction: discord.Interaction):
+    """Handle database status command."""
+    try:
+        # Check if database is accessible
+        result = await db.fetchone("SELECT sqlite_version()")
+        version = result[0] if result else "Unknown"
+        
+        # Get table counts
+        tables = ["warnings", "ai_memories", "economy", "leveling", "tickets", "giveaways", "polls"]
+        table_stats = {}
+        
+        for table in tables:
+            count = await db.fetchone(f"SELECT COUNT(*) FROM {table}")
+            table_stats[table] = count[0] if count else 0
+        
+        embed = discord.Embed(
+            title="💾 Database Status",
+            color=discord.Color.green(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="🔌 Connection", value="✅ Connected", inline=True)
+        embed.add_field(name="📦 SQLite Version", value=version, inline=True)
+        embed.add_field(name="📊 Tables", value=len(tables), inline=True)
+        
+        stats_text = "\n".join([f"**{table}**: {count}" for table, count in table_stats.items()])
+        embed.add_field(name="📈 Table Statistics", value=stats_text, inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Database error: {str(e)}", ephemeral=True)
+
+async def handle_db_optimize(interaction: discord.Interaction):
+    """Handle database optimize command."""
+    await interaction.response.send_message("🔄 Optimizing database...", ephemeral=True)
+    
+    try:
+        await db.execute("VACUUM")
+        await db.execute("ANALYZE")
+        await db.commit()
+        
+        await interaction.edit_original_response(content="✅ Database optimized successfully!")
+    except Exception as e:
+        await interaction.edit_original_response(content=f"❌ Optimization failed: {str(e)}")
+
+async def handle_db_stats(interaction: discord.Interaction):
+    """Handle database statistics command."""
+    try:
+        # Get database file size
+        size = os.path.getsize("moderation.db")
+        size_mb = size / (1024 * 1024)
+        
+        # Get more detailed stats
+        embed = discord.Embed(
+            title="📊 Database Statistics",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="📦 Database Size", value=f"{size_mb:.2f} MB", inline=True)
+        embed.add_field(name="📂 Database File", value="moderation.db", inline=True)
+        embed.add_field(name="🔢 Total Tables", value="20+", inline=True)
+        
+        # Get memory usage stats
+        memory_usage = await db.fetchone("PRAGMA memory_used")
+        if memory_usage:
+            embed.add_field(name="🧠 Memory Used", value=f"{memory_usage[0] / 1024:.2f} KB", inline=True)
+        
+        # Get cache stats
+        cache_size = await db.fetchone("PRAGMA cache_size")
+        if cache_size:
+            embed.add_field(name="💾 Cache Size", value=f"{cache_size[0]} pages", inline=True)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Error getting stats: {str(e)}", ephemeral=True)
+
+async def handle_toggle_modules(interaction: discord.Interaction):
+    """Handle toggle modules command."""
+    # Get all cog names
+    cogs = list(bot.cogs.keys())
+    
+    embed = discord.Embed(
+        title="🔄 Module Management",
+        description="Click the buttons below to toggle modules on/off. (Coming soon!)",
+        color=discord.Color.blue()
+    )
+    
+    # Show current modules
+    module_status = ""
+    for cog in cogs:
+        status = "✅"  # All modules are enabled by default
+        module_status += f"{status} {cog}\n"
+    
+    embed.add_field(name="📦 Loaded Modules", value=module_status or "No modules loaded", inline=False)
+    embed.add_field(name="ℹ️ Note", value="Module toggling will be available in a future update. For now, all modules are active.", inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+async def handle_maintenance(interaction: discord.Interaction):
+    """Handle maintenance mode command."""
+    await interaction.response.send_message(
+        "🔧 Maintenance mode is not implemented yet.\n"
+        "To restart the bot, use the Restart Bot button or redeploy on Railway.",
+        ephemeral=True
+    )
+
+async def handle_restart_bot(interaction: discord.Interaction):
+    """Handle restart bot command."""
+    embed = discord.Embed(
+        title="🔄 Restarting Bot",
+        description="The bot is restarting... This may take a few seconds.",
+        color=discord.Color.orange()
+    )
+    await interaction.response.send_message(embed=embed)
+    
+    # Save control panel before restart
+    config = await get_control_panel(interaction.guild_id)
+    if config:
+        channel = interaction.guild.get_channel(config["channel_id"])
+        if channel:
+            try:
+                old_message = await channel.fetch_message(config["message_id"])
+                # Keep the message, just update it
+                embed = discord.Embed(
+                    title="🔄 Bot Restarting...",
+                    description="The bot is currently restarting. Please wait a moment.",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now()
+                )
+                await old_message.edit(embed=embed, view=None)
+            except:
+                pass
+    
+    # Restart the bot
+    os._exit(0)
+
+# =========================
 # BOT EVENTS
 # =========================
 
@@ -1704,9 +2230,6 @@ async def handle_dm_attachment(message, prompt):
     else:
         return await get_ai_response(f"{prompt}\n\nThe user sent a file: {attachment.filename}")
 
-# =========================
-# ON READY
-# =========================
 @bot.event
 async def on_ready():
     global _tasks_started
@@ -1737,6 +2260,81 @@ async def on_ready():
     logger.info("✅ Bot is fully online and tasks are running!")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
+
+# =========================
+# CONTROL PANEL RESTORATION
+# =========================
+
+@bot.command(name="restore_panel")
+@commands.is_owner()
+async def restore_panel_command(ctx):
+    """Manually restore the control panel."""
+    await ctx.send("🔄 Attempting to restore control panel...")
+    await bot.restore_control_panel()
+    await ctx.send("✅ Control panel restoration complete!")
+
+async def MyBot.restore_control_panel(self):
+    """Restore control panel from database after restart."""
+    try:
+        # Get all guilds with control panels
+        results = await db.fetchall("SELECT guild_id, channel_id, message_id FROM control_panel")
+        
+        for guild_id, channel_id, message_id in results:
+            guild = self.get_guild(guild_id)
+            if not guild:
+                logger.warning(f"Guild {guild_id} not found, skipping panel restoration")
+                continue
+            
+            channel = guild.get_channel(channel_id)
+            if not channel:
+                logger.warning(f"Channel {channel_id} not found in guild {guild_id}")
+                continue
+            
+            try:
+                # Try to fetch and update existing message
+                message = await channel.fetch_message(message_id)
+                
+                # Create fresh embed
+                embed = discord.Embed(
+                    title="🎛️ Bot Control Panel",
+                    description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
+                )
+                embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
+                embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+                embed.add_field(name="📊 Commands", value=f"{len(self.tree.get_commands())} total", inline=True)
+                embed.set_footer(text="Control Panel • Owner Only")
+                
+                view = ControlPanelView(self, OWNER_ID)
+                await message.edit(embed=embed, view=view)
+                logger.info(f"✅ Restored control panel in guild {guild_id}")
+                
+            except discord.NotFound:
+                # Message was deleted, create new one
+                embed = discord.Embed(
+                    title="🎛️ Bot Control Panel",
+                    description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
+                )
+                embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
+                embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+                embed.add_field(name="📊 Commands", value=f"{len(self.tree.get_commands())} total", inline=True)
+                embed.set_footer(text="Control Panel • Owner Only")
+                
+                view = ControlPanelView(self, OWNER_ID)
+                new_message = await channel.send(embed=embed, view=view)
+                
+                # Update database with new message ID
+                await save_control_panel(guild_id, channel_id, new_message.id)
+                logger.info(f"✅ Recreated control panel in guild {guild_id}")
+                
+            except Exception as e:
+                logger.error(f"Error restoring control panel in guild {guild_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Error during control panel restoration: {e}")
 
 # =========================
 # 🛡️ MODERATION COG - ACTIONS
@@ -3972,6 +4570,147 @@ class HistoryCommands(commands.Cog, name="history"):
 
 
 # =========================
+# CONTROL PANEL SLASH COMMAND
+# =========================
+
+class ControlPanelCommands(commands.Cog, name="control_panel"):
+    """Control panel management commands."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @app_commands.command(name="controlpanelset", description="Set up the control panel in the current channel")
+    @app_commands.check(owner_check)
+    async def controlpanelset(self, interaction: discord.Interaction):
+        """Set up the control panel in the current channel."""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            # Check if control panel already exists
+            existing = await get_control_panel(interaction.guild_id)
+            if existing:
+                # Delete old panel
+                try:
+                    old_channel = interaction.guild.get_channel(existing["channel_id"])
+                    if old_channel:
+                        old_message = await old_channel.fetch_message(existing["message_id"])
+                        await old_message.delete()
+                except:
+                    pass
+                await delete_control_panel(interaction.guild_id)
+            
+            # Create new control panel
+            embed = discord.Embed(
+                title="🎛️ Bot Control Panel",
+                description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
+            embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+            embed.add_field(name="📊 Commands", value=f"{len(self.bot.tree.get_commands())} total", inline=True)
+            embed.set_footer(text="Control Panel • Owner Only")
+            
+            view = ControlPanelView(self.bot, OWNER_ID)
+            message = await interaction.channel.send(embed=embed, view=view)
+            
+            # Save to database
+            await save_control_panel(interaction.guild_id, interaction.channel_id, message.id)
+            
+            await interaction.followup.send(
+                f"✅ Control panel has been set up in {interaction.channel.mention}!",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Control panel setup error: {e}")
+            await interaction.followup.send(f"❌ Failed to set up control panel: {str(e)}", ephemeral=True)
+    
+    @app_commands.command(name="controlpanelrefresh", description="Refresh the control panel")
+    @app_commands.check(owner_check)
+    async def controlpanelrefresh(self, interaction: discord.Interaction):
+        """Refresh the control panel."""
+        await interaction.response.defer(ephemeral=True)
+        await handle_refresh_panel(interaction)
+    
+    @app_commands.command(name="controlpanelremove", description="Remove the control panel")
+    @app_commands.check(owner_check)
+    async def controlpanelremove(self, interaction: discord.Interaction):
+        """Remove the control panel."""
+        await interaction.response.defer(ephemeral=True)
+        
+        config = await get_control_panel(interaction.guild_id)
+        if not config:
+            await interaction.followup.send("❌ No control panel configured in this server.", ephemeral=True)
+            return
+        
+        try:
+            channel = interaction.guild.get_channel(config["channel_id"])
+            if channel:
+                try:
+                    message = await channel.fetch_message(config["message_id"])
+                    await message.delete()
+                except:
+                    pass
+            
+            await delete_control_panel(interaction.guild_id)
+            await interaction.followup.send("✅ Control panel removed successfully!", ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Control panel remove error: {e}")
+            await interaction.followup.send(f"❌ Failed to remove control panel: {str(e)}", ephemeral=True)
+    
+    @app_commands.command(name="controlpanelmove", description="Move the control panel to another channel")
+    @app_commands.check(owner_check)
+    @app_commands.describe(channel="Channel to move the control panel to")
+    async def controlpanelmove(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Move the control panel to another channel."""
+        await interaction.response.defer(ephemeral=True)
+        
+        config = await get_control_panel(interaction.guild_id)
+        if not config:
+            await interaction.followup.send("❌ No control panel configured in this server.", ephemeral=True)
+            return
+        
+        try:
+            # Delete old panel
+            old_channel = interaction.guild.get_channel(config["channel_id"])
+            if old_channel:
+                try:
+                    old_message = await old_channel.fetch_message(config["message_id"])
+                    await old_message.delete()
+                except:
+                    pass
+            
+            # Create new panel in new channel
+            embed = discord.Embed(
+                title="🎛️ Bot Control Panel",
+                description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
+            embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+            embed.add_field(name="📊 Commands", value=f"{len(self.bot.tree.get_commands())} total", inline=True)
+            embed.set_footer(text="Control Panel • Owner Only")
+            
+            view = ControlPanelView(self.bot, OWNER_ID)
+            message = await channel.send(embed=embed, view=view)
+            
+            # Update database
+            await save_control_panel(interaction.guild_id, channel.id, message.id)
+            
+            await interaction.followup.send(
+                f"✅ Control panel moved to {channel.mention}!",
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Control panel move error: {e}")
+            await interaction.followup.send(f"❌ Failed to move control panel: {str(e)}", ephemeral=True)
+
+
+# =========================
 # MAIN BOT INITIALIZATION
 # =========================
 
@@ -3998,6 +4737,7 @@ async def main():
         await bot.add_cog(Help(bot))
         await bot.add_cog(CommandErrorHandler(bot))
         await bot.add_cog(HistoryCommands(bot))
+        await bot.add_cog(ControlPanelCommands(bot))
         await bot.start(TOKEN)
 
 
