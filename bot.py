@@ -76,7 +76,7 @@ class MyBot(commands.Bot):
 
                 embed = discord.Embed(
                     title="🎛️ Bot Control Panel",
-                    description="Owner-only bot control panel.",
+                    description="Owner-only bot control panel with moderation tools.",
                     color=discord.Color.blue(),
                     timestamp=datetime.utcnow()
                 )
@@ -962,7 +962,763 @@ async def handle_db_status(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Database error: {str(e)}", ephemeral=True)
 
 # =========================
-# CONTROL PANEL VIEWS
+# MODERATION CONTROL PANEL VIEWS
+# =========================
+
+class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
+    """Modal for moderation actions that require input."""
+    def __init__(self, action_type: str, target_user: discord.Member):
+        super().__init__()
+        self.action_type = action_type
+        self.target_user = target_user
+        
+        self.reason_input = discord.ui.TextInput(
+            label="Reason",
+            placeholder="Enter the reason for this action...",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=500
+        )
+        self.add_item(self.reason_input)
+        
+        if action_type == "timeout":
+            self.duration_input = discord.ui.TextInput(
+                label="Duration (minutes)",
+                placeholder="Enter duration in minutes (e.g., 5, 60)",
+                required=True,
+                max_length=10
+            )
+            self.add_item(self.duration_input)
+        
+        if action_type == "clear":
+            self.amount_input = discord.ui.TextInput(
+                label="Number of messages to clear",
+                placeholder="Enter amount (1-100)",
+                required=True,
+                max_length=3
+            )
+            self.add_item(self.amount_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        reason = self.reason_input.value or "No reason provided"
+        guild = interaction.guild
+        
+        try:
+            if self.action_type == "warn":
+                await add_warning(self.target_user.id, guild.id, reason, str(interaction.user))
+                await add_history(guild.id, self.target_user.id, str(self.target_user), "WARN", reason)
+                await interaction.response.send_message(f"✅ Warned {self.target_user.mention} | Reason: {reason}", ephemeral=True)
+                
+            elif self.action_type == "ban":
+                await self.target_user.ban(reason=reason)
+                await add_history(guild.id, self.target_user.id, str(self.target_user), "BAN", f"Banned by {interaction.user}: {reason}")
+                await interaction.response.send_message(f"✅ Banned {self.target_user.mention} | Reason: {reason}", ephemeral=True)
+                
+            elif self.action_type == "kick":
+                await self.target_user.kick(reason=reason)
+                await add_history(guild.id, self.target_user.id, str(self.target_user), "KICK", reason)
+                await interaction.response.send_message(f"✅ Kicked {self.target_user.mention} | Reason: {reason}", ephemeral=True)
+                
+            elif self.action_type == "timeout":
+                try:
+                    duration_minutes = int(self.duration_input.value)
+                    if duration_minutes <= 0:
+                        await interaction.response.send_message("❌ Duration must be positive.", ephemeral=True)
+                        return
+                    await self.target_user.timeout(utcnow() + timedelta(minutes=duration_minutes), reason=reason)
+                    await add_history(guild.id, self.target_user.id, str(self.target_user), "TIMEOUT", f"Timed out for {duration_minutes}min by {interaction.user}: {reason}")
+                    await interaction.response.send_message(f"✅ Timed out {self.target_user.mention} for {duration_minutes} minutes | Reason: {reason}", ephemeral=True)
+                except ValueError:
+                    await interaction.response.send_message("❌ Invalid duration. Please enter a number.", ephemeral=True)
+                    return
+                    
+            elif self.action_type == "clear":
+                try:
+                    amount = min(int(self.amount_input.value), 100)
+                    deleted = await interaction.channel.purge(limit=amount)
+                    await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{interaction.channel.name}")
+                    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages | Reason: {reason}", ephemeral=True)
+                except ValueError:
+                    await interaction.response.send_message("❌ Invalid amount. Please enter a number.", ephemeral=True)
+                    return
+                    
+            elif self.action_type == "lock":
+                overwrite = interaction.channel.overwrites_for(guild.default_role)
+                overwrite.send_messages = False
+                await interaction.channel.set_permissions(guild.default_role, overwrite=overwrite)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{interaction.channel.name}: {reason}")
+                await interaction.response.send_message(f"🔒 Locked {interaction.channel.mention} | Reason: {reason}", ephemeral=True)
+                
+            elif self.action_type == "unlock":
+                overwrite = interaction.channel.overwrites_for(guild.default_role)
+                overwrite.send_messages = None
+                await interaction.channel.set_permissions(guild.default_role, overwrite=overwrite)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{interaction.channel.name}: {reason}")
+                await interaction.response.send_message(f"🔓 Unlocked {interaction.channel.mention} | Reason: {reason}", ephemeral=True)
+                
+        except discord.Forbidden:
+            await interaction.response.send_message("❌ I don't have permission to perform this action.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Mod action error: {e}")
+            await interaction.response.send_message(f"❌ Error: {str(e)[:100]}", ephemeral=True)
+
+class ModerationTargetSelect(discord.ui.Select):
+    """Select menu for choosing a moderation target."""
+    def __init__(self, action_type: str, guild: discord.Guild):
+        self.action_type = action_type
+        self.guild = guild
+        
+        options = [
+            discord.SelectOption(
+                label="Current Channel",
+                value="channel",
+                description="Apply action to the current channel",
+                emoji="📢"
+            ),
+            discord.SelectOption(
+                label="Select a Member",
+                value="member_select",
+                description="Select a specific member",
+                emoji="👤"
+            )
+        ]
+        
+        # Add recent members (limited to avoid UI overflow)
+        members = [m for m in guild.members if not m.bot and m.id != guild.me.id][:10]
+        for member in members:
+            options.append(
+                discord.SelectOption(
+                    label=member.display_name[:25],
+                    value=f"member_{member.id}",
+                    description=f"@{member.name[:20]}",
+                    emoji="👤"
+                )
+            )
+        
+        super().__init__(
+            placeholder=f"Select target for {action_type}...",
+            options=options,
+            min_values=1,
+            max_values=1,
+            custom_id=f"mod_target_{action_type}"
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        selected = self.values[0]
+        
+        if selected == "channel":
+            if self.action_type in ["lock", "unlock"]:
+                modal = ModerationActionModal(self.action_type, None)
+                await interaction.response.send_modal(modal)
+            else:
+                await interaction.response.send_message("❌ This action requires a member selection.", ephemeral=True)
+            return
+            
+        elif selected == "member_select":
+            # This would open a member selection modal in a real implementation
+            # For now, we'll use a simple modal with user ID input
+            await interaction.response.send_message(
+                "⚠️ Member selection coming soon. Please use the slash commands directly for now.\n"
+                "Or type the user's ID in the channel.", ephemeral=True
+            )
+            return
+            
+        elif selected.startswith("member_"):
+            member_id = int(selected.split("_")[1])
+            member = self.guild.get_member(member_id)
+            if member:
+                modal = ModerationActionModal(self.action_type, member)
+                await interaction.response.send_modal(modal)
+            else:
+                await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+
+class ModerationActionView(discord.ui.View):
+    """View containing moderation action buttons."""
+    
+    def __init__(self, bot_instance, guild: discord.Guild):
+        super().__init__(timeout=None)
+        self.bot = bot_instance
+        self.guild = guild
+        
+        # Row 0 - User Actions
+        self.add_item(discord.ui.Button(
+            label="⚠️ Warn",
+            style=discord.ButtonStyle.warning,
+            custom_id="mod_warn",
+            row=0,
+            emoji="⚠️"
+        ))
+        self.add_item(discord.ui.Button(
+            label="🔨 Ban",
+            style=discord.ButtonStyle.danger,
+            custom_id="mod_ban",
+            row=0,
+            emoji="🔨"
+        ))
+        self.add_item(discord.ui.Button(
+            label="👢 Kick",
+            style=discord.ButtonStyle.danger,
+            custom_id="mod_kick",
+            row=0,
+            emoji="👢"
+        ))
+        self.add_item(discord.ui.Button(
+            label="⏰ Timeout",
+            style=discord.ButtonStyle.primary,
+            custom_id="mod_timeout",
+            row=0,
+            emoji="⏰"
+        ))
+        
+        # Row 1 - Channel Actions
+        self.add_item(discord.ui.Button(
+            label="🧹 Clear Messages",
+            style=discord.ButtonStyle.secondary,
+            custom_id="mod_clear",
+            row=1,
+            emoji="🧹"
+        ))
+        self.add_item(discord.ui.Button(
+            label="🔒 Lock Channel",
+            style=discord.ButtonStyle.danger,
+            custom_id="mod_lock",
+            row=1,
+            emoji="🔒"
+        ))
+        self.add_item(discord.ui.Button(
+            label="🔓 Unlock Channel",
+            style=discord.ButtonStyle.success,
+            custom_id="mod_unlock",
+            row=1,
+            emoji="🔓"
+        ))
+        self.add_item(discord.ui.Button(
+            label="⏱️ Slowmode",
+            style=discord.ButtonStyle.primary,
+            custom_id="mod_slowmode",
+            row=1,
+            emoji="⏱️"
+        ))
+        
+        # Row 2 - Warning Management
+        self.add_item(discord.ui.Button(
+            label="📋 View Warnings",
+            style=discord.ButtonStyle.secondary,
+            custom_id="mod_view_warnings",
+            row=2,
+            emoji="📋"
+        ))
+        self.add_item(discord.ui.Button(
+            label="🗑️ Remove Warning",
+            style=discord.ButtonStyle.danger,
+            custom_id="mod_remove_warning",
+            row=2,
+            emoji="🗑️"
+        ))
+        self.add_item(discord.ui.Button(
+            label="🧹 Clear Warnings",
+            style=discord.ButtonStyle.danger,
+            custom_id="mod_clear_warnings",
+            row=2,
+            emoji="🧹"
+        ))
+
+    async def button_callback(self, interaction: discord.Interaction, action: str):
+        """Handle button callbacks for moderation actions."""
+        # Owner check
+        if interaction.user.id != self.bot.owner_id:
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+        
+        # Route to appropriate handler
+        if action in ["warn", "ban", "kick", "timeout", "clear", "lock", "unlock"]:
+            # These actions need a target selection
+            view = discord.ui.View()
+            
+            if action in ["lock", "unlock"]:
+                # Channel actions - no target needed
+                modal = ModerationActionModal(action, None)
+                await interaction.response.send_modal(modal)
+                return
+            else:
+                # User actions - show member selector
+                embed = discord.Embed(
+                    title=f"Select Target for {action.title()}",
+                    description="Choose a member from the dropdown below or use the current channel.",
+                    color=discord.Color.blue()
+                )
+                select = ModerationTargetSelect(action, interaction.guild)
+                view.add_item(select)
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                
+        elif action == "slowmode":
+            # Slowmode - simple input
+            modal = SlowmodeModal(interaction.channel)
+            await interaction.response.send_modal(modal)
+            
+        elif action == "view_warnings":
+            # Show warnings - need member selection
+            embed = discord.Embed(
+                title="📋 View Warnings",
+                description="Select a member using the dropdown below.",
+                color=discord.Color.blue()
+            )
+            select = ModerationTargetSelect("view_warnings", interaction.guild)
+            # Override the callback for view warnings
+            select.callback = self._view_warnings_callback
+            view = discord.ui.View()
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            
+        elif action == "remove_warning":
+            # Remove warning - need warning ID
+            modal = RemoveWarningModal()
+            await interaction.response.send_modal(modal)
+            
+        elif action == "clear_warnings":
+            # Clear warnings - need member selection
+            embed = discord.Embed(
+                title="🧹 Clear Warnings",
+                description="Select a member from the dropdown below to clear all their warnings.",
+                color=discord.Color.orange()
+            )
+            select = ModerationTargetSelect("clear_warnings", interaction.guild)
+            # Override the callback for clear warnings
+            select.callback = self._clear_warnings_callback
+            view = discord.ui.View()
+            view.add_item(select)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def _view_warnings_callback(self, interaction: discord.Interaction):
+        """Callback for viewing warnings."""
+        selected = self.values[0] if hasattr(self, 'values') else None
+        if not selected or not selected.startswith("member_"):
+            return await interaction.response.send_message("❌ Please select a member.", ephemeral=True)
+        
+        member_id = int(selected.split("_")[1])
+        member = interaction.guild.get_member(member_id)
+        if not member:
+            return await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+        
+        warnings = await get_warnings(member_id, interaction.guild.id)
+        if not warnings:
+            embed = discord.Embed(
+                title=f"📋 Warnings for {member.display_name}",
+                description="No warnings found.",
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title=f"📋 Warnings for {member.display_name}",
+                color=discord.Color.orange()
+            )
+            embed.set_footer(text=f"Total: {len(warnings)} warnings")
+            for i, (wid, reason, timestamp) in enumerate(warnings[:10], 1):
+                embed.add_field(
+                    name=f"#{i} (ID: {wid})",
+                    value=f"Reason: {reason}\nTime: {timestamp}",
+                    inline=False
+                )
+            if len(warnings) > 10:
+                embed.add_field(name="...", value=f"And {len(warnings) - 10} more warnings.", inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _clear_warnings_callback(self, interaction: discord.Interaction):
+        """Callback for clearing warnings."""
+        selected = self.values[0] if hasattr(self, 'values') else None
+        if not selected or not selected.startswith("member_"):
+            return await interaction.response.send_message("❌ Please select a member.", ephemeral=True)
+        
+        member_id = int(selected.split("_")[1])
+        member = interaction.guild.get_member(member_id)
+        if not member:
+            return await interaction.response.send_message("❌ Member not found.", ephemeral=True)
+        
+        warnings = await get_warnings(member_id, interaction.guild.id)
+        if not warnings:
+            return await interaction.response.send_message(f"⚠️ {member.mention} has no warnings to clear.", ephemeral=True)
+        
+        await clear_warnings(member_id, interaction.guild.id)
+        await add_history(interaction.guild.id, member_id, str(member), "WARN_CLEAR", f"All warnings cleared by {interaction.user}")
+        
+        embed = discord.Embed(
+            title="✅ Warnings Cleared",
+            description=f"Cleared {len(warnings)} warnings from {member.mention}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class SlowmodeModal(discord.ui.Modal, title="Set Slowmode"):
+    """Modal for setting slowmode."""
+    def __init__(self, channel: discord.TextChannel):
+        super().__init__()
+        self.channel = channel
+        
+        self.seconds_input = discord.ui.TextInput(
+            label="Slowmode (seconds)",
+            placeholder="Enter seconds (0-21600)",
+            required=True,
+            max_length=10
+        )
+        self.add_item(self.seconds_input)
+        
+        self.reason_input = discord.ui.TextInput(
+            label="Reason",
+            placeholder="Reason for changing slowmode...",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=500
+        )
+        self.add_item(self.reason_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            seconds = int(self.seconds_input.value)
+            if seconds < 0 or seconds > 21600:
+                return await interaction.response.send_message("❌ Slowmode must be between 0 and 21600 seconds.", ephemeral=True)
+            
+            reason = self.reason_input.value or "No reason provided"
+            await self.channel.edit(slowmode_delay=seconds)
+            await add_history(
+                interaction.guild.id, interaction.user.id, str(interaction.user),
+                "SLOWMODE", f"Set slowmode in #{self.channel.name} to {seconds}s: {reason}"
+            )
+            
+            embed = discord.Embed(
+                title="⏱️ Slowmode Set",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Channel", value=self.channel.mention, inline=True)
+            embed.add_field(name="Slowmode", value=f"{seconds} seconds", inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid input. Please enter a number.", ephemeral=True)
+
+class RemoveWarningModal(discord.ui.Modal, title="Remove Warning"):
+    """Modal for removing a warning by ID."""
+    def __init__(self):
+        super().__init__()
+        
+        self.warning_id_input = discord.ui.TextInput(
+            label="Warning ID",
+            placeholder="Enter the warning ID to remove",
+            required=True,
+            max_length=20
+        )
+        self.add_item(self.warning_id_input)
+        
+        self.reason_input = discord.ui.TextInput(
+            label="Reason for removal",
+            placeholder="Why are you removing this warning?",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=500
+        )
+        self.add_item(self.reason_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            warning_id = int(self.warning_id_input.value)
+            result = await db.fetchone("SELECT user_id, reason FROM warnings WHERE id=?", (warning_id,))
+            if not result:
+                return await interaction.response.send_message(f"❌ Warning ID {warning_id} not found.", ephemeral=True)
+            
+            user_id, old_reason = result
+            await remove_warning(warning_id)
+            
+            embed = discord.Embed(
+                title="✅ Warning Removed",
+                description=f"Removed warning #{warning_id}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
+            embed.add_field(name="Original Reason", value=old_reason, inline=False)
+            if self.reason_input.value:
+                embed.add_field(name="Removal Reason", value=self.reason_input.value, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            
+        except ValueError:
+            await interaction.response.send_message("❌ Invalid warning ID. Please enter a number.", ephemeral=True)
+
+class ModerationButton(discord.ui.Button):
+    """Custom button for moderation actions with proper callback handling."""
+    
+    def __init__(self, label: str, action: str, style: discord.ButtonStyle, row: int = 0, emoji: str = None):
+        super().__init__(
+            label=label,
+            custom_id=f"mod_{action}",
+            style=style,
+            row=row,
+            emoji=emoji
+        )
+        self.action = action
+
+    async def callback(self, interaction: discord.Interaction):
+        """Handle button press for moderation actions."""
+        view = self.view
+        if hasattr(view, 'button_callback'):
+            await view.button_callback(interaction, self.action)
+
+class ModerationPanelView(discord.ui.View):
+    """The moderation panel view with organized moderation buttons."""
+    
+    def __init__(self, bot_instance, guild: discord.Guild):
+        super().__init__(timeout=None)
+        self.bot = bot_instance
+        self.guild = guild
+        
+        # Row 0 - User Actions
+        self.add_item(ModerationButton(
+            "Warn User", "warn",
+            discord.ButtonStyle.warning, row=0, emoji="⚠️"
+        ))
+        self.add_item(ModerationButton(
+            "Ban User", "ban",
+            discord.ButtonStyle.danger, row=0, emoji="🔨"
+        ))
+        self.add_item(ModerationButton(
+            "Kick User", "kick",
+            discord.ButtonStyle.danger, row=0, emoji="👢"
+        ))
+        self.add_item(ModerationButton(
+            "Timeout", "timeout",
+            discord.ButtonStyle.primary, row=0, emoji="⏰"
+        ))
+        
+        # Row 1 - Channel Actions
+        self.add_item(ModerationButton(
+            "Clear Messages", "clear",
+            discord.ButtonStyle.secondary, row=1, emoji="🧹"
+        ))
+        self.add_item(ModerationButton(
+            "Lock Channel", "lock",
+            discord.ButtonStyle.danger, row=1, emoji="🔒"
+        ))
+        self.add_item(ModerationButton(
+            "Unlock Channel", "unlock",
+            discord.ButtonStyle.success, row=1, emoji="🔓"
+        ))
+        self.add_item(ModerationButton(
+            "Slowmode", "slowmode",
+            discord.ButtonStyle.primary, row=1, emoji="⏱️"
+        ))
+        
+        # Row 2 - Warning Management
+        self.add_item(ModerationButton(
+            "View Warnings", "view_warnings",
+            discord.ButtonStyle.secondary, row=2, emoji="📋"
+        ))
+        self.add_item(ModerationButton(
+            "Remove Warning", "remove_warning",
+            discord.ButtonStyle.danger, row=2, emoji="🗑️"
+        ))
+        self.add_item(ModerationButton(
+            "Clear Warnings", "clear_warnings",
+            discord.ButtonStyle.danger, row=2, emoji="🧹"
+        ))
+
+    async def button_callback(self, interaction: discord.Interaction, action: str):
+        """Handle button callbacks for moderation actions."""
+        # Owner check
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+        
+        # Route to appropriate handler
+        if action in ["warn", "ban", "kick", "timeout", "clear", "lock", "unlock"]:
+            if action in ["lock", "unlock"]:
+                # Channel actions - no target needed
+                modal = ModerationActionModal(action, None)
+                await interaction.response.send_modal(modal)
+                return
+            else:
+                # User actions - show member selector
+                embed = discord.Embed(
+                    title=f"Select Target for {action.title()}",
+                    description="Choose a member from the dropdown below.",
+                    color=discord.Color.blue()
+                )
+                
+                # Create a view with member select
+                view = discord.ui.View()
+                
+                # Create options for members (limit to 25 for UI)
+                options = []
+                members = [m for m in self.guild.members if not m.bot and m.id != self.guild.me.id][:25]
+                for member in members:
+                    options.append(
+                        discord.SelectOption(
+                            label=member.display_name[:25],
+                            value=str(member.id),
+                            description=f"@{member.name[:20]}",
+                            emoji="👤"
+                        )
+                    )
+                
+                if not options:
+                    return await interaction.response.send_message("❌ No members found to target.", ephemeral=True)
+                
+                select = discord.ui.Select(
+                    placeholder=f"Select a member for {action}...",
+                    options=options,
+                    min_values=1,
+                    max_values=1,
+                    custom_id=f"mod_target_{action}"
+                )
+                
+                async def select_callback(select_interaction: discord.Interaction):
+                    member_id = int(select.values[0])
+                    member = self.guild.get_member(member_id)
+                    if member:
+                        modal = ModerationActionModal(action, member)
+                        await select_interaction.response.send_modal(modal)
+                    else:
+                        await select_interaction.response.send_message("❌ Member not found.", ephemeral=True)
+                
+                select.callback = select_callback
+                view.add_item(select)
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+                
+        elif action == "slowmode":
+            modal = SlowmodeModal(interaction.channel)
+            await interaction.response.send_modal(modal)
+            
+        elif action == "view_warnings":
+            embed = discord.Embed(
+                title="📋 View Warnings",
+                description="Select a member from the dropdown below to view their warnings.",
+                color=discord.Color.blue()
+            )
+            
+            view = discord.ui.View()
+            options = []
+            members = [m for m in self.guild.members if not m.bot and m.id != self.guild.me.id][:25]
+            for member in members:
+                options.append(
+                    discord.SelectOption(
+                        label=member.display_name[:25],
+                        value=str(member.id),
+                        description=f"@{member.name[:20]}",
+                        emoji="👤"
+                    )
+                )
+            
+            if options:
+                select = discord.ui.Select(
+                    placeholder="Select a member...",
+                    options=options,
+                    min_values=1,
+                    max_values=1,
+                    custom_id="view_warnings_select"
+                )
+                
+                async def view_warnings_callback(select_interaction: discord.Interaction):
+                    member_id = int(select.values[0])
+                    member = self.guild.get_member(member_id)
+                    if not member:
+                        return await select_interaction.response.send_message("❌ Member not found.", ephemeral=True)
+                    
+                    warnings = await get_warnings(member_id, self.guild.id)
+                    if not warnings:
+                        embed_result = discord.Embed(
+                            title=f"📋 Warnings for {member.display_name}",
+                            description="No warnings found.",
+                            color=discord.Color.green()
+                        )
+                    else:
+                        embed_result = discord.Embed(
+                            title=f"📋 Warnings for {member.display_name}",
+                            color=discord.Color.orange()
+                        )
+                        embed_result.set_footer(text=f"Total: {len(warnings)} warnings")
+                        for i, (wid, reason, timestamp) in enumerate(warnings[:10], 1):
+                            embed_result.add_field(
+                                name=f"#{i} (ID: {wid})",
+                                value=f"Reason: {reason}\nTime: {timestamp}",
+                                inline=False
+                            )
+                        if len(warnings) > 10:
+                            embed_result.add_field(name="...", value=f"And {len(warnings) - 10} more warnings.", inline=False)
+                    
+                    await select_interaction.response.send_message(embed=embed_result, ephemeral=True)
+                
+                select.callback = view_warnings_callback
+                view.add_item(select)
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ No members found.", ephemeral=True)
+            
+        elif action == "remove_warning":
+            modal = RemoveWarningModal()
+            await interaction.response.send_modal(modal)
+            
+        elif action == "clear_warnings":
+            embed = discord.Embed(
+                title="🧹 Clear Warnings",
+                description="Select a member from the dropdown below to clear all their warnings.",
+                color=discord.Color.orange()
+            )
+            
+            view = discord.ui.View()
+            options = []
+            members = [m for m in self.guild.members if not m.bot and m.id != self.guild.me.id][:25]
+            for member in members:
+                options.append(
+                    discord.SelectOption(
+                        label=member.display_name[:25],
+                        value=str(member.id),
+                        description=f"@{member.name[:20]}",
+                        emoji="👤"
+                    )
+                )
+            
+            if options:
+                select = discord.ui.Select(
+                    placeholder="Select a member...",
+                    options=options,
+                    min_values=1,
+                    max_values=1,
+                    custom_id="clear_warnings_select"
+                )
+                
+                async def clear_warnings_callback(select_interaction: discord.Interaction):
+                    member_id = int(select.values[0])
+                    member = self.guild.get_member(member_id)
+                    if not member:
+                        return await select_interaction.response.send_message("❌ Member not found.", ephemeral=True)
+                    
+                    warnings = await get_warnings(member_id, self.guild.id)
+                    if not warnings:
+                        return await select_interaction.response.send_message(f"⚠️ {member.mention} has no warnings to clear.", ephemeral=True)
+                    
+                    await clear_warnings(member_id, self.guild.id)
+                    await add_history(self.guild.id, member_id, str(member), "WARN_CLEAR", f"All warnings cleared by {select_interaction.user}")
+                    
+                    embed_result = discord.Embed(
+                        title="✅ Warnings Cleared",
+                        description=f"Cleared {len(warnings)} warnings from {member.mention}",
+                        color=discord.Color.green()
+                    )
+                    embed_result.add_field(name="Moderator", value=select_interaction.user.mention, inline=True)
+                    await select_interaction.response.send_message(embed=embed_result, ephemeral=True)
+                
+                select.callback = clear_warnings_callback
+                view.add_item(select)
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ No members found.", ephemeral=True)
+
+# =========================
+# MAIN CONTROL PANEL VIEW
 # =========================
 
 class ControlPanelButton(discord.ui.Button):
@@ -986,11 +1742,8 @@ class ControlPanelButton(discord.ui.Button):
 
     async def callback(self, interaction: discord.Interaction):
         """Handle button press with proper owner check and command routing."""
-        # Get the view instance
-        view = self.view
-        
         # Owner check
-        if interaction.user.id != view.owner_id:
+        if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message(
                 "❌ This control panel is owner-only.",
                 ephemeral=True
@@ -1176,6 +1929,56 @@ class ControlPanelView(discord.ui.View):
             discord.ButtonStyle.danger,
             row=2
         ))
+        
+        # Row 3 - Moderation Panel (NEW)
+        self.add_item(ControlPanelButton(
+            "🛡️ Moderation",
+            "open_moderation",
+            discord.ButtonStyle.primary,
+            row=3,
+            emoji="🛡️"
+        ))
+
+    async def button_callback(self, interaction: discord.Interaction, custom_id: str):
+        """Handle button callbacks including the new moderation button."""
+        if interaction.user.id != self.owner_id:
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+        
+        if custom_id == "open_moderation":
+            # Open the moderation panel
+            embed = discord.Embed(
+                title="🛡️ Moderation Control Panel",
+                description="Use the buttons below to perform moderation actions.\n\n"
+                           "**User Actions:** Warn, Ban, Kick, Timeout\n"
+                           "**Channel Actions:** Clear, Lock, Unlock, Slowmode\n"
+                           "**Warning Management:** View, Remove, Clear",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            embed.set_footer(text="Moderation Panel • Owner Only • All actions are logged")
+            
+            view = ModerationPanelView(self.bot, interaction.guild)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        else:
+            # Route to existing handlers
+            command_map = {
+                "show_stats": handle_show_stats,
+                "clear_cache": handle_clear_cache,
+                "refresh_panel": handle_refresh_panel,
+                "db_status": handle_db_status,
+                "db_optimize": handle_db_optimize,
+                "db_stats": handle_db_stats,
+                "toggle_modules": handle_toggle_modules,
+                "maintenance_mode": handle_maintenance,
+                "restart_bot": handle_restart_bot,
+            }
+            
+            handler = command_map.get(custom_id)
+            if handler:
+                await handler(interaction)
 
 # =========================
 # BOT EVENTS
@@ -3655,7 +4458,8 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             
             embed = discord.Embed(
                 title="🎛️ Bot Control Panel",
-                description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.\n\n"
+                           "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
@@ -3735,7 +4539,8 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             
             embed = discord.Embed(
                 title="🎛️ Bot Control Panel",
-                description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.\n\n"
+                           "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
