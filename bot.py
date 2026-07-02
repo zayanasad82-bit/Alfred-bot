@@ -1450,14 +1450,14 @@ class ControlPanelView(discord.ui.View):
     def _setup_components(self):
         """Set up all control panel components."""
         # Row 1: Moderation Tools
-        self.add_item(ControlPanelButton("⚠️ Warn", "warn_user", discord.ButtonStyle.warning))
+        self.add_item(ControlPanelButton("⚠️ Warn", "warn_user", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🔨 Ban", "ban_user", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("👢 Kick", "kick_user", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("🔇 Mute", "mute_user", discord.ButtonStyle.secondary))
         
         # Row 2: More Moderation
         self.add_item(ControlPanelButton("🔊 Unmute", "unmute_user", discord.ButtonStyle.success))
-        self.add_item(ControlPanelButton("⏰ Timeout", "timeout_user", discord.ButtonStyle.warning))
+        self.add_item(ControlPanelButton("⏰ Timeout", "timeout_user", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🗑️ Clear", "clear_messages", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🔒 Lock", "lock_channel", discord.ButtonStyle.danger))
         
@@ -1507,7 +1507,7 @@ class ControlPanelView(discord.ui.View):
             discord.SelectOption(label="Database Status", value="db_status", emoji="💾"),
             discord.SelectOption(label="Toggle Modules", value="toggle_modules", emoji="🔄"),
         ]))
-
+        
 # =========================
 # CONTROL PANEL HANDLERS
 # =========================
