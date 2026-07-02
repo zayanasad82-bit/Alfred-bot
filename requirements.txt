@@ -6,3 +6,6 @@ google-genai
 pypdf
 python-docx
 davey
+fastapi
+uvicorn
+jinja2
