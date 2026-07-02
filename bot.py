@@ -57,11 +57,17 @@ intents.voice_states = True
 
 class MyBot(commands.Bot):
     async def setup_hook(self):
+        # Sync slash commands
         await self.tree.sync()
         logger.info("✅ Slash commands synced")
-        
-        # Restore control panel on startup
-        await self.restore_control_panel()
+
+        # Restore control panel if the method exists
+        if hasattr(self, "restore_control_panel"):
+            try:
+                await self.restore_control_panel()
+                logger.info("✅ Control panel restored")
+            except Exception as e:
+                logger.error(f"Control panel restoration failed: {e}")
 
 bot = MyBot(
     command_prefix="!",
