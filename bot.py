@@ -1449,42 +1449,42 @@ class ControlPanelView(discord.ui.View):
     
     def _setup_components(self):
         """Set up all control panel components."""
-        # Row 1: Moderation Tools
+        # Row 1: Moderation Tools (4 items)
         self.add_item(ControlPanelButton("⚠️ Warn", "warn_user", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🔨 Ban", "ban_user", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("👢 Kick", "kick_user", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("🔇 Mute", "mute_user", discord.ButtonStyle.secondary))
         
-        # Row 2: More Moderation
+        # Row 2: More Moderation (4 items)
         self.add_item(ControlPanelButton("🔊 Unmute", "unmute_user", discord.ButtonStyle.success))
         self.add_item(ControlPanelButton("⏰ Timeout", "timeout_user", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🗑️ Clear", "clear_messages", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🔒 Lock", "lock_channel", discord.ButtonStyle.danger))
         
-        # Row 3: Channel Controls
+        # Row 3: Channel Controls (4 items)
         self.add_item(ControlPanelButton("🔓 Unlock", "unlock_channel", discord.ButtonStyle.success))
         self.add_item(ControlPanelButton("⏱️ Slowmode", "set_slowmode", discord.ButtonStyle.secondary))
         self.add_item(ControlPanelButton("🧠 Reset AI", "reset_ai", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("📚 View Memories", "view_memories", discord.ButtonStyle.primary))
         
-        # Row 4: AI & System
+        # Row 4: AI & System (4 items)
         self.add_item(ControlPanelButton("🧹 Clear Memories", "clear_memories", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("💬 Chat History", "chat_history", discord.ButtonStyle.secondary))
         self.add_item(ControlPanelButton("📊 Stats", "show_stats", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🔄 Refresh", "refresh_panel", discord.ButtonStyle.secondary))
         
-        # Row 5: Database & Cache
+        # Row 5: Database & Cache (4 items)
         self.add_item(ControlPanelButton("🗑️ Clear Cache", "clear_cache", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("💾 DB Status", "db_status", discord.ButtonStyle.primary))
         self.add_item(ControlPanelButton("🔄 DB Optimize", "db_optimize", discord.ButtonStyle.secondary))
         self.add_item(ControlPanelButton("📊 DB Stats", "db_stats", discord.ButtonStyle.primary))
         
-        # Row 6: System Controls
+        # Row 6: System Controls (3 items)
         self.add_item(ControlPanelButton("🔄 Toggle Modules", "toggle_modules", discord.ButtonStyle.secondary))
         self.add_item(ControlPanelButton("🔧 Maintenance", "maintenance_mode", discord.ButtonStyle.danger))
         self.add_item(ControlPanelButton("🔄 Restart Bot", "restart_bot", discord.ButtonStyle.danger))
         
-        # Add dropdown menus
+        # Row 7: Dropdown 1 - Moderation (1 item)
         self.add_item(ControlPanelDropdown(self.bot, "Moderation", [
             discord.SelectOption(label="Warn", value="warn", emoji="⚠️"),
             discord.SelectOption(label="Ban", value="ban", emoji="🔨"),
@@ -1494,6 +1494,7 @@ class ControlPanelView(discord.ui.View):
             discord.SelectOption(label="Timeout", value="timeout", emoji="⏰"),
         ]))
         
+        # Row 8: Dropdown 2 - AI Actions (1 item)
         self.add_item(ControlPanelDropdown(self.bot, "AI Actions", [
             discord.SelectOption(label="Reset AI", value="reset", emoji="🧠"),
             discord.SelectOption(label="View Memories", value="view_memories", emoji="📚"),
@@ -1501,6 +1502,7 @@ class ControlPanelView(discord.ui.View):
             discord.SelectOption(label="Chat History", value="chat_history", emoji="💬"),
         ]))
         
+        # Row 9: Dropdown 3 - Quick Actions (1 item)
         self.add_item(ControlPanelDropdown(self.bot, "Quick Actions", [
             discord.SelectOption(label="Show Stats", value="stats", emoji="📊"),
             discord.SelectOption(label="Clear Cache", value="clear_cache", emoji="🗑️"),
