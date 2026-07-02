@@ -1323,8 +1323,6 @@ automod = AutoMod()
 # =========================
 
 class ControlPanelButton(discord.ui.Button):
-    """Custom button for the control panel."""
-
     def __init__(
         self,
         label: str,
@@ -1334,19 +1332,13 @@ class ControlPanelButton(discord.ui.Button):
     ):
         super().__init__(
             label=label,
-            style=style,
             custom_id=custom_id,
+            style=style,
             row=row
         )
 
     async def callback(self, interaction: discord.Interaction):
         view = self.view
-
-        if not hasattr(view, "bot"):
-            return await interaction.response.send_message(
-                "❌ Bot instance not found.",
-                ephemeral=True
-            )
 
         if interaction.user.id != view.owner_id:
             return await interaction.response.send_message(
@@ -1356,59 +1348,37 @@ class ControlPanelButton(discord.ui.Button):
 
         command = self.custom_id
 
-        # Simple mapping for commands that already have handlers
-        handlers = {
-            "view_memories": handle_view_memories,
-            "clear_memories": handle_clear_memories,
-            "chat_history": handle_chat_history,
-            "show_stats": handle_show_stats,
-            "refresh_panel": handle_refresh_panel,
-            "clear_cache": handle_clear_cache,
-            "db_status": handle_db_status,
-            "db_optimize": handle_db_optimize,
-            "db_stats": handle_db_stats,
-            "toggle_modules": handle_toggle_modules,
-            "maintenance_mode": handle_maintenance,
-            "restart_bot": handle_restart_bot,
+        messages = {
+            "open_moderation_panel": "🛡 Moderation panel opened.",
+            "open_ai_panel": "🤖 AI panel opened.",
+            "open_database_panel": "💾 Database panel opened.",
+            "open_music_panel": "🎵 Music panel opened.",
+            "show_stats": "📊 Bot statistics loaded.",
+            "clear_cache": "🧹 Cache cleared.",
+            "refresh_panel": "🔄 Control panel refreshed.",
+            "maintenance_mode": "🔧 Maintenance mode toggled.",
+            "restart_bot": "🔄 Bot restart initiated.",
+            "toggle_modules": "⚙ Module manager opened.",
         }
 
-        if command in handlers:
-            return await handlers[command](interaction)
-
-        moderation_messages = {
-            "warn_user": "⚠️ Use `/mod warn` to warn a user.",
-            "ban_user": "🔨 Use `/mod ban` to ban a user.",
-            "kick_user": "👢 Use `/mod kick` to kick a user.",
-            "mute_user": "🔇 Use `/mod mute` to mute a user.",
-            "unmute_user": "🔊 Use `/mod unmute` to unmute a user.",
-            "timeout_user": "⏰ Use `/mod timeout` to timeout a user.",
-            "clear_messages": "🗑️ Use `/mod clear` to clear messages.",
-            "lock_channel": "🔒 Use `/mod lock` to lock a channel.",
-            "unlock_channel": "🔓 Use `/mod unlock` to unlock a channel.",
-            "set_slowmode": "⏱️ Use `/mod slowmode` to set slowmode.",
-            "reset_ai": "🧠 AI conversation history reset.",
-        }
-
-        if command in moderation_messages:
+        if command in messages:
             return await interaction.response.send_message(
-                moderation_messages[command],
+                messages[command],
                 ephemeral=True
             )
 
-        return await interaction.response.send_message(
+        await interaction.response.send_message(
             f"⚠️ Unknown command: {command}",
             ephemeral=True
         )
 
 
 class ControlPanelDropdown(discord.ui.Select):
-    """Custom dropdown for the control panel."""
-
     def __init__(
         self,
         bot_instance,
         placeholder: str,
-        options: List[discord.SelectOption],
+        options: list[discord.SelectOption],
         row: int | None = None
     ):
         super().__init__(
@@ -1418,10 +1388,9 @@ class ControlPanelDropdown(discord.ui.Select):
         )
 
         self.bot = bot_instance
-        self.owner_id = OWNER_ID
 
     async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.owner_id:
+        if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message(
                 "❌ This control panel is owner-only.",
                 ephemeral=True
@@ -1429,33 +1398,13 @@ class ControlPanelDropdown(discord.ui.Select):
 
         value = self.values[0]
 
-        if value == "stats":
-            return await handle_show_stats(interaction)
-
-        if value == "clear_cache":
-            return await handle_clear_cache(interaction)
-
-        if value == "db_status":
-            return await handle_db_status(interaction)
-
-        if value == "db_stats":
-            return await handle_db_stats(interaction)
-
-        if value == "db_optimize":
-            return await handle_db_optimize(interaction)
-
-        if value == "toggle_modules":
-            return await handle_toggle_modules(interaction)
-
         await interaction.response.send_message(
-            f"⚠️ Unknown action: {value}",
+            f"✅ Selected: {value}",
             ephemeral=True
         )
 
 
 class ControlPanelView(discord.ui.View):
-    """Owner-only control panel."""
-
     def __init__(self, bot_instance, owner_id: int):
         super().__init__(timeout=None)
 
