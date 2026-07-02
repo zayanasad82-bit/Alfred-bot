@@ -1324,119 +1324,134 @@ automod = AutoMod()
 
 class ControlPanelButton(discord.ui.Button):
     """Custom button for the control panel."""
-    
-    def __init__(self, label: str, custom_id: str, style: discord.ButtonStyle = discord.ButtonStyle.secondary):
-        super().__init__(label=label, style=style, custom_id=custom_id)
-    
+
+    def __init__(
+        self,
+        label: str,
+        custom_id: str,
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        row: int | None = None
+    ):
+        super().__init__(
+            label=label,
+            style=style,
+            custom_id=custom_id,
+            row=row
+        )
+
     async def callback(self, interaction: discord.Interaction):
-        """Handle button press."""
         view = self.view
-        if not hasattr(view, 'bot'):
-            return await interaction.response.send_message("❌ Bot instance not found.", ephemeral=True)
-        
-        # Check if user is owner
+
+        if not hasattr(view, "bot"):
+            return await interaction.response.send_message(
+                "❌ Bot instance not found.",
+                ephemeral=True
+            )
+
         if interaction.user.id != view.owner_id:
-            return await interaction.response.send_message("❌ This control panel is owner-only.", ephemeral=True)
-        
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+
         command = self.custom_id
-        
-        # Handle different commands
-        if command == "warn_user":
-            await interaction.response.send_message("⚠️ Use `/mod warn` to warn a user.", ephemeral=True)
-        elif command == "ban_user":
-            await interaction.response.send_message("🔨 Use `/mod ban` to ban a user.", ephemeral=True)
-        elif command == "kick_user":
-            await interaction.response.send_message("👢 Use `/mod kick` to kick a user.", ephemeral=True)
-        elif command == "mute_user":
-            await interaction.response.send_message("🔇 Use `/mod mute` to mute a user.", ephemeral=True)
-        elif command == "unmute_user":
-            await interaction.response.send_message("🔊 Use `/mod unmute` to unmute a user.", ephemeral=True)
-        elif command == "timeout_user":
-            await interaction.response.send_message("⏰ Use `/mod timeout` to timeout a user.", ephemeral=True)
-        elif command == "clear_messages":
-            await interaction.response.send_message("🗑️ Use `/mod clear` to clear messages.", ephemeral=True)
-        elif command == "lock_channel":
-            await interaction.response.send_message("🔒 Use `/mod lock` to lock a channel.", ephemeral=True)
-        elif command == "unlock_channel":
-            await interaction.response.send_message("🔓 Use `/mod unlock` to unlock a channel.", ephemeral=True)
-        elif command == "set_slowmode":
-            await interaction.response.send_message("⏱️ Use `/mod slowmode` to set slowmode.", ephemeral=True)
-        elif command == "reset_ai":
-            await interaction.response.send_message("🧠 AI conversation history reset.", ephemeral=True)
-        elif command == "view_memories":
-            await handle_view_memories(interaction)
-        elif command == "clear_memories":
-            await handle_clear_memories(interaction)
-        elif command == "chat_history":
-            await handle_chat_history(interaction)
-        elif command == "show_stats":
-            await handle_show_stats(interaction)
-        elif command == "refresh_panel":
-            await handle_refresh_panel(interaction)
-        elif command == "clear_cache":
-            await handle_clear_cache(interaction)
-        elif command == "db_status":
-            await handle_db_status(interaction)
-        elif command == "db_optimize":
-            await handle_db_optimize(interaction)
-        elif command == "db_stats":
-            await handle_db_stats(interaction)
-        elif command == "toggle_modules":
-            await handle_toggle_modules(interaction)
-        elif command == "maintenance_mode":
-            await handle_maintenance(interaction)
-        elif command == "restart_bot":
-            await handle_restart_bot(interaction)
-        else:
-            await interaction.response.send_message(f"⚠️ Unknown command: {command}", ephemeral=True)
+
+        # Simple mapping for commands that already have handlers
+        handlers = {
+            "view_memories": handle_view_memories,
+            "clear_memories": handle_clear_memories,
+            "chat_history": handle_chat_history,
+            "show_stats": handle_show_stats,
+            "refresh_panel": handle_refresh_panel,
+            "clear_cache": handle_clear_cache,
+            "db_status": handle_db_status,
+            "db_optimize": handle_db_optimize,
+            "db_stats": handle_db_stats,
+            "toggle_modules": handle_toggle_modules,
+            "maintenance_mode": handle_maintenance,
+            "restart_bot": handle_restart_bot,
+        }
+
+        if command in handlers:
+            return await handlers[command](interaction)
+
+        moderation_messages = {
+            "warn_user": "⚠️ Use `/mod warn` to warn a user.",
+            "ban_user": "🔨 Use `/mod ban` to ban a user.",
+            "kick_user": "👢 Use `/mod kick` to kick a user.",
+            "mute_user": "🔇 Use `/mod mute` to mute a user.",
+            "unmute_user": "🔊 Use `/mod unmute` to unmute a user.",
+            "timeout_user": "⏰ Use `/mod timeout` to timeout a user.",
+            "clear_messages": "🗑️ Use `/mod clear` to clear messages.",
+            "lock_channel": "🔒 Use `/mod lock` to lock a channel.",
+            "unlock_channel": "🔓 Use `/mod unlock` to unlock a channel.",
+            "set_slowmode": "⏱️ Use `/mod slowmode` to set slowmode.",
+            "reset_ai": "🧠 AI conversation history reset.",
+        }
+
+        if command in moderation_messages:
+            return await interaction.response.send_message(
+                moderation_messages[command],
+                ephemeral=True
+            )
+
+        return await interaction.response.send_message(
+            f"⚠️ Unknown command: {command}",
+            ephemeral=True
+        )
+
 
 class ControlPanelDropdown(discord.ui.Select):
     """Custom dropdown for the control panel."""
-    
-    def __init__(self, bot_instance, placeholder: str, options: List[discord.SelectOption]):
-        super().__init__(placeholder=placeholder, options=options)
+
+    def __init__(
+        self,
+        bot_instance,
+        placeholder: str,
+        options: List[discord.SelectOption],
+        row: int | None = None
+    ):
+        super().__init__(
+            placeholder=placeholder,
+            options=options,
+            row=row
+        )
+
         self.bot = bot_instance
         self.owner_id = OWNER_ID
-    
+
     async def callback(self, interaction: discord.Interaction):
-        """Handle dropdown selection."""
         if interaction.user.id != self.owner_id:
-            return await interaction.response.send_message("❌ This control panel is owner-only.", ephemeral=True)
-        
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+
         value = self.values[0]
-        
-        # Route to appropriate handler based on dropdown
-        if self.placeholder == "Moderation":
-            if value == "warn":
-                await interaction.response.send_message("⚠️ Use `/mod warn` to warn a user.", ephemeral=True)
-            elif value == "ban":
-                await interaction.response.send_message("🔨 Use `/mod ban` to ban a user.", ephemeral=True)
-            elif value == "kick":
-                await interaction.response.send_message("👢 Use `/mod kick` to kick a user.", ephemeral=True)
-            elif value == "mute":
-                await interaction.response.send_message("🔇 Use `/mod mute` to mute a user.", ephemeral=True)
-            elif value == "unmute":
-                await interaction.response.send_message("🔊 Use `/mod unmute` to unmute a user.", ephemeral=True)
-            elif value == "timeout":
-                await interaction.response.send_message("⏰ Use `/mod timeout` to timeout a user.", ephemeral=True)
-        elif self.placeholder == "AI Actions":
-            if value == "reset":
-                await interaction.response.send_message("🧠 AI conversation history reset.", ephemeral=True)
-            elif value == "view_memories":
-                await handle_view_memories(interaction)
-            elif value == "clear_memories":
-                await handle_clear_memories(interaction)
-            elif value == "chat_history":
-                await handle_chat_history(interaction)
-        elif self.placeholder == "Quick Actions":
-            if value == "stats":
-                await handle_show_stats(interaction)
-            elif value == "clear_cache":
-                await handle_clear_cache(interaction)
-            elif value == "db_status":
-                await handle_db_status(interaction)
-            elif value == "toggle_modules":
-                await handle_toggle_modules(interaction)
+
+        if value == "stats":
+            return await handle_show_stats(interaction)
+
+        if value == "clear_cache":
+            return await handle_clear_cache(interaction)
+
+        if value == "db_status":
+            return await handle_db_status(interaction)
+
+        if value == "db_stats":
+            return await handle_db_stats(interaction)
+
+        if value == "db_optimize":
+            return await handle_db_optimize(interaction)
+
+        if value == "toggle_modules":
+            return await handle_toggle_modules(interaction)
+
+        await interaction.response.send_message(
+            f"⚠️ Unknown action: {value}",
+            ephemeral=True
+        )
+
 
 class ControlPanelView(discord.ui.View):
     """Owner-only control panel."""
@@ -1485,7 +1500,7 @@ class ControlPanelView(discord.ui.View):
 
         # Row 1
         self.add_item(ControlPanelButton(
-            "🧹 Clear Cache",
+            "🧹 Cache",
             "clear_cache",
             discord.ButtonStyle.danger,
             row=1
@@ -1546,9 +1561,9 @@ class ControlPanelView(discord.ui.View):
                         emoji="🗑️"
                     ),
                     discord.SelectOption(
-                        label="Refresh Panel",
-                        value="refresh_panel",
-                        emoji="🔄"
+                        label="Toggle Modules",
+                        value="toggle_modules",
+                        emoji="⚙️"
                     ),
                 ],
                 row=2
