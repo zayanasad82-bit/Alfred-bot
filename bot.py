@@ -13,7 +13,7 @@ import time
 import uuid
 import logging
 import traceback
-from collections import defaultdict, deque
+from collections import defaultdict
 from typing import Optional, List, Dict, Any, Tuple
 
 from google import genai
@@ -21,8 +21,6 @@ from pypdf import PdfReader
 from docx import Document
 from discord.utils import utcnow
 import aiohttp
-
-
 
 # =========================
 # LOGGING CONFIGURATION
@@ -43,7 +41,7 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-2.0-flash"
 
 # =========================
 # DISCORD BOT SETUP
@@ -53,21 +51,53 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 intents.presences = True
-intents.voice_states = True
 
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        # Sync slash commands
         await self.tree.sync()
         logger.info("✅ Slash commands synced")
+        await self.restore_control_panel()
 
-        # Restore control panel if the method exists
-        if hasattr(self, "restore_control_panel"):
-            try:
-                await self.restore_control_panel()
-                logger.info("✅ Control panel restored")
-            except Exception as e:
-                logger.error(f"Control panel restoration failed: {e}")
+    async def restore_control_panel(self):
+        """Restore control panel after bot restart."""
+        try:
+            results = await db.fetchall(
+                "SELECT guild_id, channel_id, message_id FROM control_panel"
+            )
+
+            for guild_id, channel_id, message_id in results:
+                guild = self.get_guild(guild_id)
+                if guild is None:
+                    continue
+
+                channel = guild.get_channel(channel_id)
+                if channel is None:
+                    continue
+
+                embed = discord.Embed(
+                    title="🎛️ Bot Control Panel",
+                    description="Owner-only bot control panel.",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.utcnow()
+                )
+                embed.add_field(name="🤖 Status", value="🟢 Online", inline=True)
+                embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+                embed.add_field(name="📊 Commands", value=str(len(self.tree.get_commands())), inline=True)
+                embed.set_footer(text="Control Panel • Owner Only")
+
+                view = ControlPanelView(self, OWNER_ID)
+
+                try:
+                    message = await channel.fetch_message(message_id)
+                    await message.edit(embed=embed, view=view)
+                    logger.info(f"✅ Restored control panel in guild {guild_id}")
+                except discord.NotFound:
+                    new_message = await channel.send(embed=embed, view=view)
+                    await save_control_panel(guild_id, channel_id, new_message.id)
+                    logger.info(f"✅ Recreated control panel in guild {guild_id}")
+
+        except Exception as e:
+            logger.error(f"Control panel restoration failed: {e}")
 
 bot = MyBot(
     command_prefix="!",
@@ -108,9 +138,6 @@ class AsyncDatabase:
                 user_id INTEGER, guild_id INTEGER,
                 reason TEXT, moderator TEXT, timestamp TEXT
             )""",
-            """CREATE TABLE IF NOT EXISTS memory (
-                user_id INTEGER PRIMARY KEY, user_name TEXT, bot_name TEXT
-            )""",
             """CREATE TABLE IF NOT EXISTS tickets (
                 guild_id INTEGER, user_id INTEGER,
                 channel_id INTEGER, status TEXT DEFAULT 'open', created_at TEXT,
@@ -142,10 +169,6 @@ class AsyncDatabase:
                 guild_id INTEGER, name TEXT, response TEXT,
                 PRIMARY KEY (guild_id, name)
             )""",
-            """CREATE TABLE IF NOT EXISTS playlists (
-                guild_id INTEGER, name TEXT, url TEXT, added_by INTEGER,
-                PRIMARY KEY (guild_id, name)
-            )""",
             """CREATE TABLE IF NOT EXISTS birthdays (
                 user_id INTEGER PRIMARY KEY, guild_id INTEGER,
                 date TEXT, year INTEGER
@@ -170,21 +193,6 @@ class AsyncDatabase:
                 guild_id INTEGER, channel_id INTEGER, user_id INTEGER,
                 date TEXT, count INTEGER DEFAULT 0, topics TEXT,
                 PRIMARY KEY (guild_id, channel_id, user_id, date)
-            )""",
-            """CREATE TABLE IF NOT EXISTS ai_conversations (
-                guild_id INTEGER, channel_id INTEGER, user_id INTEGER,
-                role TEXT, content TEXT, timestamp TEXT,
-                PRIMARY KEY (guild_id, user_id, timestamp)
-            )""",
-            """CREATE TABLE IF NOT EXISTS ai_memories (
-                guild_id INTEGER, user_id INTEGER, key TEXT, value TEXT,
-                importance INTEGER DEFAULT 1, created_at TEXT, last_accessed TEXT,
-                PRIMARY KEY (guild_id, user_id, key)
-            )""",
-            """CREATE TABLE IF NOT EXISTS ai_personality (
-                guild_id INTEGER, user_id INTEGER,
-                trait TEXT, value TEXT,
-                PRIMARY KEY (guild_id, user_id, trait)
             )""",
             """CREATE TABLE IF NOT EXISTS mod_logs_config (
                 guild_id INTEGER PRIMARY KEY,
@@ -313,20 +321,6 @@ async def get_user_history(user_id, guild_id, limit=20):
         (user_id, guild_id, limit)
     )
 
-async def get_guild_history_by_date(guild_id, date_str, limit=50):
-    return await db.fetchall(
-        """SELECT event_type, details, timestamp, username, user_id FROM history
-           WHERE guild_id=? AND timestamp LIKE ? ORDER BY id DESC LIMIT ?""",
-        (guild_id, f"{date_str}%", limit)
-    )
-
-async def get_guild_history_by_type(guild_id, event_type, limit=20):
-    return await db.fetchall(
-        """SELECT event_type, details, timestamp, username, user_id FROM history
-           WHERE guild_id=? AND event_type=? ORDER BY id DESC LIMIT ?""",
-        (guild_id, event_type, limit)
-    )
-
 async def get_history_search(guild_id, search_term, limit=20):
     return await db.fetchall(
         """SELECT event_type, details, timestamp, username, user_id FROM history
@@ -357,13 +351,6 @@ async def cache_message(message):
     )
     await db.commit()
 
-async def get_cached_message(message_id):
-    result = await db.fetchone(
-        "SELECT content, author_id, channel_id, guild_id, timestamp, attachments FROM message_cache WHERE message_id=?",
-        (message_id,)
-    )
-    return result
-
 async def add_snipe(guild_id, channel_id, message_id, content, author_id, attachments=""):
     await db.execute(
         """INSERT INTO snipe_cache (guild_id, channel_id, message_id, content, author_id, timestamp, deleted_at, attachments)
@@ -372,7 +359,6 @@ async def add_snipe(guild_id, channel_id, message_id, content, author_id, attach
          datetime.now().isoformat(), datetime.now().isoformat(), attachments)
     )
     await db.commit()
-    # Keep only last 100 snipes per guild
     await db.execute(
         "DELETE FROM snipe_cache WHERE id NOT IN (SELECT id FROM snipe_cache WHERE guild_id=? ORDER BY id DESC LIMIT 100)",
         (guild_id,)
@@ -388,7 +374,6 @@ async def add_edit_snipe(guild_id, channel_id, message_id, old_content, new_cont
          datetime.now().isoformat(), datetime.now().isoformat())
     )
     await db.commit()
-    # Keep only last 100 edit snipes per guild
     await db.execute(
         "DELETE FROM edit_snipe_cache WHERE id NOT IN (SELECT id FROM edit_snipe_cache WHERE guild_id=? ORDER BY id DESC LIMIT 100)",
         (guild_id,)
@@ -513,18 +498,6 @@ async def increment_message_count(user_id, guild_id):
     )
     await db.commit()
 
-async def get_message_count(user_id, guild_id, window_seconds=5):
-    result = await db.fetchone(
-        """SELECT message_count FROM member_message_counts
-           WHERE user_id=? AND guild_id=? AND last_message_time > datetime(?, '-' || ? || ' seconds')""",
-        (user_id, guild_id, datetime.now().isoformat(), window_seconds)
-    )
-    return result[0] if result else 0
-
-# =========================
-# CONTROL PANEL DATABASE FUNCTIONS
-# =========================
-
 async def save_control_panel(guild_id: int, channel_id: int, message_id: int):
     """Save control panel configuration to database."""
     await db.execute(
@@ -553,10 +526,6 @@ async def delete_control_panel(guild_id: int):
     await db.execute("DELETE FROM control_panel WHERE guild_id=?", (guild_id,))
     await db.commit()
 
-# =========================
-# MOD LOGS FUNCTIONS
-# =========================
-
 async def log_to_mod_channel(guild, embed):
     """Send an embed to the configured mod-logs channel."""
     config = await get_mod_logs_config(guild.id)
@@ -570,270 +539,41 @@ async def log_to_mod_channel(guild, embed):
         except Exception as e:
             logger.error(f"Failed to send mod log: {e}")
 
-async def log_event(guild, event_type, title, description, color=discord.Color.blue(), fields=None, thumbnail=None):
-    """Create and send a moderation log embed."""
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=color,
-        timestamp=datetime.now()
+async def get_balance_simple(user_id: int) -> Tuple[int, int]:
+    """Get user's balance from database."""
+    result = await db.fetchone(
+        "SELECT balance, bank FROM economy WHERE user_id=?",
+        (user_id,)
     )
-    embed.set_footer(text=f"Event ID: {event_type} • {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    if fields:
-        for name, value, inline in fields:
-            embed.add_field(name=name, value=value, inline=inline if inline is not None else False)
-    
-    if thumbnail:
-        embed.set_thumbnail(url=thumbnail)
-    
-    await log_to_mod_channel(guild, embed)
-
-# =========================
-# AI MEMORY FUNCTIONS
-# =========================
-
-async def get_memory(user_id: int) -> Tuple[Optional[str], Optional[str]]:
-    """Get user's memory from database."""
-    result = await db.fetchone("SELECT user_name, bot_name FROM memory WHERE user_id=?", (user_id,))
     if result:
         return result[0], result[1]
-    return None, None
-
-async def save_memory(user_id: int, user_name: str = None, bot_name: str = None):
-    """Save or update user's memory."""
-    existing = await db.fetchone("SELECT user_name, bot_name FROM memory WHERE user_id=?", (user_id,))
-    if existing:
-        current_user, current_bot = existing
-        new_user = user_name if user_name is not None else current_user
-        new_bot = bot_name if bot_name is not None else current_bot
-        await db.execute(
-            "UPDATE memory SET user_name=?, bot_name=? WHERE user_id=?",
-            (new_user, new_bot, user_id)
-        )
-    else:
-        await db.execute(
-            "INSERT INTO memory (user_id, user_name, bot_name) VALUES (?, ?, ?)",
-            (user_id, user_name or "User", bot_name or "AI Bot")
-        )
-    await db.commit()
-
-async def get_ai_memories(guild_id: int, user_id: int, limit: int = 20):
-    """Get AI memories for a user."""
-    return await db.fetchall(
-        """SELECT key, value, importance, created_at, last_accessed 
-           FROM ai_memories 
-           WHERE guild_id=? AND user_id=? 
-           ORDER BY importance DESC, last_accessed DESC 
-           LIMIT ?""",
-        (guild_id, user_id, limit)
-    )
-
-async def save_ai_memory(guild_id: int, user_id: int, key: str, value: str, importance: int = 1):
-    """Save or update an AI memory."""
     await db.execute(
-        """INSERT INTO ai_memories (guild_id, user_id, key, value, importance, created_at, last_accessed)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
-           ON CONFLICT(guild_id, user_id, key) 
-           DO UPDATE SET value=?, importance=?, last_accessed=?""",
-        (guild_id, user_id, key, value, importance, datetime.now().isoformat(), datetime.now().isoformat(),
-         value, importance, datetime.now().isoformat())
+        "INSERT INTO economy (user_id, balance, bank) VALUES (?, 0, 0)",
+        (user_id,)
     )
     await db.commit()
+    return 0, 0
 
-async def get_user_personality(guild_id: int, user_id: int):
-    """Get user personality traits."""
-    return await db.fetchall(
-        "SELECT trait, value FROM ai_personality WHERE guild_id=? AND user_id=?",
-        (guild_id, user_id)
+async def count_events_for_date(guild_id: int, date: str, event_type: str) -> int:
+    """Count events of a specific type for a date."""
+    result = await db.fetchone(
+        "SELECT COUNT(*) FROM history WHERE guild_id=? AND event_type=? AND timestamp LIKE ?",
+        (guild_id, event_type, f"{date}%")
     )
-
-async def save_user_personality(guild_id: int, user_id: int, trait: str, value: str):
-    """Save a personality trait for a user."""
-    await db.execute(
-        """INSERT INTO ai_personality (guild_id, user_id, trait, value)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(guild_id, user_id, trait)
-           DO UPDATE SET value=?""",
-        (guild_id, user_id, trait, value, value)
-    )
-    await db.commit()
-
-async def get_recent_conversation(guild_id: int, channel_id: int, limit: int = 10):
-    """Get recent conversation history."""
-    return await db.fetchall(
-        """SELECT role, content, timestamp, user_id 
-           FROM ai_conversations 
-           WHERE guild_id=? AND channel_id=? 
-           ORDER BY id DESC LIMIT ?""",
-        (guild_id, channel_id, limit)
-    )
-
-async def save_conversation(guild_id: int, channel_id: int, user_id: int, role: str, content: str):
-    """Save a conversation message."""
-    await db.execute(
-        """INSERT INTO ai_conversations (guild_id, channel_id, user_id, role, content, timestamp)
-           VALUES (?, ?, ?, ?, ?, ?)""",
-        (guild_id, channel_id, user_id, role, content[:1000], datetime.now().isoformat())
-    )
-    await db.commit()
-
-async def extract_memory_facts(guild_id: int, user_id: int, content: str):
-    """Extract and store memory facts from user messages."""
-    # Simple pattern-based memory extraction
-    patterns = {
-        "name": r"(?:my name is|call me|I'm|i am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-        "age": r"(?:i am|I'm|age)\s+(\d+)\s+(?:years old|yo|y/o)",
-        "birthday": r"(?:my birthday is|born on)\s+([A-Z][a-z]+\s+\d{1,2}(?:st|nd|rd|th)?)",
-        "location": r"(?:i (?:live|am) (?:in|from)|location is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-        "job": r"(?:my job is|i work (?:as|in)|profession|occupation)\s+(?:a|an)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-        "favorite": r"(?:my favorite|i love|i like)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-        "preferred_name": r"(?:call me|prefer|preferred name is)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)",
-    }
-    
-    content_lower = content.lower()
-    for key, pattern in patterns.items():
-        match = re.search(pattern, content, re.IGNORECASE)
-        if match:
-            value = match.group(1).strip()
-            importance = 2 if key in ["name", "preferred_name"] else 1
-            await save_ai_memory(guild_id, user_id, key, value, importance)
-            
-            # Also save as personality trait
-            if key in ["name", "age", "location", "job", "preferred_name"]:
-                trait_name = "preferred_name" if key == "name" else key
-                await save_user_personality(guild_id, user_id, trait_name, value)
-
-async def get_ai_response(prompt: str) -> str:
-    """Get a response from Google Gemini."""
-    try:
-        if not client:
-            return "⚠️ GEMINI_API_KEY is missing. Please set the GEMINI_API_KEY environment variable."
-
-        response = await asyncio.to_thread(
-            lambda: client.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt
-            )
-        )
-
-        return response.text.strip()
-
-    except Exception as e:
-        logger.error(f"AI response error: {e}")
-        return f"⚠️ AI error: {str(e)}"
+    return result[0] if result else 0
 
 # =========================
-# AI CONTEXT BUILDING
+# OWNER CHECK
 # =========================
-async def build_ai_context(
-    guild_id: int,
-    channel_id: int,
-    user_id: int,
-    username: str,
-    message_content: str,
-    conversation_history: List[Dict] = None
-) -> Tuple[str, Dict]:
-    """Build comprehensive AI context with memory, personality, and history."""
-    user_name = username
-    bot_name = "AI Bot"
-    memories = []
-    traits = []
-    
-    # Get AI memories
-    try:
-        ai_memories = await get_ai_memories(guild_id, user_id, limit=15)
-        for key, value, importance, created_at, last_accessed in ai_memories:
-            memories.append({"key": key, "value": value, "importance": importance})
-            if key == "preferred_name":
-                user_name = value
-    except Exception as e:
-        logger.error(f"Error getting AI memories: {e}")
-    
-    # Get personality traits
-    try:
-        traits_data = await get_user_personality(guild_id, user_id)
-        traits = [{"trait": t[0], "value": t[1]} for t in traits_data]
-    except Exception as e:
-        logger.error(f"Error getting personality: {e}")
-    
-    # Get level
-    level = 0
-    try:
-        result = await db.fetchone(
-            "SELECT level FROM leveling WHERE user_id=? AND guild_id=?",
-            (user_id, guild_id)
-        )
-        if result:
-            level = result[0]
-    except Exception:
-        pass
-    
-    # Get balance
-    try:
-        bal_result = await db.fetchone(
-            "SELECT balance, bank FROM economy WHERE user_id=? AND guild_id=?",
-            (user_id, guild_id)
-        )
-        if bal_result:
-            wallet, bank = bal_result
-        else:
-            wallet, bank = 0, 0
-    except Exception:
-        wallet, bank = 0, 0
-    
-    # Extract memory facts from current message
-    try:
-        await extract_memory_facts(guild_id, user_id, message_content)
-    except Exception as e:
-        logger.error(f"Memory extraction error: {e}")
-    
-    # Build context
-    context_parts = [
-        f"User: {user_name}",
-        f"Bot: {bot_name}",
-        f"Level: {level}",
-        f"Wallet: ${wallet:,}",
-        f"Bank: ${bank:,}"
-    ]
-    
-    # Add personality traits
-    if traits:
-        trait_str = " | ".join(f"{t['trait']}: {t['value']}" for t in traits[:5])
-        context_parts.append(f"Personality: {trait_str}")
-    
-    # Add important memories
-    important_memories = [m for m in memories if m["importance"] >= 2]
-    if important_memories:
-        memory_str = "; ".join(f"{m['key']}: {m['value']}" for m in important_memories[:5])
-        context_parts.append(f"Memories: {memory_str}")
-    
-    # Add conversation history
-    if conversation_history:
-        recent = conversation_history[-10:] if len(conversation_history) > 10 else conversation_history
-        history_lines = []
-        for entry in recent:
-            role = "User" if entry.get("role") == "user" else "Bot"
-            content = entry.get("content", "")[:200]
-            if content:
-                history_lines.append(f"{role}: {content}")
-        if history_lines:
-            context_parts.append("Recent conversation:\n" + "\n".join(history_lines))
-    
-    context = "\n".join(context_parts)
-    
-    # Return context and metadata
-    metadata = {
-        "user_name": user_name,
-        "bot_name": bot_name,
-        "memories": memories,
-        "traits": traits,
-        "level": level,
-        "wallet": wallet,
-        "bank": bank
-    }
-    
-    return context, metadata
+def is_owner():
+    async def predicate(interaction: discord.Interaction):
+        return interaction.user.id == OWNER_ID
+    return app_commands.check(predicate)
+
+# =========================
+# CONSTANTS
+# =========================
+INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
 
 # =========================
 # XP SYSTEM
@@ -884,188 +624,10 @@ async def add_xp(user_id, guild_id):
     await db.commit()
     return None
 
-async def get_balance_simple(user_id: int) -> Tuple[int, int]:
-    """Get user's balance from database."""
-    result = await db.fetchone(
-        "SELECT balance, bank FROM economy WHERE user_id=?",
-        (user_id,)
-    )
-    if result:
-        return result[0], result[1]
-    await db.execute(
-        "INSERT INTO economy (user_id, balance, bank) VALUES (?, 0, 0)",
-        (user_id,)
-    )
-    await db.commit()
-    return 0, 0
-
-async def count_events_for_date(guild_id: int, date: str, event_type: str) -> int:
-    """Count events of a specific type for a date."""
-    result = await db.fetchone(
-        "SELECT COUNT(*) FROM history WHERE guild_id=? AND event_type=? AND timestamp LIKE ?",
-        (guild_id, event_type, f"{date}%")
-    )
-    return result[0] if result else 0
-
-# =========================
-# OWNER CHECK
-# =========================
-async def owner_check(interaction: discord.Interaction):
-    return interaction.user.id == OWNER_ID
-
-def is_owner():
-    async def predicate(interaction: discord.Interaction):
-        return interaction.user.id == OWNER_ID
-    return app_commands.check(predicate)
-
-# =========================
-# CONSTANTS
-# =========================
-INVITE_REGEX = r"(discord\.gg/|discordapp\.com/invite/)"
-
-# =========================
-# WELCOME CONFIG
-# =========================
-welcome_configs = {}
-
 # =========================
 # GIVEAWAY TRACKING (in-memory)
 # =========================
-active_giveaways = {}  # guild_id -> list of giveaway dicts
-
-# =========================
-# DAILY SUMMARY TASK
-# =========================
-@tasks.loop(hours=24)
-async def generate_daily_summary():
-    """Generate and post daily server summary."""
-    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    for guild in bot.guilds:
-        try:
-            joins = await count_events_for_date(guild.id, yesterday, "JOIN")
-            leaves = await count_events_for_date(guild.id, yesterday, "LEAVE")
-            warns = await count_events_for_date(guild.id, yesterday, "WARN")
-            deletes = await count_events_for_date(guild.id, yesterday, "DELETE")
-            kicks = await count_events_for_date(guild.id, yesterday, "KICK")
-            bans = await count_events_for_date(guild.id, yesterday, "BAN")
-
-            result = await db.fetchone(
-                "SELECT SUM(count) FROM message_stats WHERE guild_id=? AND date=?",
-                (guild.id, yesterday)
-            )
-            total_msgs = result[0] if result and result[0] else 0
-
-            # Find most active user
-            most_active_name = "No one"
-            most_active_user_id = 0
-
-            result = await db.fetchone(
-                """
-                SELECT user_id, count
-                FROM message_stats
-                WHERE guild_id=? AND date=?
-                ORDER BY count DESC
-                LIMIT 1
-                """,
-                (guild.id, yesterday)
-            )
-
-            if result:
-                most_active_user_id = result[0]
-                member = guild.get_member(most_active_user_id)
-
-                if member:
-                    most_active_name = member.display_name
-                else:
-                    most_active_name = f"User ID {most_active_user_id}"
-
-            summary = (
-                f"📊 **Daily Summary - {yesterday}**\n"
-                f"📝 Total Messages: {total_msgs:,}\n"
-                f"👋 Joins: {joins} | 🚪 Leaves: {leaves}\n"
-                f"⚠️ Warnings: {warns} | 🗑️ Deleted: {deletes}\n"
-                f"👢 Kicks: {kicks} | 🔨 Bans: {bans}\n"
-                f"🏆 Most Active: {most_active_name}"
-            )
-
-            await db.execute(
-                """
-                INSERT INTO daily_summaries
-                (
-                    guild_id,
-                    date,
-                    summary,
-                    total_messages,
-                    most_active_user_id,
-                    top_topic,
-                    generated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    guild.id,
-                    yesterday,
-                    summary,
-                    total_msgs,
-                    most_active_user_id,
-                    "",
-                    datetime.now().isoformat()
-                )
-            )
-
-            await db.commit()
-
-            channel = discord.utils.get(guild.text_channels, name="mod-logs")
-            if channel and total_msgs > 0:
-                await channel.send(summary)
-
-        except Exception as e:
-            logger.error(f"Error generating daily summary for {guild.id}: {e}")
-
-# =========================
-# CONSOLIDATE MEMORIES TASK
-# =========================
-@tasks.loop(hours=6)
-async def consolidate_memories():
-    """Periodically consolidate and clean up AI memories."""
-    try:
-        # Delete old low-importance memories
-        await db.execute(
-            """DELETE FROM ai_memories 
-               WHERE importance <= 1 
-               AND last_accessed < datetime('now', '-30 days')"""
-        )
-        await db.commit()
-        logger.info("🧠 Consolidated AI memories")
-    except Exception as e:
-        logger.error(f"Memory consolidation error: {e}")
-
-# =========================
-# CHECK BIRTHDAYS TASK
-# =========================
-@tasks.loop(hours=24)
-async def check_birthdays():
-    """Check for birthdays and send announcements."""
-    today = datetime.now().strftime("%m-%d")
-    
-    for guild in bot.guilds:
-        try:
-            results = await db.fetchall(
-                "SELECT user_id FROM birthdays WHERE guild_id=? AND date LIKE ?",
-                (guild.id, f"%{today}%")
-            )
-            
-            for (user_id,) in results:
-                member = guild.get_member(user_id)
-                if member:
-                    channel = discord.utils.get(guild.text_channels, name="general")
-                    if not channel:
-                        channel = guild.system_channel
-                    if channel:
-                        await channel.send(f"🎂 Happy Birthday {member.mention}! 🎉")
-        except Exception as e:
-            logger.error(f"Birthday check error for {guild.id}: {e}")
+active_giveaways = {}
 
 # =========================
 # TICKET VIEWS
@@ -1102,12 +664,10 @@ class TicketPanelView(discord.ui.View):
         guild = interaction.guild
         user = interaction.user
         
-        # Check if user already has an open ticket
         existing = discord.utils.get(guild.text_channels, name=f"ticket-{user.name.lower().replace(' ', '-')}")
         if existing:
             return await interaction.response.send_message("❌ You already have an open ticket!", ephemeral=True)
         
-        # Create ticket channel
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
             user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
@@ -1185,7 +745,6 @@ class GiveawayView(discord.ui.View):
 
         await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
 
-
 # =========================
 # POLL VIEW
 # =========================
@@ -1235,12 +794,11 @@ class PollView(discord.ui.View):
 # =========================
 # AUTOMODERATION SYSTEM
 # =========================
-
 class AutoMod:
     """Handles automoderation features."""
     
     def __init__(self):
-        self.user_messages = defaultdict(lambda: defaultdict(list))  # guild_id -> user_id -> list of timestamps
+        self.user_messages = defaultdict(lambda: defaultdict(list))
 
     async def check_message(self, message):
         """Check a message against automod rules."""
@@ -1249,13 +807,11 @@ class AutoMod:
         
         config = await get_automod_config(message.guild.id)
         
-        # Anti-spam
         if config["anti_spam"]:
             user_id = message.author.id
             guild_id = message.guild.id
             now = time.time()
             
-            # Clean old messages
             self.user_messages[guild_id][user_id] = [
                 t for t in self.user_messages[guild_id][user_id]
                 if now - t < config["spam_window"]
@@ -1267,20 +823,17 @@ class AutoMod:
                 await self.take_action(message, "Spam detected")
                 return True
         
-        # Anti-invite
         if config["anti_invite"]:
             if re.search(INVITE_REGEX, message.content.lower()):
                 await self.take_action(message, "Invite link detected")
                 return True
         
-        # Anti-mass-mentions
         if config["anti_mentions"]:
             mention_count = len(message.mentions) + len(message.role_mentions)
             if mention_count > config["mention_limit"]:
                 await self.take_action(message, f"Mass mention detected ({mention_count} mentions)")
                 return True
         
-        # Bad words filter
         if config["bad_words"] and config["bad_words_list"]:
             bad_words = [w.strip().lower() for w in config["bad_words_list"].split(",") if w.strip()]
             for word in bad_words:
@@ -1301,7 +854,6 @@ class AutoMod:
             await add_warning(message.author.id, message.guild.id, f"AutoMod: {reason}", "AutoMod")
             await add_history(message.guild.id, message.author.id, str(message.author), "AUTO_MOD", reason)
             
-            # Log to mod logs
             embed = discord.Embed(
                 title="🛡️ AutoMod Action",
                 description=f"Action taken against {message.author.mention}",
@@ -1319,302 +871,8 @@ class AutoMod:
 automod = AutoMod()
 
 # =========================
-# CONTROL PANEL VIEWS
-# =========================
-
-class ControlPanelButton(discord.ui.Button):
-    def __init__(
-        self,
-        label: str,
-        custom_id: str,
-        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
-        row: int | None = None
-    ):
-        super().__init__(
-            label=label,
-            custom_id=custom_id,
-            style=style,
-            row=row
-        )
-
-    async def callback(self, interaction: discord.Interaction):
-        view = self.view
-
-        if interaction.user.id != view.owner_id:
-            return await interaction.response.send_message(
-                "❌ This control panel is owner-only.",
-                ephemeral=True
-            )
-
-        command = self.custom_id
-
-        messages = {
-            "open_moderation_panel": "🛡 Moderation panel opened.",
-            "open_ai_panel": "🤖 AI panel opened.",
-            "open_database_panel": "💾 Database panel opened.",
-            "open_music_panel": "🎵 Music panel opened.",
-            "show_stats": "📊 Bot statistics loaded.",
-            "clear_cache": "🧹 Cache cleared.",
-            "refresh_panel": "🔄 Control panel refreshed.",
-            "maintenance_mode": "🔧 Maintenance mode toggled.",
-            "restart_bot": "🔄 Bot restart initiated.",
-            "toggle_modules": "⚙ Module manager opened.",
-        }
-
-        if command in messages:
-            return await interaction.response.send_message(
-                messages[command],
-                ephemeral=True
-            )
-
-        await interaction.response.send_message(
-            f"⚠️ Unknown command: {command}",
-            ephemeral=True
-        )
-
-
-class ControlPanelDropdown(discord.ui.Select):
-    def __init__(
-        self,
-        bot_instance,
-        placeholder: str,
-        options: list[discord.SelectOption],
-        row: int | None = None
-    ):
-        super().__init__(
-            placeholder=placeholder,
-            options=options,
-            row=row
-        )
-
-        self.bot = bot_instance
-
-    async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != OWNER_ID:
-            return await interaction.response.send_message(
-                "❌ This control panel is owner-only.",
-                ephemeral=True
-            )
-
-        value = self.values[0]
-
-        await interaction.response.send_message(
-            f"✅ Selected: {value}",
-            ephemeral=True
-        )
-
-
-class ControlPanelView(discord.ui.View):
-    def __init__(self, bot_instance, owner_id: int):
-        super().__init__(timeout=None)
-
-        self.bot = bot_instance
-        self.owner_id = owner_id
-
-        # Row 0
-        self.add_item(ControlPanelButton(
-            "🛡 Moderation",
-            "open_moderation_panel",
-            discord.ButtonStyle.primary,
-            row=0
-        ))
-
-        self.add_item(ControlPanelButton(
-            "🤖 AI",
-            "open_ai_panel",
-            discord.ButtonStyle.primary,
-            row=0
-        ))
-
-        self.add_item(ControlPanelButton(
-            "📊 Stats",
-            "show_stats",
-            discord.ButtonStyle.success,
-            row=0
-        ))
-
-        self.add_item(ControlPanelButton(
-            "💾 Database",
-            "open_database_panel",
-            discord.ButtonStyle.secondary,
-            row=0
-        ))
-
-        self.add_item(ControlPanelButton(
-            "🎵 Music",
-            "open_music_panel",
-            discord.ButtonStyle.primary,
-            row=0
-        ))
-
-        # Row 1
-        self.add_item(ControlPanelButton(
-            "🧹 Cache",
-            "clear_cache",
-            discord.ButtonStyle.danger,
-            row=1
-        ))
-
-        self.add_item(ControlPanelButton(
-            "🔄 Refresh",
-            "refresh_panel",
-            discord.ButtonStyle.secondary,
-            row=1
-        ))
-
-        self.add_item(ControlPanelButton(
-            "🔧 Maintenance",
-            "maintenance_mode",
-            discord.ButtonStyle.danger,
-            row=1
-        ))
-
-        self.add_item(ControlPanelButton(
-            "🔄 Restart",
-            "restart_bot",
-            discord.ButtonStyle.danger,
-            row=1
-        ))
-
-        self.add_item(ControlPanelButton(
-            "⚙ Modules",
-            "toggle_modules",
-            discord.ButtonStyle.secondary,
-            row=1
-        ))
-
-        # Row 2
-        self.add_item(
-            ControlPanelDropdown(
-                self.bot,
-                "Quick Actions",
-                [
-                    discord.SelectOption(
-                        label="Database Status",
-                        value="db_status",
-                        emoji="💾"
-                    ),
-                    discord.SelectOption(
-                        label="Database Stats",
-                        value="db_stats",
-                        emoji="📊"
-                    ),
-                    discord.SelectOption(
-                        label="Optimize Database",
-                        value="db_optimize",
-                        emoji="🔄"
-                    ),
-                    discord.SelectOption(
-                        label="Clear Cache",
-                        value="clear_cache",
-                        emoji="🗑️"
-                    ),
-                    discord.SelectOption(
-                        label="Toggle Modules",
-                        value="toggle_modules",
-                        emoji="⚙️"
-                    ),
-                ],
-                row=2
-            )
-        )
-        
-# =========================
 # CONTROL PANEL HANDLERS
 # =========================
-
-async def handle_view_memories(interaction: discord.Interaction):
-    """Handle view memories command."""
-    memories = await get_ai_memories(interaction.guild_id, interaction.user.id, limit=20)
-    if not memories:
-        await interaction.response.send_message("📚 No memories found for you.", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="📚 Your AI Memories",
-        description="Here are the things I remember about you:",
-        color=discord.Color.blue()
-    )
-    
-    for key, value, importance, created_at, last_accessed in memories[:10]:
-        embed.add_field(
-            name=f"{key} (Importance: {importance})",
-            value=f"{value[:100]}\n*Last accessed: {last_accessed[:10]}*",
-            inline=False
-        )
-    
-    if len(memories) > 10:
-        embed.set_footer(text=f"Showing 10 of {len(memories)} memories")
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-async def handle_clear_memories(interaction: discord.Interaction):
-    """Handle clear memories command."""
-    await db.execute(
-        "DELETE FROM ai_memories WHERE guild_id=? AND user_id=?",
-        (interaction.guild_id, interaction.user.id)
-    )
-    await db.commit()
-    await interaction.response.send_message("🧹 All your AI memories have been cleared.", ephemeral=True)
-
-async def handle_chat_history(interaction: discord.Interaction):
-    """Handle chat history command."""
-    history = await get_recent_conversation(interaction.guild_id, interaction.channel_id, limit=10)
-    if not history:
-        await interaction.response.send_message("💬 No recent chat history in this channel.", ephemeral=True)
-        return
-    
-    embed = discord.Embed(
-        title="💬 Recent Chat History",
-        color=discord.Color.blue()
-    )
-    
-    for role, content, timestamp, user_id in history[:10]:
-        user = interaction.guild.get_member(user_id)
-        name = user.display_name if user else f"User {user_id}"
-        embed.add_field(
-            name=f"{name} ({role})",
-            value=f"{content[:200]}...",
-            inline=False
-        )
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-async def handle_show_stats(interaction: discord.Interaction):
-    """Handle show stats command."""
-    # Get bot stats
-    total_members = sum(guild.member_count for guild in bot.guilds)
-    total_guilds = len(bot.guilds)
-    total_commands = len(bot.tree.get_commands())
-    uptime = datetime.now() - START_TIME
-    
-    # Get database stats
-    warnings_count = await db.fetchone("SELECT COUNT(*) FROM warnings")
-    warnings_count = warnings_count[0] if warnings_count else 0
-    
-    memories_count = await db.fetchone("SELECT COUNT(*) FROM ai_memories")
-    memories_count = memories_count[0] if memories_count else 0
-    
-    economy_count = await db.fetchone("SELECT COUNT(*) FROM economy")
-    economy_count = economy_count[0] if economy_count else 0
-    
-    embed = discord.Embed(
-        title="📊 Bot Statistics",
-        color=discord.Color.blue(),
-        timestamp=datetime.now()
-    )
-    embed.add_field(name="🤖 Bot Name", value=bot.user.name, inline=True)
-    embed.add_field(name="🆔 Bot ID", value=bot.user.id, inline=True)
-    embed.add_field(name="📈 Guilds", value=total_guilds, inline=True)
-    embed.add_field(name="👥 Total Members", value=total_members, inline=True)
-    embed.add_field(name="⚙️ Commands", value=total_commands, inline=True)
-    embed.add_field(name="⏱️ Uptime", value=str(uptime).split('.')[0], inline=True)
-    embed.add_field(name="⚠️ Warnings", value=warnings_count, inline=True)
-    embed.add_field(name="🧠 AI Memories", value=memories_count, inline=True)
-    embed.add_field(name="💰 Economy Users", value=economy_count, inline=True)
-    embed.set_footer(text=f"Owner: <@{OWNER_ID}>")
-    
-    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def handle_refresh_panel(interaction: discord.Interaction):
     """Handle refresh panel command."""
@@ -1634,10 +892,9 @@ async def handle_refresh_panel(interaction: discord.Interaction):
     except:
         pass
     
-    # Create new panel
     embed = discord.Embed(
         title="🎛️ Bot Control Panel",
-        description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+        description="Welcome to the bot control panel! Use the buttons below to manage the bot.",
         color=discord.Color.blue(),
         timestamp=datetime.now()
     )
@@ -1661,15 +918,27 @@ async def handle_clear_cache(interaction: discord.Interaction):
     
     await interaction.response.send_message("🗑️ All caches cleared successfully!", ephemeral=True)
 
+async def handle_show_stats(interaction: discord.Interaction):
+    """Handle show stats command."""
+    embed = discord.Embed(
+        title="📊 Bot Statistics",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="🤖 Bot Name", value=bot.user.name, inline=True)
+    embed.add_field(name="📈 Guilds", value=len(bot.guilds), inline=True)
+    embed.add_field(name="⚙️ Commands", value=len(bot.tree.get_commands()), inline=True)
+    embed.add_field(name="⏱️ Uptime", value=str(datetime.now() - START_TIME).split('.')[0], inline=True)
+    embed.add_field(name="📊 Total Members", value=sum(g.member_count for g in bot.guilds), inline=True)
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 async def handle_db_status(interaction: discord.Interaction):
     """Handle database status command."""
     try:
-        # Check if database is accessible
         result = await db.fetchone("SELECT sqlite_version()")
         version = result[0] if result else "Unknown"
         
-        # Get table counts
-        tables = ["warnings", "ai_memories", "economy", "leveling", "tickets", "giveaways", "polls"]
+        tables = ["warnings", "economy", "leveling", "tickets", "giveaways", "polls"]
         table_stats = {}
         
         for table in tables:
@@ -1692,6 +961,63 @@ async def handle_db_status(interaction: discord.Interaction):
     except Exception as e:
         await interaction.response.send_message(f"❌ Database error: {str(e)}", ephemeral=True)
 
+# =========================
+# CONTROL PANEL VIEWS
+# =========================
+
+class ControlPanelButton(discord.ui.Button):
+    """A button for the control panel with proper callback handling."""
+    
+    def __init__(
+        self,
+        label: str,
+        custom_id: str,
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+        row: int = 0,
+        emoji: str = None
+    ):
+        super().__init__(
+            label=label,
+            custom_id=custom_id,
+            style=style,
+            row=row,
+            emoji=emoji
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        """Handle button press with proper owner check and command routing."""
+        # Get the view instance
+        view = self.view
+        
+        # Owner check
+        if interaction.user.id != view.owner_id:
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+
+        # Route to appropriate handler based on custom_id
+        command_map = {
+            "show_stats": handle_show_stats,
+            "clear_cache": handle_clear_cache,
+            "refresh_panel": handle_refresh_panel,
+            "db_status": handle_db_status,
+            "db_optimize": handle_db_optimize,
+            "db_stats": handle_db_stats,
+            "toggle_modules": handle_toggle_modules,
+            "maintenance_mode": handle_maintenance,
+            "restart_bot": handle_restart_bot,
+        }
+        
+        handler = command_map.get(self.custom_id)
+        if handler:
+            await handler(interaction)
+        else:
+            await interaction.response.send_message(
+                f"✅ Executed: {self.label}",
+                ephemeral=True
+            )
+
 async def handle_db_optimize(interaction: discord.Interaction):
     """Handle database optimize command."""
     await interaction.response.send_message("🔄 Optimizing database...", ephemeral=True)
@@ -1708,11 +1034,9 @@ async def handle_db_optimize(interaction: discord.Interaction):
 async def handle_db_stats(interaction: discord.Interaction):
     """Handle database statistics command."""
     try:
-        # Get database file size
         size = os.path.getsize("moderation.db")
         size_mb = size / (1024 * 1024)
         
-        # Get more detailed stats
         embed = discord.Embed(
             title="📊 Database Statistics",
             color=discord.Color.blue(),
@@ -1720,17 +1044,6 @@ async def handle_db_stats(interaction: discord.Interaction):
         )
         embed.add_field(name="📦 Database Size", value=f"{size_mb:.2f} MB", inline=True)
         embed.add_field(name="📂 Database File", value="moderation.db", inline=True)
-        embed.add_field(name="🔢 Total Tables", value="20+", inline=True)
-        
-        # Get memory usage stats
-        memory_usage = await db.fetchone("PRAGMA memory_used")
-        if memory_usage:
-            embed.add_field(name="🧠 Memory Used", value=f"{memory_usage[0] / 1024:.2f} KB", inline=True)
-        
-        # Get cache stats
-        cache_size = await db.fetchone("PRAGMA cache_size")
-        if cache_size:
-            embed.add_field(name="💾 Cache Size", value=f"{cache_size[0]} pages", inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
@@ -1738,7 +1051,6 @@ async def handle_db_stats(interaction: discord.Interaction):
 
 async def handle_toggle_modules(interaction: discord.Interaction):
     """Handle toggle modules command."""
-    # Get all cog names
     cogs = list(bot.cogs.keys())
     
     embed = discord.Embed(
@@ -1747,14 +1059,12 @@ async def handle_toggle_modules(interaction: discord.Interaction):
         color=discord.Color.blue()
     )
     
-    # Show current modules
     module_status = ""
     for cog in cogs:
-        status = "✅"  # All modules are enabled by default
-        module_status += f"{status} {cog}\n"
+        module_status += f"✅ {cog}\n"
     
     embed.add_field(name="📦 Loaded Modules", value=module_status or "No modules loaded", inline=False)
-    embed.add_field(name="ℹ️ Note", value="Module toggling will be available in a future update. For now, all modules are active.", inline=False)
+    embed.add_field(name="ℹ️ Note", value="Module toggling will be available in a future update.", inline=False)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -1775,14 +1085,12 @@ async def handle_restart_bot(interaction: discord.Interaction):
     )
     await interaction.response.send_message(embed=embed)
     
-    # Save control panel before restart
     config = await get_control_panel(interaction.guild_id)
     if config:
         channel = interaction.guild.get_channel(config["channel_id"])
         if channel:
             try:
                 old_message = await channel.fetch_message(config["message_id"])
-                # Keep the message, just update it
                 embed = discord.Embed(
                     title="🔄 Bot Restarting...",
                     description="The bot is currently restarting. Please wait a moment.",
@@ -1793,19 +1101,92 @@ async def handle_restart_bot(interaction: discord.Interaction):
             except:
                 pass
     
-    # Restart the bot
     os._exit(0)
+
+class ControlPanelView(discord.ui.View):
+    """The main control panel view with properly organized buttons."""
+    
+    def __init__(self, bot_instance, owner_id: int):
+        super().__init__(timeout=None)
+        self.bot = bot_instance
+        self.owner_id = owner_id
+        
+        # Row 0 - Main Functions
+        self.add_item(ControlPanelButton(
+            "📊 Stats",
+            "show_stats",
+            discord.ButtonStyle.success,
+            row=0
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "🧹 Cache",
+            "clear_cache",
+            discord.ButtonStyle.danger,
+            row=0
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "🔄 Refresh",
+            "refresh_panel",
+            discord.ButtonStyle.primary,
+            row=0
+        ))
+        
+        # Row 1 - Database
+        self.add_item(ControlPanelButton(
+            "💾 DB Status",
+            "db_status",
+            discord.ButtonStyle.secondary,
+            row=1
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "📊 DB Stats",
+            "db_stats",
+            discord.ButtonStyle.secondary,
+            row=1
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "🔄 DB Optimize",
+            "db_optimize",
+            discord.ButtonStyle.primary,
+            row=1
+        ))
+        
+        # Row 2 - System
+        self.add_item(ControlPanelButton(
+            "⚙️ Modules",
+            "toggle_modules",
+            discord.ButtonStyle.secondary,
+            row=2
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "🔧 Maintenance",
+            "maintenance_mode",
+            discord.ButtonStyle.danger,
+            row=2
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "🔄 Restart",
+            "restart_bot",
+            discord.ButtonStyle.danger,
+            row=2
+        ))
 
 # =========================
 # BOT EVENTS
 # =========================
+welcome_configs = {}
 
 @bot.event
 async def on_member_join(member):
     try:
         await add_history(member.guild.id, member.id, str(member), "JOIN", "Joined the server")
         
-        # Log to mod channel
         embed = discord.Embed(
             title="👋 Member Joined",
             description=f"{member.mention} has joined the server",
@@ -1828,15 +1209,6 @@ async def on_member_join(member):
                 )
                 await channel.send(msg)
         
-        results = await db.fetchall(
-            "SELECT role_id FROM reaction_roles WHERE guild_id=? AND emoji='AUTO_ROLE'",
-            (member.guild.id,)
-        )
-        for (role_id,) in results:
-            role = member.guild.get_role(role_id)
-            if role:
-                await member.add_roles(role)
-                await add_history(member.guild.id, member.id, str(member), "ROLE_ADD", f"Auto-assigned role: {role.name}")
     except Exception as e:
         logger.error(f"on_member_join error: {e}")
 
@@ -1845,7 +1217,6 @@ async def on_member_remove(member):
     try:
         await add_history(member.guild.id, member.id, str(member), "LEAVE", "Left the server")
         
-        # Log to mod channel
         embed = discord.Embed(
             title="👋 Member Left",
             description=f"{member.mention} has left the server",
@@ -1867,10 +1238,8 @@ async def on_message_delete(message):
         return
     
     try:
-        # Cache the message for snipe
         await cache_message(message)
         
-        # Add to snipe cache
         attachments = json.dumps([{"filename": a.filename, "url": a.url} for a in message.attachments])
         await add_snipe(
             message.guild.id, message.channel.id, message.id,
@@ -1885,7 +1254,6 @@ async def on_message_delete(message):
             message.content[:500] if message.content else "[Attachment/Embed]"
         )
         
-        # Log deletion to mod channel
         config = await get_mod_logs_config(message.guild.id)
         if config and config["enabled"] and config["log_deletes"]:
             embed = discord.Embed(
@@ -1917,7 +1285,6 @@ async def on_message_edit(before, after):
         return
     
     try:
-        # Add to edit snipe cache
         await add_edit_snipe(
             before.guild.id, before.channel.id, before.id,
             before.content or "", after.content or "", before.author.id
@@ -1931,7 +1298,6 @@ async def on_message_edit(before, after):
             f"{before.content[:200]} -> {after.content[:200]}"
         )
         
-        # Log edit to mod channel
         config = await get_mod_logs_config(before.guild.id)
         if config and config["enabled"] and config["log_edits"]:
             embed = discord.Embed(
@@ -1951,33 +1317,12 @@ async def on_message_edit(before, after):
         logger.error(f"on_message_edit error: {e}")
 
 @bot.event
-async def on_guild_channel_create(channel):
-    try:
-        await add_history(
-            channel.guild.id, 0, "System", "CHANNEL_CREATE",
-            f"Channel created: #{channel.name} ({channel.type})"
-        )
-    except Exception as e:
-        logger.error(f"on_guild_channel_create error: {e}")
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    try:
-        await add_history(
-            channel.guild.id, 0, "System", "CHANNEL_DELETE",
-            f"Channel deleted: #{channel.name}"
-        )
-    except Exception as e:
-        logger.error(f"on_guild_channel_delete error: {e}")
-
-@bot.event
 async def on_voice_state_update(member, before, after):
     try:
         if before.channel != after.channel:
             if after.channel:
                 await add_history(member.guild.id, member.id, str(member), "VOICE_JOIN", f"Joined {after.channel.name}")
                 
-                # Log to mod channel
                 config = await get_mod_logs_config(member.guild.id)
                 if config and config["enabled"] and config["log_voice"]:
                     embed = discord.Embed(
@@ -1993,7 +1338,6 @@ async def on_voice_state_update(member, before, after):
             elif before.channel:
                 await add_history(member.guild.id, member.id, str(member), "VOICE_LEAVE", f"Left {before.channel.name}")
                 
-                # Log to mod channel
                 config = await get_mod_logs_config(member.guild.id)
                 if config and config["enabled"] and config["log_voice"]:
                     embed = discord.Embed(
@@ -2017,7 +1361,6 @@ async def on_member_update(before, after):
                 f"{before.nick or before.name} -> {after.nick or after.name}"
             )
             
-            # Log to mod channel
             config = await get_mod_logs_config(after.guild.id)
             if config and config["enabled"] and config["log_roles"]:
                 embed = discord.Embed(
@@ -2037,7 +1380,6 @@ async def on_member_update(before, after):
             if role.name != "@everyone":
                 await add_history(after.guild.id, after.id, str(after), "ROLE_ADD", f"Role added: {role.name}")
                 
-                # Log to mod channel
                 config = await get_mod_logs_config(after.guild.id)
                 if config and config["enabled"] and config["log_roles"]:
                     embed = discord.Embed(
@@ -2053,7 +1395,6 @@ async def on_member_update(before, after):
             if role.name != "@everyone":
                 await add_history(after.guild.id, after.id, str(after), "ROLE_REMOVE", f"Role removed: {role.name}")
                 
-                # Log to mod channel
                 config = await get_mod_logs_config(after.guild.id)
                 if config and config["enabled"] and config["log_roles"]:
                     embed = discord.Embed(
@@ -2076,28 +1417,13 @@ async def on_message(message):
         if message.guild:
             await log_message(message.guild.id, message.channel.id, message.author.id, message.content)
             await increment_message_count(message.author.id, message.guild.id)
-            
-            # Run automod checks
             await automod.check_message(message)
-        
-        # =========================
-        # DM AI
-        # =========================
-        if isinstance(message.channel, discord.DMChannel):
-            await handle_dm_message(message)
-            return
-        
-        # =========================
-        # GUILD MESSAGE HANDLING
-        # =========================
-        if message.guild:
-            # Leveling
+            
             new_level = await add_xp(message.author.id, message.guild.id)
             if new_level:
                 await message.channel.send(f"🎉 {message.author.mention} leveled up to **Level {new_level}**!")
                 await add_history(message.guild.id, message.author.id, str(message.author), "LEVEL_UP", f"Reached level {new_level}")
             
-            # Custom commands
             if message.content.startswith('?'):
                 cmd_name = message.content[1:].lower().split()[0]
                 result = await db.fetchone(
@@ -2112,124 +1438,6 @@ async def on_message(message):
     
     await bot.process_commands(message)
 
-async def handle_dm_message(message):
-    """Handle DM messages with AI."""
-    if message.author.id != OWNER_ID:
-        await message.channel.send("👋 Only the owner can use AI in DMs.")
-        return
-    
-    user_id = message.author.id
-    
-    # Get or create memory
-    mem = await get_memory(user_id)
-    if not mem or not mem[0]:
-        await save_memory(user_id, user_name=message.author.name, bot_name="AI Bot")
-    
-    user_name, bot_name = await get_memory(user_id) or ("User", "AI Bot")
-    
-    # Extract memory facts
-    await extract_memory_facts(0, user_id, message.content)
-    
-    # Handle name changes
-    content_lower = message.content.lower()
-    name_match = re.search(r"my name is (.+)", content_lower)
-    if name_match:
-        await save_memory(user_id, user_name=name_match.group(1).strip().title())
-        user_name = name_match.group(1).strip().title()
-    
-    bot_name_match = re.search(r"your name is (.+)", content_lower)
-    if bot_name_match:
-        await save_memory(user_id, bot_name=bot_name_match.group(1).strip().title())
-        bot_name = bot_name_match.group(1).strip().title()
-    
-    # Get AI memories
-    memories = await get_ai_memories(0, user_id, limit=15)
-    
-    # Build prompt
-    memory_lines = []
-    if memories:
-        for key, value, importance, _, _ in memories:
-            if importance >= 2:
-                memory_lines.append(f"- {key}: {value}")
-    
-    memory_context = ""
-    if memory_lines:
-        memory_context = "Things I remember:\n" + "\n".join(memory_lines) + "\n"
-    
-    prompt = f"""You are a Discord AI bot with persistent memory.
-
-User: {user_name}
-Bot: {bot_name}
-
-{memory_context}
-
-Respond naturally and conversationally. If the user mentions something new, remember it."""
-    
-    try:
-        # Handle attachments
-        if message.attachments:
-            reply = await handle_dm_attachment(message, prompt)
-        else:
-            reply = await get_ai_response(prompt)
-        
-        await save_conversation(0, 0, user_id, "user", message.content)
-        await save_conversation(0, 0, user_id, "assistant", reply)
-        
-        # Send reply in chunks
-        while len(reply) > 1900:
-            await message.channel.send(reply[:1900])
-            reply = reply[1900:]
-        await message.channel.send(reply)
-        
-    except Exception as e:
-        logger.error(f"DM AI error: {e}")
-        await message.channel.send(f"⚠️ AI error: {str(e)}")
-
-async def handle_dm_attachment(message, prompt):
-    """Handle attachments in DMs."""
-    attachment = message.attachments[0]
-    
-    # Image analysis with Gemini
-    if attachment.content_type and attachment.content_type.startswith("image/"):
-        if client:
-            img = await attachment.read()
-            uploaded = client.files.upload(file=img, config={"mime_type": attachment.content_type})
-            response = client.models.generate_content(
-                model=MODEL_NAME, 
-                contents=[prompt, uploaded]
-            )
-            return response.text
-        else:
-            return "⚠️ GEMINI_API_KEY is missing. Please set the GEMINI_API_KEY environment variable."
-    
-    # PDF handling
-    elif attachment.filename.endswith(".pdf"):
-        pdf_data = await attachment.read()
-        pdf = PdfReader(io.BytesIO(pdf_data))
-        text = ""
-        for page in pdf.pages:
-            t = page.extract_text()
-            if t:
-                text += t + "\n"
-        return await get_ai_response(f"{prompt}\n\nPDF content:\n{text[:3000]}")
-    
-    # DOCX handling
-    elif attachment.filename.endswith(".docx"):
-        doc_data = await attachment.read()
-        doc = Document(io.BytesIO(doc_data))
-        text = "\n".join(p.text for p in doc.paragraphs)
-        return await get_ai_response(f"{prompt}\n\nDOCX content:\n{text[:3000]}")
-    
-    # Text file handling
-    elif attachment.filename.endswith(".txt"):
-        txt = await attachment.read()
-        text = txt.decode("utf-8", errors="ignore")
-        return await get_ai_response(f"{prompt}\n\nTXT content:\n{text[:3000]}")
-    
-    # Default
-    else:
-        return await get_ai_response(f"{prompt}\n\nThe user sent a file: {attachment.filename}")
-
 @bot.event
 async def on_ready():
     global _tasks_started
@@ -2240,138 +1448,12 @@ async def on_ready():
     _tasks_started = True
 
     logger.info(f"🤖 Logged in as {bot.user}")
-
-    try:
-        if not generate_daily_summary.is_running():
-            generate_daily_summary.start()
-            logger.info("✅ Started daily summary task")
-
-        if not consolidate_memories.is_running():
-            consolidate_memories.start()
-            logger.info("✅ Started memory consolidation task")
-
-        if not check_birthdays.is_running():
-            check_birthdays.start()
-            logger.info("✅ Started birthday check task")
-
-    except Exception as e:
-        logger.error(f"Task startup error: {e}")
-
-    logger.info("✅ Bot is fully online and tasks are running!")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
 
 # =========================
-# CONTROL PANEL RESTORATION
-# =========================
-
-@bot.command(name="restore_panel")
-@commands.is_owner()
-async def restore_panel_command(ctx):
-    """Manually restore the control panel."""
-    await ctx.send("🔄 Attempting to restore control panel...")
-
-    if hasattr(bot, "restore_control_panel"):
-        await bot.restore_control_panel()
-        await ctx.send("✅ Control panel restoration complete!")
-    else:
-        await ctx.send("❌ restore_control_panel() method not found in bot class.")
-
-
-# Put this INSIDE your MyBot class
-class MyBot(commands.Bot):
-
-    async def setup_hook(self):
-        # Your existing setup code here
-
-        # Restore control panel on startup
-        await self.restore_control_panel()
-
-    async def restore_control_panel(self):
-        """Restore control panel after bot restart."""
-        try:
-            results = await db.fetchall(
-                "SELECT guild_id, channel_id, message_id FROM control_panel"
-            )
-
-            for guild_id, channel_id, message_id in results:
-
-                guild = self.get_guild(guild_id)
-                if guild is None:
-                    continue
-
-                channel = guild.get_channel(channel_id)
-                if channel is None:
-                    continue
-
-                embed = discord.Embed(
-                    title="🎛️ Bot Control Panel",
-                    description="Owner-only bot control panel.",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.utcnow()
-                )
-
-                embed.add_field(
-                    name="🤖 Status",
-                    value="🟢 Online",
-                    inline=True
-                )
-
-                embed.add_field(
-                    name="👑 Owner",
-                    value=f"<@{OWNER_ID}>",
-                    inline=True
-                )
-
-                embed.add_field(
-                    name="📊 Commands",
-                    value=str(len(self.tree.get_commands())),
-                    inline=True
-                )
-
-                embed.set_footer(
-                    text="Control Panel • Owner Only"
-                )
-
-                view = ControlPanelView(self, OWNER_ID)
-
-                try:
-                    message = await channel.fetch_message(message_id)
-
-                    await message.edit(
-                        embed=embed,
-                        view=view
-                    )
-
-                    logger.info(
-                        f"✅ Restored control panel in guild {guild_id}"
-                    )
-
-                except discord.NotFound:
-                    new_message = await channel.send(
-                        embed=embed,
-                        view=view
-                    )
-
-                    await save_control_panel(
-                        guild_id,
-                        channel_id,
-                        new_message.id
-                    )
-
-                    logger.info(
-                        f"✅ Recreated control panel in guild {guild_id}"
-                    )
-
-        except Exception as e:
-            logger.error(
-                f"Control panel restoration failed: {e}"
-            )
-            
-# =========================
 # 🛡️ MODERATION COG - ACTIONS
 # =========================
-
 class ModerationActions(commands.Cog, name="moderation_actions"):
     """Moderation action commands (ban, kick, mute, warn, etc.)."""
     
@@ -2381,7 +1463,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     mod_group = app_commands.Group(name="mod", description="Moderation actions - Owner Only")
     
     @mod_group.command(name="clear", description="Delete messages")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_clear(self, interaction: discord.Interaction, amount: int):
         await interaction.response.defer(ephemeral=True)
@@ -2402,8 +1484,8 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Clear error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="thanos_snap", description="Boom Bazooka, Channel Gone")
-    @app_commands.check(owner_check)
+    @mod_group.command(name="thanos_snap", description="Delete all messages in channel")
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_clearall(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -2431,7 +1513,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="ban", description="Ban member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(ban_members=True)
     async def mod_ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
         await interaction.response.defer(ephemeral=True)
@@ -2465,7 +1547,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="softban", description="Ban and unban user")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(ban_members=True)
     async def mod_softban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
         await interaction.response.defer(ephemeral=True)
@@ -2499,7 +1581,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="unban", description="Unban a user by ID")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(ban_members=True)
     async def mod_unban(self, interaction: discord.Interaction, user_id: str, reason: str = "No reason"):
         await interaction.response.defer(ephemeral=True)
@@ -2533,7 +1615,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="mute", description="Timeout member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_mute(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
         await interaction.response.defer(ephemeral=True)
@@ -2567,7 +1649,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="unmute", description="Remove timeout")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_unmute(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -2594,7 +1676,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="kick", description="Kick a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(kick_members=True)
     async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
@@ -2626,7 +1708,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="warn", description="Warn a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
@@ -2664,7 +1746,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="warnings", description="View a member's warnings")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_warnings(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -2686,7 +1768,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="clean", description="Delete messages (optional user filter)")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_clean(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
         await interaction.response.defer(ephemeral=True)
@@ -2708,7 +1790,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
 
     @mod_group.command(name="lock", description="Lock a channel")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_channels=True)
     async def mod_lock(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
@@ -2738,7 +1820,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="unlock", description="Unlock a channel")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_channels=True)
     async def mod_unlock(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
@@ -2768,7 +1850,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="slowmode", description="Set channel slowmode")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_channels=True)
     async def mod_slowmode(self, interaction: discord.Interaction, seconds: int, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
@@ -2800,7 +1882,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="history", description="Show moderation history of a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def mod_history(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -2819,74 +1901,8 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"History error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="timeout", description="Timeout a member (alias for mute)")
-    @app_commands.check(owner_check)
-    @app_commands.checks.has_permissions(moderate_members=True)
-    async def mod_timeout(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
-        await self.mod_mute(interaction, member, minutes, reason)
-
-    @mod_group.command(name="untimeout", description="Remove timeout from a member (alias for unmute)")
-    @app_commands.check(owner_check)
-    @app_commands.checks.has_permissions(moderate_members=True)
-    async def mod_untimeout(self, interaction: discord.Interaction, member: discord.Member):
-        await self.mod_unmute(interaction, member)
-
-    @mod_group.command(name="hide", description="Hide a channel from @everyone")
-    @app_commands.check(owner_check)
-    @app_commands.checks.has_permissions(manage_channels=True)
-    async def mod_hide(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            channel = channel or interaction.channel
-            await channel.set_permissions(interaction.guild.default_role, view_channel=False)
-            
-            embed = discord.Embed(title="👁️ Channel Hidden", color=discord.Color.orange())
-            embed.add_field(name="Channel", value=channel.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            log_embed = discord.Embed(
-                title="👁️ Channel Hidden",
-                color=discord.Color.orange(),
-                timestamp=datetime.now()
-            )
-            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
-            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            await log_to_mod_channel(interaction.guild, log_embed)
-            
-        except Exception as e:
-            logger.error(f"Hide error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="show", description="Show a channel to @everyone")
-    @app_commands.check(owner_check)
-    @app_commands.checks.has_permissions(manage_channels=True)
-    async def mod_show(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            channel = channel or interaction.channel
-            await channel.set_permissions(interaction.guild.default_role, view_channel=None)
-            
-            embed = discord.Embed(title="👁️ Channel Shown", color=discord.Color.green())
-            embed.add_field(name="Channel", value=channel.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            log_embed = discord.Embed(
-                title="👁️ Channel Shown",
-                color=discord.Color.green(),
-                timestamp=datetime.now()
-            )
-            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
-            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            await log_to_mod_channel(interaction.guild, log_embed)
-            
-        except Exception as e:
-            logger.error(f"Show error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
     @mod_group.command(name="snipe", description="Show the last deleted message")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_snipe(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -2924,7 +1940,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="editsnipe", description="Show the last edited message")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def mod_editsnipe(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -2952,11 +1968,63 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Edit snipe error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
+    @mod_group.command(name="hide", description="Hide a channel from @everyone")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def mod_hide(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = channel or interaction.channel
+            await channel.set_permissions(interaction.guild.default_role, view_channel=False)
+            
+            embed = discord.Embed(title="👁️ Channel Hidden", color=discord.Color.orange())
+            embed.add_field(name="Channel", value=channel.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="👁️ Channel Hidden",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Hide error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="show", description="Show a channel to @everyone")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def mod_show(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            channel = channel or interaction.channel
+            await channel.set_permissions(interaction.guild.default_role, view_channel=None)
+            
+            embed = discord.Embed(title="👁️ Channel Shown", color=discord.Color.green())
+            embed.add_field(name="Channel", value=channel.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="👁️ Channel Shown",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Show error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 # =========================
 # 🎭 ROLE MANAGEMENT COG
 # =========================
-
 class RoleManagement(commands.Cog, name="role_management"):
     """Role management commands."""
     
@@ -2966,7 +2034,7 @@ class RoleManagement(commands.Cog, name="role_management"):
     role_group = app_commands.Group(name="role", description="Role management - Owner Only")
     
     @role_group.command(name="nick", description="Change a member's nickname")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_nicknames=True)
     async def role_nick(self, interaction: discord.Interaction, member: discord.Member, nickname: str):
         await interaction.response.defer(ephemeral=True)
@@ -2991,7 +2059,7 @@ class RoleManagement(commands.Cog, name="role_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @role_group.command(name="resetnick", description="Remove a member's nickname")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_nicknames=True)
     async def role_resetnick(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3015,7 +2083,7 @@ class RoleManagement(commands.Cog, name="role_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @role_group.command(name="give", description="Give a role to a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_roles=True)
     async def role_give(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
@@ -3041,7 +2109,7 @@ class RoleManagement(commands.Cog, name="role_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @role_group.command(name="remove", description="Remove a role from a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_roles=True)
     async def role_remove(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
@@ -3066,11 +2134,9 @@ class RoleManagement(commands.Cog, name="role_management"):
             logger.error(f"Remove role error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # 🔊 VOICE MODERATION COG
 # =========================
-
 class VoiceModeration(commands.Cog, name="voice_moderation"):
     """Voice moderation commands."""
     
@@ -3080,7 +2146,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     voice_group = app_commands.Group(name="voice", description="Voice moderation - Owner Only")
     
     @voice_group.command(name="kick", description="Disconnect a member from voice")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(move_members=True)
     async def voice_kick(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3105,7 +2171,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @voice_group.command(name="move", description="Move a member to another voice channel")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(move_members=True)
     async def voice_move(self, interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
         await interaction.response.defer(ephemeral=True)
@@ -3131,7 +2197,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @voice_group.command(name="deafen", description="Deafen a member in voice")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(deafen_members=True)
     async def voice_deafen(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3154,7 +2220,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @voice_group.command(name="undeafen", description="Undeafen a member in voice")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(deafen_members=True)
     async def voice_undeafen(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3177,7 +2243,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @voice_group.command(name="mute", description="Mute a member in voice")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(mute_members=True)
     async def voice_mute(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3200,7 +2266,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @voice_group.command(name="unmute", description="Unmute a member in voice")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(mute_members=True)
     async def voice_unmute(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3222,11 +2288,9 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             logger.error(f"Voice unmute error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # 🧹 CHANNEL MANAGEMENT COG (Purge Commands)
 # =========================
-
 class ChannelManagement(commands.Cog, name="channel_management"):
     """Channel management and purge commands."""
     
@@ -3236,7 +2300,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
     purge_group = app_commands.Group(name="purge", description="Message purging - Owner Only")
     
     @purge_group.command(name="user", description="Delete messages from a specific user")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def purge_user(self, interaction: discord.Interaction, member: discord.Member, amount: int = 50):
         await interaction.response.defer(ephemeral=True)
@@ -3258,7 +2322,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @purge_group.command(name="bots", description="Delete messages from bots")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def purge_bots(self, interaction: discord.Interaction, amount: int = 50):
         await interaction.response.defer(ephemeral=True)
@@ -3279,7 +2343,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @purge_group.command(name="images", description="Delete messages with images")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def purge_images(self, interaction: discord.Interaction, amount: int = 50):
         await interaction.response.defer(ephemeral=True)
@@ -3300,7 +2364,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @purge_group.command(name="attachments", description="Delete messages with attachments")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def purge_attachments(self, interaction: discord.Interaction, amount: int = 50):
         await interaction.response.defer(ephemeral=True)
@@ -3321,7 +2385,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @purge_group.command(name="embeds", description="Delete messages with embeds")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def purge_embeds(self, interaction: discord.Interaction, amount: int = 50):
         await interaction.response.defer(ephemeral=True)
@@ -3342,7 +2406,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @purge_group.command(name="contains", description="Delete messages containing specific text")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.describe(text="Text to search for", amount="Number of messages to check (max 100)")
     async def purge_contains(self, interaction: discord.Interaction, text: str, amount: int = 50):
@@ -3365,7 +2429,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @purge_group.command(name="links", description="Delete messages containing links")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     async def purge_links(self, interaction: discord.Interaction, amount: int = 50):
         await interaction.response.defer(ephemeral=True)
@@ -3386,11 +2450,9 @@ class ChannelManagement(commands.Cog, name="channel_management"):
             logger.error(f"Purge links error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # 📊 INFORMATION COG
 # =========================
-
 class Information(commands.Cog, name="information"):
     """Information and utility commands."""
     
@@ -3400,7 +2462,7 @@ class Information(commands.Cog, name="information"):
     info_group = app_commands.Group(name="info", description="Server information - Owner Only")
     
     @info_group.command(name="server", description="Display detailed server information")
-    @app_commands.check(owner_check)
+    @is_owner()
     async def info_server(self, interaction: discord.Interaction):
         await interaction.response.defer()
         try:
@@ -3423,7 +2485,7 @@ class Information(commands.Cog, name="information"):
             await interaction.followup.send(f"❌ Error: {e}")
 
     @info_group.command(name="user", description="Display detailed user information")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.describe(member="Member to look up (optional)")
     async def info_user(self, interaction: discord.Interaction, member: discord.Member = None):
         await interaction.response.defer()
@@ -3448,7 +2510,7 @@ class Information(commands.Cog, name="information"):
             await interaction.followup.send(f"❌ Error: {e}")
 
     @info_group.command(name="role", description="Display role information")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.describe(role="Role to look up")
     async def info_role(self, interaction: discord.Interaction, role: discord.Role):
         await interaction.response.defer()
@@ -3467,7 +2529,7 @@ class Information(commands.Cog, name="information"):
             await interaction.followup.send(f"❌ Error: {e}")
 
     @info_group.command(name="channel", description="Display channel information")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.describe(channel="Channel to look up (optional)")
     async def info_channel(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         await interaction.response.defer()
@@ -3486,7 +2548,7 @@ class Information(commands.Cog, name="information"):
             await interaction.followup.send(f"❌ Error: {e}")
 
     @info_group.command(name="avatar", description="Display a user's avatar")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.describe(member="Member to look up (optional)")
     async def info_avatar(self, interaction: discord.Interaction, member: discord.Member = None):
         await interaction.response.defer()
@@ -3501,11 +2563,9 @@ class Information(commands.Cog, name="information"):
             logger.error(f"Avatar error: {e}")
             await interaction.followup.send(f"❌ Error: {e}")
 
-
 # =========================
 # 💬 MESSAGE COMMANDS COG
 # =========================
-
 class MessageCommands(commands.Cog, name="message_commands"):
     """Message-related commands."""
     
@@ -3515,7 +2575,7 @@ class MessageCommands(commands.Cog, name="message_commands"):
     msg_group = app_commands.Group(name="msg", description="Message commands - Owner Only")
     
     @msg_group.command(name="announce", description="Send an announcement embed")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.describe(title="Announcement title", description="Announcement description", color="Color hex code (e.g., #FF0000)")
     async def msg_announce(self, interaction: discord.Interaction, title: str, description: str, color: str = "#00FF00"):
@@ -3540,7 +2600,7 @@ class MessageCommands(commands.Cog, name="message_commands"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @msg_group.command(name="say", description="Make the bot send a message")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.describe(message="Message to send")
     async def msg_say(self, interaction: discord.Interaction, message: str):
@@ -3558,7 +2618,7 @@ class MessageCommands(commands.Cog, name="message_commands"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @msg_group.command(name="poll", description="Create a poll")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.describe(question="Poll question", option1="First option", option2="Second option", option3="Third option (optional)", option4="Fourth option (optional)", option5="Fifth option (optional)")
     async def msg_poll(self, interaction: discord.Interaction, question: str, option1: str, option2: str,
@@ -3602,11 +2662,9 @@ class MessageCommands(commands.Cog, name="message_commands"):
             logger.error(f"Poll error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # 📋 LOGS CONFIGURATION COG
 # =========================
-
 class LogsConfig(commands.Cog, name="logs_config"):
     """Logs configuration commands."""
     
@@ -3616,7 +2674,7 @@ class LogsConfig(commands.Cog, name="logs_config"):
     logs_group = app_commands.Group(name="logs", description="Mod logs configuration - Owner Only")
     
     @logs_group.command(name="set", description="Set the mod logs channel")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(channel="Channel for moderation logs")
     async def logs_set(self, interaction: discord.Interaction, channel: discord.TextChannel):
@@ -3631,7 +2689,6 @@ class LogsConfig(commands.Cog, name="logs_config"):
             )
             await interaction.followup.send(embed=embed, ephemeral=True)
             
-            # Send test log
             test_embed = discord.Embed(
                 title="📋 Mod Logs Test",
                 description="This is a test message to confirm logs are working.",
@@ -3645,7 +2702,7 @@ class LogsConfig(commands.Cog, name="logs_config"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @logs_group.command(name="disable", description="Disable mod logs")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     async def logs_disable(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -3664,7 +2721,7 @@ class LogsConfig(commands.Cog, name="logs_config"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @logs_group.command(name="status", description="Show mod logs configuration")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     async def logs_status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -3698,11 +2755,9 @@ class LogsConfig(commands.Cog, name="logs_config"):
             logger.error(f"Logs status error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # 🛡️ AUTOMOD CONFIGURATION COG
 # =========================
-
 class AutoModConfig(commands.Cog, name="automod_config"):
     """AutoMod configuration commands."""
     
@@ -3712,7 +2767,7 @@ class AutoModConfig(commands.Cog, name="automod_config"):
     automod_group = app_commands.Group(name="automod", description="AutoModeration configuration - Owner Only")
     
     @automod_group.command(name="antispam", description="Configure anti-spam protection")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
         enabled="Enable/disable anti-spam",
@@ -3738,7 +2793,7 @@ class AutoModConfig(commands.Cog, name="automod_config"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @automod_group.command(name="antiinvite", description="Configure anti-invite link protection")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(enabled="Enable/disable anti-invite")
     async def automod_antiinvite(self, interaction: discord.Interaction, enabled: bool):
@@ -3758,7 +2813,7 @@ class AutoModConfig(commands.Cog, name="automod_config"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @automod_group.command(name="antimentions", description="Configure anti-mass-mention protection")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
         enabled="Enable/disable anti-mass-mentions",
@@ -3782,7 +2837,7 @@ class AutoModConfig(commands.Cog, name="automod_config"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @automod_group.command(name="badwords", description="Configure bad words filter")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     @app_commands.describe(
         enabled="Enable/disable bad words filter",
@@ -3808,7 +2863,7 @@ class AutoModConfig(commands.Cog, name="automod_config"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @automod_group.command(name="status", description="Show automod configuration")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(administrator=True)
     async def automod_status(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -3839,11 +2894,9 @@ class AutoModConfig(commands.Cog, name="automod_config"):
             logger.error(f"AutoMod status error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # ⚠️ WARNING MANAGEMENT COG
 # =========================
-
 class WarningManagement(commands.Cog, name="warning_management"):
     """Warning management commands."""
     
@@ -3853,7 +2906,7 @@ class WarningManagement(commands.Cog, name="warning_management"):
     warn_group = app_commands.Group(name="warn", description="Warning management - Owner Only")
     
     @warn_group.command(name="add", description="Warn a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warn_add(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
@@ -3891,7 +2944,7 @@ class WarningManagement(commands.Cog, name="warning_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @warn_group.command(name="list", description="View a member's warnings")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warn_list(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3913,7 +2966,7 @@ class WarningManagement(commands.Cog, name="warning_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @warn_group.command(name="clear", description="Clear all warnings from a member")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     async def warn_clear(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
@@ -3948,13 +3001,12 @@ class WarningManagement(commands.Cog, name="warning_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @warn_group.command(name="remove", description="Remove a specific warning by ID")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
     @app_commands.describe(warning_id="ID of the warning to remove")
     async def warn_remove(self, interaction: discord.Interaction, warning_id: int):
         await interaction.response.defer(ephemeral=True)
         try:
-            # Check if warning exists
             result = await db.fetchone("SELECT user_id, reason FROM warnings WHERE id=?", (warning_id,))
             if not result:
                 return await interaction.followup.send(f"❌ Warning ID {warning_id} not found.", ephemeral=True)
@@ -3976,11 +3028,9 @@ class WarningManagement(commands.Cog, name="warning_management"):
             logger.error(f"Warn remove error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-
 # =========================
 # 🎮 FUN COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Fun(commands.Cog, name="fun"):
     fun_group = app_commands.Group(name="fun", description="Fun commands")
 
@@ -4055,11 +3105,9 @@ class Fun(commands.Cog, name="fun"):
         embed.add_field(name="Result", value=result, inline=False)
         await interaction.response.send_message(embed=embed)
 
-
 # =========================
 # 💰 ECONOMY COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Economy(commands.Cog, name="economy"):
     economy_group = app_commands.Group(name="economy", description="Economy commands")
 
@@ -4090,11 +3138,11 @@ class Economy(commands.Cog, name="economy"):
                 return await interaction.response.send_message(
                     f"⏰ You already claimed your daily! Come back in {int(hours)}h {int(minutes)}m.", ephemeral=True)
         amount = random.randint(100, 500)
-        result = await db.fetchone("SELECT wallet FROM economy WHERE user_id=?", (user_id,))
+        result = await db.fetchone("SELECT balance FROM economy WHERE user_id=?", (user_id,))
         if result:
-            await db.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id=?", (amount, user_id))
+            await db.execute("UPDATE economy SET balance = balance + ? WHERE user_id=?", (amount, user_id))
         else:
-            await db.execute("INSERT INTO economy (user_id, wallet, bank) VALUES (?, ?, 0)", (user_id, amount))
+            await db.execute("INSERT INTO economy (user_id, balance, bank) VALUES (?, ?, 0)", (user_id, amount))
         await db.commit()
         self.daily_cooldowns[user_id] = now
         embed = discord.Embed(title="📅 Daily Reward", description=f"You received **${amount:,}**!", color=discord.Color.green())
@@ -4107,12 +3155,12 @@ class Economy(commands.Cog, name="economy"):
             return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
         if member.id == interaction.user.id:
             return await interaction.response.send_message("❌ You can't pay yourself.", ephemeral=True)
-        sender_result = await db.fetchone("SELECT wallet FROM economy WHERE user_id=?", (interaction.user.id,))
-        sender_wallet = sender_result[0] if sender_result else 0
-        if sender_wallet < amount:
+        sender_result = await db.fetchone("SELECT balance FROM economy WHERE user_id=?", (interaction.user.id,))
+        sender_balance = sender_result[0] if sender_result else 0
+        if sender_balance < amount:
             return await interaction.response.send_message("❌ Insufficient funds in wallet.", ephemeral=True)
-        await db.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id=?", (amount, interaction.user.id))
-        await db.execute("UPDATE economy SET wallet = wallet + ? WHERE user_id=?", (amount, member.id))
+        await db.execute("UPDATE economy SET balance = balance - ? WHERE user_id=?", (amount, interaction.user.id))
+        await db.execute("UPDATE economy SET balance = balance + ? WHERE user_id=?", (amount, member.id))
         await db.commit()
         embed = discord.Embed(title="💸 Payment Sent", color=discord.Color.green())
         embed.add_field(name="From", value=interaction.user.mention, inline=True)
@@ -4125,18 +3173,18 @@ class Economy(commands.Cog, name="economy"):
     async def economy_gamble(self, interaction: discord.Interaction, amount: int):
         if amount <= 0:
             return await interaction.response.send_message("❌ Amount must be positive.", ephemeral=True)
-        result = await db.fetchone("SELECT wallet FROM economy WHERE user_id=?", (interaction.user.id,))
-        wallet = result[0] if result else 0
-        if wallet < amount:
+        result = await db.fetchone("SELECT balance FROM economy WHERE user_id=?", (interaction.user.id,))
+        balance = result[0] if result else 0
+        if balance < amount:
             return await interaction.response.send_message("❌ Insufficient funds.", ephemeral=True)
         win = random.random() < 0.45
         if win:
             winnings = int(amount * random.uniform(1.5, 3.0))
-            await db.execute("UPDATE economy SET wallet = wallet - ? + ? WHERE user_id=?", (amount, winnings, interaction.user.id))
+            await db.execute("UPDATE economy SET balance = balance - ? + ? WHERE user_id=?", (amount, winnings, interaction.user.id))
             await db.commit()
             embed = discord.Embed(title="🎰 You Won!", description=f"You gambled ${amount:,} and won **${winnings:,}**!", color=discord.Color.green())
         else:
-            await db.execute("UPDATE economy SET wallet = wallet - ? WHERE user_id=?", (amount, interaction.user.id))
+            await db.execute("UPDATE economy SET balance = balance - ? WHERE user_id=?", (amount, interaction.user.id))
             await db.commit()
             embed = discord.Embed(title="🎰 You Lost!", description=f"You gambled ${amount:,} and lost it all.", color=discord.Color.red())
         await interaction.response.send_message(embed=embed)
@@ -4144,26 +3192,24 @@ class Economy(commands.Cog, name="economy"):
     @economy_group.command(name="leaderboard", description="View the economy leaderboard")
     async def economy_leaderboard(self, interaction: discord.Interaction):
         rows = await db.fetchall(
-            "SELECT user_id, wallet, bank FROM economy ORDER BY (wallet + bank) DESC LIMIT 10"
+            "SELECT user_id, balance, bank FROM economy ORDER BY (balance + bank) DESC LIMIT 10"
         )
         embed = discord.Embed(title="🏆 Economy Leaderboard", color=discord.Color.gold())
         if not rows:
             embed.description = "No data yet."
         else:
             medals = ["🥇", "🥈", "🥉"]
-            for i, (user_id, wallet, bank) in enumerate(rows):
-                total = wallet + bank
+            for i, (user_id, balance, bank) in enumerate(rows):
+                total = balance + bank
                 user = interaction.guild.get_member(user_id)
                 name = user.display_name if user else f"Unknown ({user_id})"
                 prefix = medals[i] if i < 3 else f"{i+1}."
-                embed.add_field(name=f"{prefix} {name}", value=f"${total:,} (Wallet: ${wallet:,} | Bank: ${bank:,})", inline=False)
+                embed.add_field(name=f"{prefix} {name}", value=f"${total:,} (Wallet: ${balance:,} | Bank: ${bank:,})", inline=False)
         await interaction.response.send_message(embed=embed)
-
 
 # =========================
 # 🎉 GIVEAWAY COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Giveaway(commands.Cog, name="giveaway"):
     giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
 
@@ -4225,11 +3271,9 @@ class Giveaway(commands.Cog, name="giveaway"):
                     return await interaction.response.send_message(f"🎉 New winner: <@{winner}>!")
         await interaction.response.send_message("❌ Could not find that giveaway or it hasn't ended yet.", ephemeral=True)
 
-
 # =========================
 # 🎫 TICKET COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Ticket(commands.Cog, name="ticket"):
     ticket_group = app_commands.Group(name="ticket", description="Ticket commands")
 
@@ -4268,11 +3312,9 @@ class Ticket(commands.Cog, name="ticket"):
             logger.error(f"Ticket remove error: {e}")
             await interaction.response.send_message(f"❌ Error: {e}")
 
-
 # =========================
 # 📊 LEVELING COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Leveling(commands.Cog, name="leveling"):
     leveling_group = app_commands.Group(name="leveling", description="Leveling commands")
 
@@ -4327,11 +3369,9 @@ class Leveling(commands.Cog, name="leveling"):
                 embed.add_field(name=f"{prefix} {name}", value=f"Level {level} | {xp} XP", inline=False)
         await interaction.response.send_message(embed=embed)
 
-
 # =========================
 # 🤖 AI COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class AI(commands.Cog, name="ai"):
     ai_group = app_commands.Group(name="ai", description="AI commands")
 
@@ -4388,11 +3428,9 @@ class AI(commands.Cog, name="ai"):
             logger.error(f"AI ask error: {e}")
             await interaction.followup.send(f"❌ AI Error: {str(e)}")
 
-
 # =========================
 # 📋 UTILITY COMMANDS (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Utility(commands.Cog, name="utility"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -4431,11 +3469,9 @@ class Utility(commands.Cog, name="utility"):
         embed.add_field(name="Bot", value="Yes" if target.bot else "No", inline=True)
         await interaction.response.send_message(embed=embed)
 
-
 # =========================
-# VOICE COMMANDS (NO OWNER CHECK - PUBLIC)
+# 📋 VOICE COMMANDS (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class VoiceCommands(commands.Cog, name="voice_commands"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -4462,11 +3498,9 @@ class VoiceCommands(commands.Cog, name="voice_commands"):
         await voice_client.disconnect(force=True)
         await interaction.response.send_message("👋 Disconnected from voice channel.")
 
-
 # =========================
 # 📋 HELP COG (NO OWNER CHECK - PUBLIC)
 # =========================
-
 class Help(commands.Cog, name="help"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -4480,7 +3514,7 @@ class Help(commands.Cog, name="help"):
         )
         embed.add_field(
             name="🛡️ Moderation (Owner Only)",
-            value="`/mod clear`, `/mod thanos_snap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod timeout`, `/mod untimeout`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
+            value="`/mod clear`, `/mod thanos_snap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
                   "`/role nick`, `/role resetnick`, `/role give`, `/role remove`\n"
                   "`/voice kick`, `/voice move`, `/voice deafen`, `/voice undeafen`, `/voice mute`, `/voice unmute`\n"
                   "`/purge user`, `/purge bots`, `/purge images`, `/purge attachments`, `/purge embeds`, `/purge contains`, `/purge links`\n"
@@ -4529,18 +3563,12 @@ class Help(commands.Cog, name="help"):
         embed.set_footer(text=f"Use /<command> to use any command | {len(self.bot.cogs)} modules loaded")
         await interaction.response.send_message(embed=embed)
 
-
 # =========================
 # ⚠️ ERROR HANDLER
 # =========================
-
 class CommandErrorHandler(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-    
-    @commands.Cog.listener()
-    async def on_command_error(self, ctx: commands.Context, error):
-        logger.error(f"Command error in {ctx.command}: {error}")
     
     @commands.Cog.listener()
     async def on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
@@ -4563,11 +3591,9 @@ class CommandErrorHandler(commands.Cog):
                 except:
                     pass
 
-
 # =========================
 # 📋 HISTORY COMMANDS
 # =========================
-
 class HistoryCommands(commands.Cog, name="history"):
     history_group = app_commands.Group(name="history", description="View server history")
 
@@ -4600,11 +3626,9 @@ class HistoryCommands(commands.Cog, name="history"):
             embed.add_field(name=f"{event_type} - {username}", value=f"{details[:100]}\n{timestamp}", inline=False)
         await interaction.followup.send(embed=embed)
 
-
 # =========================
 # CONTROL PANEL SLASH COMMAND
 # =========================
-
 class ControlPanelCommands(commands.Cog, name="control_panel"):
     """Control panel management commands."""
     
@@ -4612,16 +3636,14 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
         self.bot = bot
     
     @app_commands.command(name="controlpanelset", description="Set up the control panel in the current channel")
-    @app_commands.check(owner_check)
+    @is_owner()
     async def controlpanelset(self, interaction: discord.Interaction):
         """Set up the control panel in the current channel."""
         await interaction.response.defer(ephemeral=True)
         
         try:
-            # Check if control panel already exists
             existing = await get_control_panel(interaction.guild_id)
             if existing:
-                # Delete old panel
                 try:
                     old_channel = interaction.guild.get_channel(existing["channel_id"])
                     if old_channel:
@@ -4631,7 +3653,6 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
                     pass
                 await delete_control_panel(interaction.guild_id)
             
-            # Create new control panel
             embed = discord.Embed(
                 title="🎛️ Bot Control Panel",
                 description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
@@ -4646,7 +3667,6 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             view = ControlPanelView(self.bot, OWNER_ID)
             message = await interaction.channel.send(embed=embed, view=view)
             
-            # Save to database
             await save_control_panel(interaction.guild_id, interaction.channel_id, message.id)
             
             await interaction.followup.send(
@@ -4659,14 +3679,14 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             await interaction.followup.send(f"❌ Failed to set up control panel: {str(e)}", ephemeral=True)
     
     @app_commands.command(name="controlpanelrefresh", description="Refresh the control panel")
-    @app_commands.check(owner_check)
+    @is_owner()
     async def controlpanelrefresh(self, interaction: discord.Interaction):
         """Refresh the control panel."""
         await interaction.response.defer(ephemeral=True)
         await handle_refresh_panel(interaction)
     
     @app_commands.command(name="controlpanelremove", description="Remove the control panel")
-    @app_commands.check(owner_check)
+    @is_owner()
     async def controlpanelremove(self, interaction: discord.Interaction):
         """Remove the control panel."""
         await interaction.response.defer(ephemeral=True)
@@ -4691,9 +3711,9 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
         except Exception as e:
             logger.error(f"Control panel remove error: {e}")
             await interaction.followup.send(f"❌ Failed to remove control panel: {str(e)}", ephemeral=True)
-    
+
     @app_commands.command(name="controlpanelmove", description="Move the control panel to another channel")
-    @app_commands.check(owner_check)
+    @is_owner()
     @app_commands.describe(channel="Channel to move the control panel to")
     async def controlpanelmove(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """Move the control panel to another channel."""
@@ -4705,7 +3725,6 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             return
         
         try:
-            # Delete old panel
             old_channel = interaction.guild.get_channel(config["channel_id"])
             if old_channel:
                 try:
@@ -4714,7 +3733,6 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
                 except:
                     pass
             
-            # Create new panel in new channel
             embed = discord.Embed(
                 title="🎛️ Bot Control Panel",
                 description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
@@ -4729,7 +3747,6 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             view = ControlPanelView(self.bot, OWNER_ID)
             message = await channel.send(embed=embed, view=view)
             
-            # Update database
             await save_control_panel(interaction.guild_id, channel.id, message.id)
             
             await interaction.followup.send(
@@ -4741,11 +3758,31 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             logger.error(f"Control panel move error: {e}")
             await interaction.followup.send(f"❌ Failed to move control panel: {str(e)}", ephemeral=True)
 
+# =========================
+# AI RESPONSE FUNCTION
+# =========================
+async def get_ai_response(prompt: str) -> str:
+    """Get a response from Google Gemini."""
+    try:
+        if not client:
+            return "⚠️ GEMINI_API_KEY is missing. Please set the GEMINI_API_KEY environment variable."
+
+        response = await asyncio.to_thread(
+            lambda: client.models.generate_content(
+                model=MODEL_NAME,
+                contents=prompt
+            )
+        )
+
+        return response.text.strip()
+
+    except Exception as e:
+        logger.error(f"AI response error: {e}")
+        return f"⚠️ AI error: {str(e)}"
 
 # =========================
 # MAIN BOT INITIALIZATION
 # =========================
-
 async def main():
     async with bot:
         await db.connect()
