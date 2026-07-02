@@ -1254,7 +1254,7 @@ class ModerationPanelView(discord.ui.View):
         ))
         self.add_item(ModerationPanelButton(
             "⏰ Timeout", "timeout",
-            discord.ButtonStyle.warning, row=0
+            discord.ButtonStyle.danger, row=0
         ))
         
         # ===== ROW 1 - More User Actions =====
