@@ -967,10 +967,10 @@ async def handle_db_status(interaction: discord.Interaction):
 
 class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
     """Modal for moderation actions that require input."""
-    def __init__(self, action_type: str, target_user: discord.Member = None):
+    def __init__(self, action_type: str, target: Any = None):
         super().__init__()
         self.action_type = action_type
-        self.target_user = target_user
+        self.target = target
         
         self.reason_input = discord.ui.TextInput(
             label="Reason",
@@ -1014,19 +1014,19 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
         
         try:
             if self.action_type in ["warn", "add_warning"]:
-                await add_warning(self.target_user.id, guild.id, reason, str(interaction.user))
-                await add_history(guild.id, self.target_user.id, str(self.target_user), "WARN", reason)
-                await interaction.response.send_message(f"✅ Warned {self.target_user.mention} | Reason: {reason}", ephemeral=True)
+                await add_warning(self.target.id, guild.id, reason, str(interaction.user))
+                await add_history(guild.id, self.target.id, str(self.target), "WARN", reason)
+                await interaction.response.send_message(f"✅ Warned {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "ban":
-                await self.target_user.ban(reason=reason)
-                await add_history(guild.id, self.target_user.id, str(self.target_user), "BAN", f"Banned by {interaction.user}: {reason}")
-                await interaction.response.send_message(f"✅ Banned {self.target_user.mention} | Reason: {reason}", ephemeral=True)
+                await self.target.ban(reason=reason)
+                await add_history(guild.id, self.target.id, str(self.target), "BAN", f"Banned by {interaction.user}: {reason}")
+                await interaction.response.send_message(f"✅ Banned {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "kick":
-                await self.target_user.kick(reason=reason)
-                await add_history(guild.id, self.target_user.id, str(self.target_user), "KICK", reason)
-                await interaction.response.send_message(f"✅ Kicked {self.target_user.mention} | Reason: {reason}", ephemeral=True)
+                await self.target.kick(reason=reason)
+                await add_history(guild.id, self.target.id, str(self.target), "KICK", reason)
+                await interaction.response.send_message(f"✅ Kicked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type in ["timeout", "mute"]:
                 try:
@@ -1034,24 +1034,24 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
                     if duration_minutes <= 0:
                         await interaction.response.send_message("❌ Duration must be positive.", ephemeral=True)
                         return
-                    await self.target_user.timeout(utcnow() + timedelta(minutes=duration_minutes), reason=reason)
-                    await add_history(guild.id, self.target_user.id, str(self.target_user), "TIMEOUT", f"Timed out for {duration_minutes}min by {interaction.user}: {reason}")
-                    await interaction.response.send_message(f"✅ Timed out {self.target_user.mention} for {duration_minutes} minutes | Reason: {reason}", ephemeral=True)
+                    await self.target.timeout(utcnow() + timedelta(minutes=duration_minutes), reason=reason)
+                    await add_history(guild.id, self.target.id, str(self.target), "TIMEOUT", f"Timed out for {duration_minutes}min by {interaction.user}: {reason}")
+                    await interaction.response.send_message(f"✅ Timed out {self.target.mention} for {duration_minutes} minutes | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid duration. Please enter a number.", ephemeral=True)
                     return
                     
             elif self.action_type == "unmute":
-                await self.target_user.timeout(None)
-                await add_history(guild.id, self.target_user.id, str(self.target_user), "UNMUTE", f"Unmuted by {interaction.user}")
-                await interaction.response.send_message(f"✅ Unmuted {self.target_user.mention}", ephemeral=True)
+                await self.target.timeout(None)
+                await add_history(guild.id, self.target.id, str(self.target), "UNMUTE", f"Unmuted by {interaction.user}")
+                await interaction.response.send_message(f"✅ Unmuted {self.target.mention}", ephemeral=True)
                     
             elif self.action_type == "clear":
                 try:
                     amount = min(int(self.amount_input.value), 100)
-                    deleted = await interaction.channel.purge(limit=amount)
-                    await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{interaction.channel.name}")
-                    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages | Reason: {reason}", ephemeral=True)
+                    deleted = await self.target.purge(limit=amount)
+                    await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{self.target.name}")
+                    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages from {self.target.mention} | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid amount. Please enter a number.", ephemeral=True)
                     return
@@ -1059,26 +1059,26 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
             elif self.action_type == "thanos_snap":
                 total = 0
                 while True:
-                    deleted = await interaction.channel.purge(limit=100)
+                    deleted = await self.target.purge(limit=100)
                     total += len(deleted)
                     if not deleted:
                         break
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEARALL", f"Cleared {total} messages in #{interaction.channel.name}")
-                await interaction.response.send_message(f"🧹 Cleared {total} messages | Reason: {reason}", ephemeral=True)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEARALL", f"Cleared {total} messages in #{self.target.name}")
+                await interaction.response.send_message(f"🧹 Cleared {total} messages from {self.target.mention} | Reason: {reason}", ephemeral=True)
                     
             elif self.action_type == "lock":
-                overwrite = interaction.channel.overwrites_for(guild.default_role)
+                overwrite = self.target.overwrites_for(guild.default_role)
                 overwrite.send_messages = False
-                await interaction.channel.set_permissions(guild.default_role, overwrite=overwrite)
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{interaction.channel.name}: {reason}")
-                await interaction.response.send_message(f"🔒 Locked {interaction.channel.mention} | Reason: {reason}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, overwrite=overwrite)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"🔒 Locked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "unlock":
-                overwrite = interaction.channel.overwrites_for(guild.default_role)
+                overwrite = self.target.overwrites_for(guild.default_role)
                 overwrite.send_messages = None
-                await interaction.channel.set_permissions(guild.default_role, overwrite=overwrite)
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{interaction.channel.name}: {reason}")
-                await interaction.response.send_message(f"🔓 Unlocked {interaction.channel.mention} | Reason: {reason}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, overwrite=overwrite)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"🔓 Unlocked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "slowmode":
                 try:
@@ -1086,22 +1086,22 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
                     if seconds < 0 or seconds > 21600:
                         await interaction.response.send_message("❌ Slowmode must be between 0 and 21600 seconds.", ephemeral=True)
                         return
-                    await interaction.channel.edit(slowmode_delay=seconds)
-                    await add_history(guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode in #{interaction.channel.name} to {seconds}s: {reason}")
-                    await interaction.response.send_message(f"⏱️ Slowmode set to {seconds} seconds | Reason: {reason}", ephemeral=True)
+                    await self.target.edit(slowmode_delay=seconds)
+                    await add_history(guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode in #{self.target.name} to {seconds}s: {reason}")
+                    await interaction.response.send_message(f"⏱️ Slowmode set to {seconds} seconds in {self.target.mention} | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid input. Please enter a number.", ephemeral=True)
                     return
                 
             elif self.action_type == "hide":
-                await interaction.channel.set_permissions(guild.default_role, view_channel=False)
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "HIDE", f"Hid #{interaction.channel.name}: {reason}")
-                await interaction.response.send_message(f"👁️ Channel hidden | Reason: {reason}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, view_channel=False)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "HIDE", f"Hid #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"👁️ Hidden {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "show":
-                await interaction.channel.set_permissions(guild.default_role, view_channel=None)
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "SHOW", f"Showed #{interaction.channel.name}: {reason}")
-                await interaction.response.send_message(f"👁️ Channel shown | Reason: {reason}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, view_channel=None)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "SHOW", f"Showed #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"👁️ Shown {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to perform this action.", ephemeral=True)
@@ -1157,7 +1157,6 @@ class ModerationMemberSelectView(discord.ui.View):
         self.select.callback = select_callback
         self.add_item(self.select)
         
-        # Add a cancel button
         cancel_button = discord.ui.Button(
             label="Cancel",
             style=discord.ButtonStyle.secondary,
@@ -1172,10 +1171,12 @@ class ModerationMemberSelectView(discord.ui.View):
 
 class ModerationChannelSelectView(discord.ui.View):
     """View with a select menu for choosing a channel."""
-    def __init__(self, action_type: str, guild: discord.Guild, callback_func):
+    def __init__(self, action_type: str, guild: discord.Guild, callback_func, destructive: bool = False):
         super().__init__(timeout=60)
         self.action_type = action_type
         self.guild = guild
+        self.destructive = destructive
+        self.selected_channel = None
         
         options = []
         channels = [c for c in guild.text_channels][:25]
@@ -1211,7 +1212,12 @@ class ModerationChannelSelectView(discord.ui.View):
             channel_id = int(self.select.values[0])
             channel = self.guild.get_channel(channel_id)
             if channel:
-                await callback_func(select_interaction, channel, self.action_type)
+                self.selected_channel = channel
+                if self.destructive:
+                    # Show confirmation for destructive actions
+                    await self._show_confirmation(select_interaction, channel)
+                else:
+                    await callback_func(select_interaction, channel, self.action_type)
             else:
                 await select_interaction.response.send_message("❌ Channel not found.", ephemeral=True)
         
@@ -1229,13 +1235,70 @@ class ModerationChannelSelectView(discord.ui.View):
         
         cancel_button.callback = cancel_callback
         self.add_item(cancel_button)
+    
+    async def _show_confirmation(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Show a confirmation prompt for destructive actions."""
+        action_name = self.action_type.replace('_', ' ').title()
+        embed = discord.Embed(
+            title=f"⚠️ Confirm {action_name}",
+            description=f"Are you sure you want to perform **{action_name}** on {channel.mention}?\n\n"
+                       f"This action will **permanently delete all messages** in this channel and cannot be undone!",
+            color=discord.Color.red()
+        )
+        
+        view = discord.ui.View()
+        
+        # Confirm button
+        confirm_button = discord.ui.Button(
+            label="✅ Confirm",
+            style=discord.ButtonStyle.danger,
+            custom_id="confirm_destructive"
+        )
+        
+        async def confirm_callback(button_interaction: discord.Interaction):
+            # Call the original callback with the channel
+            # We need to get the original callback from the parent
+            await self._execute_action(button_interaction, channel)
+        
+        confirm_button.callback = confirm_callback
+        view.add_item(confirm_button)
+        
+        # Cancel button
+        cancel_button = discord.ui.Button(
+            label="❌ Cancel",
+            style=discord.ButtonStyle.secondary,
+            custom_id="cancel_destructive"
+        )
+        
+        async def cancel_callback(button_interaction: discord.Interaction):
+            await button_interaction.response.send_message("❌ Action cancelled.", ephemeral=True)
+        
+        cancel_button.callback = cancel_callback
+        view.add_item(cancel_button)
+        
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+    
+    async def _execute_action(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Execute the action after confirmation."""
+        # We need to get the callback from the parent view
+        # This is a workaround - we'll get the callback from the original view
+        # Since we can't easily pass it through, we'll use the stored callback
+        # For destructive actions, we'll open the modal directly
+        
+        if self.action_type in ["thanos_snap", "clear"]:
+            # For destructive actions, open the modal
+            modal = ModerationActionModal(self.action_type, channel)
+            await interaction.response.send_modal(modal)
+        else:
+            # For non-destructive actions, just execute
+            # This shouldn't happen for destructive actions, but just in case
+            await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
 
 class ModerationPanelView(discord.ui.View):
     """The complete moderation panel view with all moderation commands."""
 
     def __init__(self, bot_instance, guild: discord.Guild, return_to_main_callback):
         super().__init__(timeout=None)
-
         self.bot = bot_instance
         self.guild = guild
         self.return_to_main_callback = return_to_main_callback
@@ -1245,17 +1308,14 @@ class ModerationPanelView(discord.ui.View):
             "⚠️ Warn", "warn",
             discord.ButtonStyle.danger, row=0
         ))
-
         self.add_item(ModerationPanelButton(
             "🔨 Ban", "ban",
             discord.ButtonStyle.danger, row=0
         ))
-
         self.add_item(ModerationPanelButton(
             "👢 Kick", "kick",
             discord.ButtonStyle.danger, row=0
         ))
-
         self.add_item(ModerationPanelButton(
             "⏰ Timeout", "timeout",
             discord.ButtonStyle.danger, row=0
@@ -1266,17 +1326,14 @@ class ModerationPanelView(discord.ui.View):
             "🔊 Unmute", "unmute",
             discord.ButtonStyle.success, row=1
         ))
-
         self.add_item(ModerationPanelButton(
             "🔨 Softban", "softban",
             discord.ButtonStyle.danger, row=1
         ))
-
         self.add_item(ModerationPanelButton(
             "🔓 Unban", "unban",
             discord.ButtonStyle.success, row=1
         ))
-
         self.add_item(ModerationPanelButton(
             "📜 History", "history",
             discord.ButtonStyle.secondary, row=1
@@ -1287,17 +1344,14 @@ class ModerationPanelView(discord.ui.View):
             "🧹 Clear", "clear",
             discord.ButtonStyle.secondary, row=2
         ))
-
         self.add_item(ModerationPanelButton(
             "💥 Thanos Snap", "thanos_snap",
             discord.ButtonStyle.danger, row=2
         ))
-
         self.add_item(ModerationPanelButton(
             "🔒 Lock", "lock",
             discord.ButtonStyle.danger, row=2
         ))
-
         self.add_item(ModerationPanelButton(
             "🔓 Unlock", "unlock",
             discord.ButtonStyle.success, row=2
@@ -1308,22 +1362,18 @@ class ModerationPanelView(discord.ui.View):
             "⏱️ Slowmode", "slowmode",
             discord.ButtonStyle.primary, row=3
         ))
-
         self.add_item(ModerationPanelButton(
             "👁️ Hide", "hide",
             discord.ButtonStyle.secondary, row=3
         ))
-
         self.add_item(ModerationPanelButton(
             "👁️ Show", "show",
             discord.ButtonStyle.secondary, row=3
         ))
-
         self.add_item(ModerationPanelButton(
             "🕵️ Snipe", "snipe",
             discord.ButtonStyle.secondary, row=3
         ))
-
         self.add_item(ModerationPanelButton(
             "✏️ Edit Snipe", "editsnipe",
             discord.ButtonStyle.secondary, row=3
@@ -1334,17 +1384,14 @@ class ModerationPanelView(discord.ui.View):
             "📋 View Warnings", "view_warnings",
             discord.ButtonStyle.secondary, row=4
         ))
-
         self.add_item(ModerationPanelButton(
             "🗑️ Remove Warning", "remove_warning",
             discord.ButtonStyle.danger, row=4
         ))
-
         self.add_item(ModerationPanelButton(
             "🧹 Clear Warnings", "clear_warnings",
             discord.ButtonStyle.danger, row=4
         ))
-
         self.add_item(ModerationPanelButton(
             "🔙 Back", "back_to_main",
             discord.ButtonStyle.secondary, row=4
@@ -1363,22 +1410,25 @@ class ModerationPanelView(discord.ui.View):
             await self.return_to_main_callback(interaction)
             return
         
-        # Channel actions that don't need member selection
-        channel_only_actions = ["lock", "unlock", "clear", "thanos_snap", "slowmode", "hide", "show"]
+        # Channel actions that need channel selection
+        channel_actions = ["lock", "unlock", "clear", "thanos_snap", "slowmode", "hide", "show"]
+        destructive_actions = ["thanos_snap", "clear"]
         
-        if action in channel_only_actions:
-            if action == "clear":
-                modal = ModerationActionModal(action)
-                await interaction.response.send_modal(modal)
-            elif action == "thanos_snap":
-                modal = ModerationActionModal(action)
-                await interaction.response.send_modal(modal)
-            elif action == "slowmode":
-                modal = ModerationActionModal(action)
-                await interaction.response.send_modal(modal)
-            elif action in ["lock", "unlock", "hide", "show"]:
-                modal = ModerationActionModal(action)
-                await interaction.response.send_modal(modal)
+        if action in channel_actions:
+            # Show channel selector
+            embed = discord.Embed(
+                title=f"Select Target Channel for {action.replace('_', ' ').title()}",
+                description=f"Choose a channel from the dropdown below.",
+                color=discord.Color.blue()
+            )
+            
+            is_destructive = action in destructive_actions
+            view = ModerationChannelSelectView(
+                action, self.guild,
+                self._channel_action_callback,
+                destructive=is_destructive
+            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
         # Snipe and Edit Snipe - show last deleted/edited message
@@ -1457,6 +1507,11 @@ class ModerationPanelView(discord.ui.View):
         
         # Fallback
         await interaction.response.send_message(f"❌ Unknown action: {action}", ephemeral=True)
+
+    async def _channel_action_callback(self, interaction: discord.Interaction, channel: discord.TextChannel, action: str):
+        """Callback for channel actions."""
+        modal = ModerationActionModal(action, channel)
+        await interaction.response.send_modal(modal)
 
     async def _member_action_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
         """Callback for member actions."""
