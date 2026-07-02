@@ -2270,72 +2270,104 @@ async def on_ready():
 async def restore_panel_command(ctx):
     """Manually restore the control panel."""
     await ctx.send("🔄 Attempting to restore control panel...")
-    await bot.restore_control_panel()
-    await ctx.send("✅ Control panel restoration complete!")
 
-async def MyBot.restore_control_panel(self):
-    """Restore control panel from database after restart."""
-    try:
-        # Get all guilds with control panels
-        results = await db.fetchall("SELECT guild_id, channel_id, message_id FROM control_panel")
-        
-        for guild_id, channel_id, message_id in results:
-            guild = self.get_guild(guild_id)
-            if not guild:
-                logger.warning(f"Guild {guild_id} not found, skipping panel restoration")
-                continue
-            
-            channel = guild.get_channel(channel_id)
-            if not channel:
-                logger.warning(f"Channel {channel_id} not found in guild {guild_id}")
-                continue
-            
-            try:
-                # Try to fetch and update existing message
-                message = await channel.fetch_message(message_id)
-                
-                # Create fresh embed
+    if hasattr(bot, "restore_control_panel"):
+        await bot.restore_control_panel()
+        await ctx.send("✅ Control panel restoration complete!")
+    else:
+        await ctx.send("❌ restore_control_panel() method not found in bot class.")
+
+
+# Put this INSIDE your MyBot class
+class MyBot(commands.Bot):
+
+    async def setup_hook(self):
+        # Your existing setup code here
+
+        # Restore control panel on startup
+        await self.restore_control_panel()
+
+    async def restore_control_panel(self):
+        """Restore control panel after bot restart."""
+        try:
+            results = await db.fetchall(
+                "SELECT guild_id, channel_id, message_id FROM control_panel"
+            )
+
+            for guild_id, channel_id, message_id in results:
+
+                guild = self.get_guild(guild_id)
+                if guild is None:
+                    continue
+
+                channel = guild.get_channel(channel_id)
+                if channel is None:
+                    continue
+
                 embed = discord.Embed(
                     title="🎛️ Bot Control Panel",
-                    description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
+                    description="Owner-only bot control panel.",
                     color=discord.Color.blue(),
-                    timestamp=datetime.now()
+                    timestamp=datetime.utcnow()
                 )
-                embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
-                embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
-                embed.add_field(name="📊 Commands", value=f"{len(self.tree.get_commands())} total", inline=True)
-                embed.set_footer(text="Control Panel • Owner Only")
-                
-                view = ControlPanelView(self, OWNER_ID)
-                await message.edit(embed=embed, view=view)
-                logger.info(f"✅ Restored control panel in guild {guild_id}")
-                
-            except discord.NotFound:
-                # Message was deleted, create new one
-                embed = discord.Embed(
-                    title="🎛️ Bot Control Panel",
-                    description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
-                embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
-                embed.add_field(name="📊 Commands", value=f"{len(self.tree.get_commands())} total", inline=True)
-                embed.set_footer(text="Control Panel • Owner Only")
-                
-                view = ControlPanelView(self, OWNER_ID)
-                new_message = await channel.send(embed=embed, view=view)
-                
-                # Update database with new message ID
-                await save_control_panel(guild_id, channel_id, new_message.id)
-                logger.info(f"✅ Recreated control panel in guild {guild_id}")
-                
-            except Exception as e:
-                logger.error(f"Error restoring control panel in guild {guild_id}: {e}")
-                
-    except Exception as e:
-        logger.error(f"Error during control panel restoration: {e}")
 
+                embed.add_field(
+                    name="🤖 Status",
+                    value="🟢 Online",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="👑 Owner",
+                    value=f"<@{OWNER_ID}>",
+                    inline=True
+                )
+
+                embed.add_field(
+                    name="📊 Commands",
+                    value=str(len(self.tree.get_commands())),
+                    inline=True
+                )
+
+                embed.set_footer(
+                    text="Control Panel • Owner Only"
+                )
+
+                view = ControlPanelView(self, OWNER_ID)
+
+                try:
+                    message = await channel.fetch_message(message_id)
+
+                    await message.edit(
+                        embed=embed,
+                        view=view
+                    )
+
+                    logger.info(
+                        f"✅ Restored control panel in guild {guild_id}"
+                    )
+
+                except discord.NotFound:
+                    new_message = await channel.send(
+                        embed=embed,
+                        view=view
+                    )
+
+                    await save_control_panel(
+                        guild_id,
+                        channel_id,
+                        new_message.id
+                    )
+
+                    logger.info(
+                        f"✅ Recreated control panel in guild {guild_id}"
+                    )
+
+        except Exception as e:
+            logger.error(
+                f"Control panel restoration failed: {e}"
+            )
+            
 # =========================
 # 🛡️ MODERATION COG - ACTIONS
 # =========================
