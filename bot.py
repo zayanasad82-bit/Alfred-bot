@@ -37,8 +37,7 @@ logger = logging.getLogger("HackerBot")
 # =========================
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OWNER_ROLE_ID = int(os.getenv("OWNER_ROLE_ID", "0"))
-OWNER_ROLE_NAME = os.getenv("OWNER_ROLE_NAME", "Owner")
+OWNER_ROLE_ID = int(os.getenv("OWNER_ROLE_ID", "0"))  # Role ID for owner permissions
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -52,8 +51,6 @@ intents.message_content = True
 intents.members = True
 intents.guilds = True
 intents.presences = True
-intents.message_content = True
-intents.voice_states = True
 
 class MyBot(commands.Bot):
     async def setup_hook(self):
@@ -62,6 +59,7 @@ class MyBot(commands.Bot):
         await self.restore_control_panel()
 
     async def restore_control_panel(self):
+        """Restore control panel after bot restart."""
         try:
             results = await db.fetchall(
                 "SELECT guild_id, channel_id, message_id FROM control_panel"
@@ -83,7 +81,7 @@ class MyBot(commands.Bot):
                     timestamp=datetime.utcnow()
                 )
                 embed.add_field(name="🤖 Status", value="🟢 Online", inline=True)
-                embed.add_field(name="👑 Owner Role", value=owner_role_mention(), inline=True)
+                embed.add_field(name="👑 Owner Role", value=f"<@&{OWNER_ROLE_ID}>" if OWNER_ROLE_ID else "Not set", inline=True)
                 embed.add_field(name="📊 Commands", value=str(len(self.tree.get_commands())), inline=True)
                 embed.set_footer(text="Control Panel • Owner Role Only")
 
@@ -114,6 +112,8 @@ _tasks_started = False
 # ASYNC DATABASE WRAPPER
 # =========================
 class AsyncDatabase:
+    """Thread-safe async database wrapper to prevent 'database is locked' errors."""
+    
     def __init__(self, db_path: str = "moderation.db"):
         self.db_path = db_path
         self._lock = asyncio.Lock()
@@ -121,6 +121,7 @@ class AsyncDatabase:
         self._loop = None
     
     async def connect(self):
+        """Initialize the database connection."""
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False, timeout=30)
         self._conn.execute("PRAGMA journal_mode=WAL;")
         self._conn.execute("PRAGMA busy_timeout=5000;")
@@ -130,27 +131,12 @@ class AsyncDatabase:
         logger.info("✅ Database connected (WAL mode)")
     
     async def _create_tables(self):
+        """Create all required tables."""
         queries = [
             """CREATE TABLE IF NOT EXISTS warnings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER, guild_id INTEGER,
                 reason TEXT, moderator TEXT, timestamp TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS cases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER, user_id INTEGER,
-                action TEXT, reason TEXT, moderator_id INTEGER,
-                target_name TEXT, timestamp TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS mod_notes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER, user_id INTEGER,
-                note TEXT, moderator_id INTEGER, timestamp TEXT
-            )""",
-            """CREATE TABLE IF NOT EXISTS jailed_users (
-                user_id INTEGER, guild_id INTEGER,
-                jail_role_id INTEGER, original_roles TEXT,
-                jailed_at TEXT, PRIMARY KEY (user_id, guild_id)
             )""",
             """CREATE TABLE IF NOT EXISTS tickets (
                 guild_id INTEGER, user_id INTEGER,
@@ -250,12 +236,6 @@ class AsyncDatabase:
                 message_id INTEGER, old_content TEXT, new_content TEXT,
                 author_id INTEGER, timestamp TEXT, edited_at TEXT
             )""",
-            """CREATE TABLE IF NOT EXISTS reaction_snipe_cache (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER, channel_id INTEGER,
-                message_id INTEGER, emoji TEXT, user_id INTEGER,
-                action TEXT, timestamp TEXT
-            )""",
             """CREATE TABLE IF NOT EXISTS member_message_counts (
                 user_id INTEGER, guild_id INTEGER,
                 message_count INTEGER DEFAULT 0,
@@ -268,6 +248,7 @@ class AsyncDatabase:
                 message_id INTEGER,
                 last_updated TEXT
             )""",
+            # Statistics Tables
             """CREATE TABLE IF NOT EXISTS user_stats (
                 user_id INTEGER,
                 guild_id INTEGER,
@@ -350,142 +331,88 @@ class AsyncDatabase:
                 key TEXT PRIMARY KEY,
                 value TEXT
             )""",
-            """CREATE TABLE IF NOT EXISTS locked_channels (
-                guild_id INTEGER,
-                channel_id INTEGER,
-                locked_at TEXT,
-                locked_by INTEGER,
-                reason TEXT,
-                PRIMARY KEY (guild_id, channel_id)
-            )""",
-            """CREATE TABLE IF NOT EXISTS hidden_channels (
-                guild_id INTEGER,
-                channel_id INTEGER,
-                hidden_at TEXT,
-                hidden_by INTEGER,
-                PRIMARY KEY (guild_id, channel_id)
-            )""",
-            """CREATE TABLE IF NOT EXISTS archived_channels (
-                guild_id INTEGER,
-                channel_id INTEGER,
-                archived_at TEXT,
-                archived_by INTEGER,
-                PRIMARY KEY (guild_id, channel_id)
-            )""",
         ]
         for query in queries:
             self._conn.execute(query)
         self._conn.commit()
     
     async def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Execute a query with the async lock."""
         async with self._lock:
             return await self._loop.run_in_executor(None, lambda: self._conn.execute(query, params))
     
     async def commit(self):
+        """Commit with the async lock."""
         async with self._lock:
             await self._loop.run_in_executor(None, self._conn.commit)
     
     async def fetchone(self, query: str, params: tuple = ()):
+        """Fetch one row."""
         cursor = await self.execute(query, params)
         return cursor.fetchone()
     
     async def fetchall(self, query: str, params: tuple = ()):
+        """Fetch all rows."""
         cursor = await self.execute(query, params)
         return cursor.fetchall()
     
     async def close(self):
+        """Close the connection."""
         if self._conn:
             self._conn.close()
 
 db = AsyncDatabase()
 
 # =========================
-# OWNER CHECK FUNCTIONS - FIXED
+# OWNER CHECK FUNCTIONS
 # =========================
-def has_owner_role(member: discord.Member) -> bool:
-    """Check if a member has the Owner role by ID or name."""
-    # First check by ID if set
-    if OWNER_ROLE_ID:
-        role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
-        if role:
-            logger.debug(f"User {member.id} has Owner role by ID: {OWNER_ROLE_ID}")
-            return True
-    
-    # Fallback to checking by name (case-sensitive)
-    role = discord.utils.get(member.roles, name=OWNER_ROLE_NAME)
-    if role:
-        logger.debug(f"User {member.id} has Owner role by name: {OWNER_ROLE_NAME}")
-        return True
-    
-    # Case-insensitive fallback for common role names
-    for r in member.roles:
-        if r.name.lower() == OWNER_ROLE_NAME.lower():
-            logger.debug(f"User {member.id} has Owner role by case-insensitive name: {r.name}")
-            return True
-        if r.name.lower() in ["owner", "server owner", "admin"]:
-            # Also check for common admin roles
-            logger.debug(f"User {member.id} has admin-like role: {r.name}")
-            return True
-    
-    logger.debug(f"User {member.id} does not have Owner role. Roles: {[r.name for r in member.roles]}")
-    return False
-
 def is_owner():
     """Check if the user has the Owner role."""
     async def predicate(interaction: discord.Interaction):
-        if not interaction.guild:
-            logger.warning("is_owner check called outside a guild")
-            return False
-        
+        if not OWNER_ROLE_ID:
+            logger.warning("OWNER_ROLE_ID not set! Allowing access for debugging.")
+            return True
         member = interaction.guild.get_member(interaction.user.id)
         if not member:
-            logger.warning(f"Could not find member {interaction.user.id} in guild {interaction.guild.id}")
             return False
-        
-        # If OWNER_ROLE_ID is not set and we're in debug mode, allow access
-        if not OWNER_ROLE_ID and OWNER_ROLE_NAME == "Owner":
-            # Try to find a role named "Owner"
-            owner_role = discord.utils.get(interaction.guild.roles, name="Owner")
-            if not owner_role:
-                # Try case-insensitive
-                owner_role = discord.utils.get(interaction.guild.roles, name=lambda n: n.lower() == "owner")
-            
-            if owner_role:
-                # Cache the role ID for future use
-                logger.info(f"Found Owner role '{owner_role.name}' with ID {owner_role.id} in guild {interaction.guild.id}")
-                # Temporarily set OWNER_ROLE_ID for this check
-                if owner_role in member.roles:
-                    return True
-            else:
-                # No Owner role found, allow access for debugging
-                logger.warning(f"No Owner role found in guild {interaction.guild.id}. Allowing access for debugging.")
-                return True
-        
-        return has_owner_role(member)
+        role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
+        return role is not None
     return app_commands.check(predicate)
+
+def has_owner_role(member: discord.Member) -> bool:
+    """Check if a member has the Owner role."""
+    if not OWNER_ROLE_ID:
+        return False
+    role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
+    return role is not None
 
 def owner_role_mention() -> str:
     """Get the mention string for the owner role."""
     if OWNER_ROLE_ID:
         return f"<@&{OWNER_ROLE_ID}>"
-    return f"**{OWNER_ROLE_NAME}** role"
+    return "Owner role not set"
 
 # =========================
 # STATISTICS HELPER FUNCTIONS
 # =========================
 
 async def reset_weekly_monthly_stats():
+    """Reset weekly and monthly message counts if needed."""
     today = datetime.now()
     current_week = today.strftime("%Y-%W")
     current_month = today.strftime("%Y-%m")
     
+    # Check if we need to reset weekly stats
     result = await db.fetchone(
         "SELECT value FROM bot_state WHERE key = 'current_week'"
     )
     if result:
         stored_week = result[0]
         if stored_week != current_week:
-            await db.execute("UPDATE user_stats SET messages_week = 0")
+            # Reset weekly counts for all users
+            await db.execute(
+                "UPDATE user_stats SET messages_week = 0"
+            )
             await db.execute(
                 "UPDATE bot_state SET value = ? WHERE key = 'current_week'",
                 (current_week,)
@@ -499,13 +426,17 @@ async def reset_weekly_monthly_stats():
         )
         await db.commit()
     
+    # Check if we need to reset monthly stats
     result = await db.fetchone(
         "SELECT value FROM bot_state WHERE key = 'current_month'"
     )
     if result:
         stored_month = result[0]
         if stored_month != current_month:
-            await db.execute("UPDATE user_stats SET messages_month = 0")
+            # Reset monthly counts for all users
+            await db.execute(
+                "UPDATE user_stats SET messages_month = 0"
+            )
             await db.execute(
                 "UPDATE bot_state SET value = ? WHERE key = 'current_month'",
                 (current_month,)
@@ -520,6 +451,7 @@ async def reset_weekly_monthly_stats():
         await db.commit()
 
 async def initialize_bot_state():
+    """Initialize bot state table if it doesn't exist."""
     await db.execute(
         """CREATE TABLE IF NOT EXISTS bot_state (
             key TEXT PRIMARY KEY,
@@ -528,6 +460,7 @@ async def initialize_bot_state():
     )
     await db.commit()
     
+    # Initialize week and month tracking
     today = datetime.now()
     current_week = today.strftime("%Y-%W")
     current_month = today.strftime("%Y-%m")
@@ -553,6 +486,7 @@ async def initialize_bot_state():
         await db.commit()
 
 async def update_user_stats(user_id: int, guild_id: int, message: discord.Message = None, is_command: bool = False):
+    """Update user statistics for a message or command."""
     try:
         await reset_weekly_monthly_stats()
         
@@ -719,6 +653,7 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
         logger.error(traceback.format_exc())
 
 async def update_server_stats(guild_id: int, message: discord.Message = None, is_command: bool = False):
+    """Update server-wide statistics."""
     try:
         result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
         
@@ -762,6 +697,7 @@ async def update_server_stats(guild_id: int, message: discord.Message = None, is
         logger.error(f"Error updating server stats: {e}")
 
 async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, content: str):
+    """Update channel statistics."""
     try:
         today = datetime.now().strftime("%Y-%m-%d")
         
@@ -848,6 +784,7 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
         logger.error(f"Error updating channel stats: {e}")
 
 async def update_most_active(guild_id: int):
+    """Update the most active user and channel in server stats."""
     try:
         user_result = await db.fetchone(
             """SELECT user_id, SUM(message_count) as total
@@ -887,6 +824,7 @@ async def update_most_active(guild_id: int):
         logger.error(f"Error updating most active: {e}")
 
 async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, duration: float = 0):
+    """Update voice statistics for a user."""
     try:
         result = await db.fetchone(
             "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
@@ -954,6 +892,7 @@ async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, 
         logger.error(f"Error updating voice stats: {e}")
 
 async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool = True):
+    """Track reaction usage."""
     try:
         if is_given:
             result = await db.fetchone(
@@ -1022,6 +961,7 @@ async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool
         logger.error(f"Error tracking reaction: {e}")
 
 async def track_moderation_action(guild_id: int, action: str):
+    """Track moderation actions."""
     try:
         result = await db.fetchone(
             "SELECT total_moderation_actions FROM server_stats WHERE guild_id=?",
@@ -1043,6 +983,7 @@ async def track_moderation_action(guild_id: int, action: str):
         logger.error(f"Error tracking moderation action: {e}")
 
 async def get_user_stats(user_id: int, guild_id: int) -> Dict:
+    """Get comprehensive user statistics."""
     try:
         result = await db.fetchone(
             "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
@@ -1088,6 +1029,7 @@ async def get_user_stats(user_id: int, guild_id: int) -> Dict:
         return None
 
 async def get_server_stats(guild_id: int) -> Dict:
+    """Get server-wide statistics."""
     try:
         result = await db.fetchone(
             "SELECT * FROM server_stats WHERE guild_id=?",
@@ -1114,6 +1056,7 @@ async def get_server_stats(guild_id: int) -> Dict:
         return None
 
 async def get_channel_stats(guild_id: int, channel_id: int) -> Dict:
+    """Get channel statistics."""
     try:
         result = await db.fetchone(
             "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
@@ -1139,6 +1082,7 @@ async def get_channel_stats(guild_id: int, channel_id: int) -> Dict:
         return None
 
 async def get_leaderboard(guild_id: int, stat_type: str, limit: int = 10) -> List:
+    """Get leaderboard for a specific stat type."""
     try:
         query = ""
         
@@ -1215,6 +1159,7 @@ async def get_leaderboard(guild_id: int, stat_type: str, limit: int = 10) -> Lis
         return []
 
 async def get_fun_titles(user_stats: Dict, guild: discord.Guild, member: discord.Member) -> List[str]:
+    """Get fun titles for a user based on their statistics."""
     titles = []
     
     try:
@@ -1333,74 +1278,6 @@ async def clear_warnings(user_id, guild_id):
     await db.execute("DELETE FROM warnings WHERE user_id=? AND guild_id=?", (user_id, guild_id))
     await db.commit()
 
-async def add_case(guild_id, user_id, action, reason, moderator_id, target_name):
-    await db.execute(
-        """INSERT INTO cases (guild_id, user_id, action, reason, moderator_id, target_name, timestamp)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (guild_id, user_id, action, reason, moderator_id, target_name, datetime.now().isoformat())
-    )
-    await db.commit()
-    return await db.fetchone("SELECT last_insert_rowid()")
-
-async def get_case(case_id, guild_id):
-    return await db.fetchone(
-        "SELECT * FROM cases WHERE id=? AND guild_id=?",
-        (case_id, guild_id)
-    )
-
-async def get_cases(guild_id, user_id=None, limit=50):
-    if user_id:
-        return await db.fetchall(
-            "SELECT * FROM cases WHERE guild_id=? AND user_id=? ORDER BY id DESC LIMIT ?",
-            (guild_id, user_id, limit)
-        )
-    return await db.fetchall(
-        "SELECT * FROM cases WHERE guild_id=? ORDER BY id DESC LIMIT ?",
-        (guild_id, limit)
-    )
-
-async def update_case_reason(case_id, guild_id, new_reason):
-    await db.execute(
-        "UPDATE cases SET reason=? WHERE id=? AND guild_id=?",
-        (new_reason, case_id, guild_id)
-    )
-    await db.commit()
-
-async def add_mod_note(guild_id, user_id, note, moderator_id):
-    await db.execute(
-        """INSERT INTO mod_notes (guild_id, user_id, note, moderator_id, timestamp)
-           VALUES (?, ?, ?, ?, ?)""",
-        (guild_id, user_id, note, moderator_id, datetime.now().isoformat())
-    )
-    await db.commit()
-
-async def get_mod_notes(guild_id, user_id):
-    return await db.fetchall(
-        "SELECT * FROM mod_notes WHERE guild_id=? AND user_id=? ORDER BY id DESC",
-        (guild_id, user_id)
-    )
-
-async def jail_user(user_id, guild_id, jail_role_id, original_roles):
-    await db.execute(
-        """INSERT OR REPLACE INTO jailed_users (user_id, guild_id, jail_role_id, original_roles, jailed_at)
-           VALUES (?, ?, ?, ?, ?)""",
-        (user_id, guild_id, jail_role_id, json.dumps(original_roles), datetime.now().isoformat())
-    )
-    await db.commit()
-
-async def get_jailed_user(user_id, guild_id):
-    return await db.fetchone(
-        "SELECT * FROM jailed_users WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
-    )
-
-async def unjail_user(user_id, guild_id):
-    await db.execute(
-        "DELETE FROM jailed_users WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
-    )
-    await db.commit()
-
 async def add_history(guild_id, user_id, username, event_type, details):
     await db.execute(
         """INSERT INTO history (guild_id, user_id, username, event_type, details, timestamp)
@@ -1475,19 +1352,6 @@ async def add_edit_snipe(guild_id, channel_id, message_id, old_content, new_cont
     )
     await db.commit()
 
-async def add_reaction_snipe(guild_id, channel_id, message_id, emoji, user_id, action):
-    await db.execute(
-        """INSERT INTO reaction_snipe_cache (guild_id, channel_id, message_id, emoji, user_id, action, timestamp)
-           VALUES (?, ?, ?, ?, ?, ?, ?)""",
-        (guild_id, channel_id, message_id, str(emoji), user_id, action, datetime.now().isoformat())
-    )
-    await db.commit()
-    await db.execute(
-        "DELETE FROM reaction_snipe_cache WHERE id NOT IN (SELECT id FROM reaction_snipe_cache WHERE guild_id=? ORDER BY id DESC LIMIT 100)",
-        (guild_id,)
-    )
-    await db.commit()
-
 async def get_snipe(guild_id, channel_id):
     result = await db.fetchone(
         """SELECT content, author_id, timestamp, message_id, attachments FROM snipe_cache
@@ -1503,21 +1367,6 @@ async def get_edit_snipe(guild_id, channel_id):
         (guild_id, channel_id)
     )
     return result
-
-async def get_reaction_snipe(guild_id, channel_id):
-    result = await db.fetchone(
-        """SELECT emoji, user_id, action, timestamp, message_id FROM reaction_snipe_cache
-           WHERE guild_id=? AND channel_id=? ORDER BY id DESC LIMIT 1""",
-        (guild_id, channel_id)
-    )
-    return result
-
-async def get_multi_snipe(guild_id, channel_id, limit=5):
-    return await db.fetchall(
-        """SELECT content, author_id, timestamp, message_id FROM snipe_cache
-           WHERE guild_id=? AND channel_id=? ORDER BY id DESC LIMIT ?""",
-        (guild_id, channel_id, limit)
-    )
 
 async def get_mod_logs_config(guild_id):
     result = await db.fetchone("SELECT * FROM mod_logs_config WHERE guild_id=?", (guild_id,))
@@ -2008,7 +1857,6 @@ async def handle_clear_cache(interaction: discord.Interaction):
     await db.execute("DELETE FROM message_cache")
     await db.execute("DELETE FROM snipe_cache")
     await db.execute("DELETE FROM edit_snipe_cache")
-    await db.execute("DELETE FROM reaction_snipe_cache")
     await db.commit()
     
     await interaction.response.send_message("🗑️ All caches cleared successfully!", ephemeral=True)
@@ -2055,7 +1903,7 @@ async def handle_db_status(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Database error: {str(e)}", ephemeral=True)
 
 # =========================
-# MODERATION CONTROL PANEL - EXPANDED
+# COMPLETE MODERATION CONTROL PANEL VIEWS
 # =========================
 
 class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
@@ -2073,7 +1921,7 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
         )
         self.add_item(self.reason_input)
         
-        if action_type in ["timeout", "mute", "tempmute", "tempban"]:
+        if action_type in ["timeout", "mute"]:
             self.duration_input = discord.ui.TextInput(
                 label="Duration (minutes)",
                 placeholder="Enter duration in minutes (e.g., 5, 60)",
@@ -2082,7 +1930,7 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
             )
             self.add_item(self.duration_input)
         
-        if action_type in ["clear", "purge"]:
+        if action_type == "clear":
             self.amount_input = discord.ui.TextInput(
                 label="Number of messages to clear",
                 placeholder="Enter amount (1-100)",
@@ -2099,15 +1947,6 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
                 max_length=10
             )
             self.add_item(self.slowmode_input)
-        
-        if action_type in ["nickname", "rename_channel", "topic", "reason"]:
-            self.value_input = discord.ui.TextInput(
-                label="New value",
-                placeholder="Enter the new value...",
-                required=True,
-                max_length=100
-            )
-            self.add_item(self.value_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         reason = self.reason_input.value or "No reason provided"
@@ -2118,64 +1957,45 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
                 await add_warning(self.target.id, guild.id, reason, str(interaction.user))
                 await add_history(guild.id, self.target.id, str(self.target), "WARN", reason)
                 await track_moderation_action(guild.id, "warn")
-                case_id = await add_case(guild.id, self.target.id, "Warn", reason, interaction.user.id, str(self.target))
-                await interaction.response.send_message(f"✅ Warned {self.target.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                await interaction.response.send_message(f"✅ Warned {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
-            elif self.action_type in ["ban", "tempban"]:
-                duration = None
-                if self.action_type == "tempban":
-                    try:
-                        duration_minutes = int(self.duration_input.value)
-                        duration = timedelta(minutes=duration_minutes)
-                    except ValueError:
-                        await interaction.response.send_message("❌ Invalid duration. Please enter a number.", ephemeral=True)
-                        return
-                
+            elif self.action_type == "ban":
                 await self.target.ban(reason=reason)
-                case_id = await add_case(guild.id, self.target.id, "Ban", reason, interaction.user.id, str(self.target))
                 await add_history(guild.id, self.target.id, str(self.target), "BAN", f"Banned by {interaction.user}: {reason}")
                 await track_moderation_action(guild.id, "ban")
-                msg = f"✅ Banned {self.target.mention} | Reason: {reason} | Case #{case_id}"
-                if duration:
-                    msg += f" | Duration: {duration_minutes} minutes"
-                await interaction.response.send_message(msg, ephemeral=True)
+                await interaction.response.send_message(f"✅ Banned {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "kick":
                 await self.target.kick(reason=reason)
-                case_id = await add_case(guild.id, self.target.id, "Kick", reason, interaction.user.id, str(self.target))
                 await add_history(guild.id, self.target.id, str(self.target), "KICK", reason)
                 await track_moderation_action(guild.id, "kick")
-                await interaction.response.send_message(f"✅ Kicked {self.target.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                await interaction.response.send_message(f"✅ Kicked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
-            elif self.action_type in ["timeout", "mute", "tempmute"]:
+            elif self.action_type in ["timeout", "mute"]:
                 try:
                     duration_minutes = int(self.duration_input.value)
                     if duration_minutes <= 0:
                         await interaction.response.send_message("❌ Duration must be positive.", ephemeral=True)
                         return
                     await self.target.timeout(utcnow() + timedelta(minutes=duration_minutes), reason=reason)
-                    case_id = await add_case(guild.id, self.target.id, "Timeout", reason, interaction.user.id, str(self.target))
                     await add_history(guild.id, self.target.id, str(self.target), "TIMEOUT", f"Timed out for {duration_minutes}min by {interaction.user}: {reason}")
                     await track_moderation_action(guild.id, "timeout")
-                    await interaction.response.send_message(f"✅ Timed out {self.target.mention} for {duration_minutes} minutes | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                    await interaction.response.send_message(f"✅ Timed out {self.target.mention} for {duration_minutes} minutes | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid duration. Please enter a number.", ephemeral=True)
                     return
                     
-            elif self.action_type in ["unmute", "untimeout"]:
+            elif self.action_type == "unmute":
                 await self.target.timeout(None)
-                case_id = await add_case(guild.id, self.target.id, "Unmute", reason, interaction.user.id, str(self.target))
                 await add_history(guild.id, self.target.id, str(self.target), "UNMUTE", f"Unmuted by {interaction.user}")
-                await interaction.response.send_message(f"✅ Unmuted {self.target.mention} | Case #{case_id}", ephemeral=True)
+                await interaction.response.send_message(f"✅ Unmuted {self.target.mention}", ephemeral=True)
                     
-            elif self.action_type in ["clear", "purge"]:
+            elif self.action_type == "clear":
                 try:
                     amount = min(int(self.amount_input.value), 100)
-                    deleted = await interaction.channel.purge(limit=amount)
-                    case_id = await add_case(guild.id, interaction.user.id, "Clear", reason, interaction.user.id, "Channel")
-                    await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{interaction.channel.name}")
-                    await track_moderation_action(guild.id, "clear")
-                    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                    deleted = await self.target.purge(limit=amount)
+                    await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{self.target.name}")
+                    await interaction.response.send_message(f"🧹 Deleted {len(deleted)} messages from {self.target.mention} | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid amount. Please enter a number.", ephemeral=True)
                     return
@@ -2183,42 +2003,26 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
             elif self.action_type == "thanos_snap":
                 total = 0
                 while True:
-                    deleted = await interaction.channel.purge(limit=100)
+                    deleted = await self.target.purge(limit=100)
                     total += len(deleted)
                     if not deleted:
                         break
-                case_id = await add_case(guild.id, interaction.user.id, "ThanosSnap", reason, interaction.user.id, "Channel")
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEARALL", f"Cleared {total} messages in #{interaction.channel.name}")
-                await track_moderation_action(guild.id, "clearall")
-                await interaction.response.send_message(f"🧹 Cleared {total} messages | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "CLEARALL", f"Cleared {total} messages in #{self.target.name}")
+                await interaction.response.send_message(f"🧹 Cleared {total} messages from {self.target.mention} | Reason: {reason}", ephemeral=True)
                     
             elif self.action_type == "lock":
-                overwrite = interaction.channel.overwrites_for(guild.default_role)
+                overwrite = self.target.overwrites_for(guild.default_role)
                 overwrite.send_messages = False
-                await interaction.channel.set_permissions(guild.default_role, overwrite=overwrite)
-                await db.execute(
-                    "INSERT OR REPLACE INTO locked_channels (guild_id, channel_id, locked_at, locked_by, reason) VALUES (?, ?, ?, ?, ?)",
-                    (guild.id, interaction.channel.id, datetime.now().isoformat(), interaction.user.id, reason)
-                )
-                await db.commit()
-                case_id = await add_case(guild.id, interaction.user.id, "Lock", reason, interaction.user.id, f"#{interaction.channel.name}")
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{interaction.channel.name}: {reason}")
-                await track_moderation_action(guild.id, "lock")
-                await interaction.response.send_message(f"🔒 Locked {interaction.channel.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, overwrite=overwrite)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"🔒 Locked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "unlock":
-                overwrite = interaction.channel.overwrites_for(guild.default_role)
+                overwrite = self.target.overwrites_for(guild.default_role)
                 overwrite.send_messages = None
-                await interaction.channel.set_permissions(guild.default_role, overwrite=overwrite)
-                await db.execute(
-                    "DELETE FROM locked_channels WHERE guild_id=? AND channel_id=?",
-                    (guild.id, interaction.channel.id)
-                )
-                await db.commit()
-                case_id = await add_case(guild.id, interaction.user.id, "Unlock", reason, interaction.user.id, f"#{interaction.channel.name}")
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{interaction.channel.name}: {reason}")
-                await track_moderation_action(guild.id, "unlock")
-                await interaction.response.send_message(f"🔓 Unlocked {interaction.channel.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, overwrite=overwrite)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"🔓 Unlocked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "slowmode":
                 try:
@@ -2226,84 +2030,22 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
                     if seconds < 0 or seconds > 21600:
                         await interaction.response.send_message("❌ Slowmode must be between 0 and 21600 seconds.", ephemeral=True)
                         return
-                    await interaction.channel.edit(slowmode_delay=seconds)
-                    case_id = await add_case(guild.id, interaction.user.id, "Slowmode", reason, interaction.user.id, f"#{interaction.channel.name}")
-                    await add_history(guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode in #{interaction.channel.name} to {seconds}s: {reason}")
-                    await track_moderation_action(guild.id, "slowmode")
-                    await interaction.response.send_message(f"⏱️ Slowmode set to {seconds} seconds in {interaction.channel.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                    await self.target.edit(slowmode_delay=seconds)
+                    await add_history(guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode in #{self.target.name} to {seconds}s: {reason}")
+                    await interaction.response.send_message(f"⏱️ Slowmode set to {seconds} seconds in {self.target.mention} | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid input. Please enter a number.", ephemeral=True)
                     return
                 
             elif self.action_type == "hide":
-                await interaction.channel.set_permissions(guild.default_role, view_channel=False)
-                await db.execute(
-                    "INSERT OR REPLACE INTO hidden_channels (guild_id, channel_id, hidden_at, hidden_by) VALUES (?, ?, ?, ?)",
-                    (guild.id, interaction.channel.id, datetime.now().isoformat(), interaction.user.id)
-                )
-                await db.commit()
-                case_id = await add_case(guild.id, interaction.user.id, "Hide", reason, interaction.user.id, f"#{interaction.channel.name}")
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "HIDE", f"Hid #{interaction.channel.name}: {reason}")
-                await track_moderation_action(guild.id, "hide")
-                await interaction.response.send_message(f"👁️ Hidden {interaction.channel.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, view_channel=False)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "HIDE", f"Hid #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"👁️ Hidden {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "show":
-                await interaction.channel.set_permissions(guild.default_role, view_channel=None)
-                await db.execute(
-                    "DELETE FROM hidden_channels WHERE guild_id=? AND channel_id=?",
-                    (guild.id, interaction.channel.id)
-                )
-                await db.commit()
-                case_id = await add_case(guild.id, interaction.user.id, "Show", reason, interaction.user.id, f"#{interaction.channel.name}")
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "SHOW", f"Showed #{interaction.channel.name}: {reason}")
-                await track_moderation_action(guild.id, "show")
-                await interaction.response.send_message(f"👁️ Shown {interaction.channel.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
-            
-            elif self.action_type == "softban":
-                await self.target.ban(reason=reason)
-                await asyncio.sleep(1)
-                await guild.unban(self.target, reason="Softban complete")
-                case_id = await add_case(guild.id, self.target.id, "Softban", reason, interaction.user.id, str(self.target))
-                await add_history(guild.id, self.target.id, str(self.target), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
-                await track_moderation_action(guild.id, "softban")
-                await interaction.response.send_message(f"🧹 Softbanned {self.target.mention} | Reason: {reason} | Case #{case_id}", ephemeral=True)
-            
-            elif self.action_type == "nickname":
-                old_nick = self.target.nick or self.target.name
-                new_nick = self.value_input.value
-                await self.target.edit(nick=new_nick, reason=reason)
-                case_id = await add_case(guild.id, self.target.id, "Nickname", f"{old_nick} -> {new_nick} | {reason}", interaction.user.id, str(self.target))
-                await add_history(guild.id, self.target.id, str(self.target), "NICK_CHANGE", f"{old_nick} -> {new_nick} by {interaction.user}")
-                await interaction.response.send_message(f"✏️ Nickname changed for {self.target.mention}: {old_nick} -> {new_nick} | Case #{case_id}", ephemeral=True)
-            
-            elif self.action_type == "reset_nickname":
-                old_nick = self.target.nick or self.target.name
-                await self.target.edit(nick=None, reason=reason)
-                case_id = await add_case(guild.id, self.target.id, "ResetNickname", f"{old_nick} -> {self.target.name} | {reason}", interaction.user.id, str(self.target))
-                await add_history(guild.id, self.target.id, str(self.target), "NICK_RESET", f"{old_nick} -> {self.target.name} by {interaction.user}")
-                await interaction.response.send_message(f"🔄 Nickname reset for {self.target.mention}: {old_nick} -> {self.target.name} | Case #{case_id}", ephemeral=True)
-            
-            elif self.action_type == "rename_channel":
-                old_name = interaction.channel.name
-                new_name = self.value_input.value.replace(" ", "-").lower()
-                await interaction.channel.edit(name=new_name, reason=reason)
-                case_id = await add_case(guild.id, interaction.user.id, "RenameChannel", f"{old_name} -> {new_name} | {reason}", interaction.user.id, f"#{old_name}")
-                await add_history(guild.id, interaction.user.id, str(interaction.user), "RENAME_CHANNEL", f"Renamed #{old_name} to #{new_name}")
-                await interaction.response.send_message(f"✏️ Channel renamed: #{old_name} -> #{new_name} | Case #{case_id}", ephemeral=True)
-            
-            elif self.action_type == "topic":
-                old_topic = interaction.channel.topic or "None"
-                new_topic = self.value_input.value
-                await interaction.channel.edit(topic=new_topic, reason=reason)
-                case_id = await add_case(guild.id, interaction.user.id, "Topic", f"{old_topic} -> {new_topic} | {reason}", interaction.user.id, f"#{interaction.channel.name}")
-                await interaction.response.send_message(f"📝 Topic updated for {interaction.channel.mention} | Case #{case_id}", ephemeral=True)
-            
-            elif self.action_type == "nsfw":
-                current = "NSFW" if interaction.channel.is_nsfw() else "SFW"
-                new = not interaction.channel.is_nsfw()
-                await interaction.channel.edit(nsfw=new, reason=reason)
-                case_id = await add_case(guild.id, interaction.user.id, "NSFW", f"{current} -> {'NSFW' if new else 'SFW'} | {reason}", interaction.user.id, f"#{interaction.channel.name}")
-                await interaction.response.send_message(f"🔞 Channel set to {'NSFW' if new else 'SFW'} | Case #{case_id}", ephemeral=True)
+                await self.target.set_permissions(guild.default_role, view_channel=None)
+                await add_history(guild.id, interaction.user.id, str(interaction.user), "SHOW", f"Showed #{self.target.name}: {reason}")
+                await interaction.response.send_message(f"👁️ Shown {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
         except discord.Forbidden:
             await interaction.response.send_message("❌ I don't have permission to perform this action.", ephemeral=True)
@@ -2473,7 +2215,7 @@ class ModerationChannelSelectView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     
     async def _execute_action(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if self.action_type in ["thanos_snap", "clear", "purge", "nuke"]:
+        if self.action_type in ["thanos_snap", "clear"]:
             modal = ModerationActionModal(self.action_type, channel)
             await interaction.response.send_modal(modal)
         else:
@@ -2486,77 +2228,94 @@ class ModerationPanelView(discord.ui.View):
         self.guild = guild
         self.return_to_main_callback = return_to_main_callback
 
-        # Row 0 - Basic Actions
-        self.add_item(ModerationPanelButton("⚠️ Warn", "warn", discord.ButtonStyle.danger, row=0))
-        self.add_item(ModerationPanelButton("🔨 Ban", "ban", discord.ButtonStyle.danger, row=0))
-        self.add_item(ModerationPanelButton("🔨 Tempban", "tempban", discord.ButtonStyle.danger, row=0))
-        self.add_item(ModerationPanelButton("👢 Kick", "kick", discord.ButtonStyle.danger, row=0))
+        self.add_item(ModerationPanelButton(
+            "⚠️ Warn", "warn",
+            discord.ButtonStyle.danger, row=0
+        ))
+        self.add_item(ModerationPanelButton(
+            "🔨 Ban", "ban",
+            discord.ButtonStyle.danger, row=0
+        ))
+        self.add_item(ModerationPanelButton(
+            "👢 Kick", "kick",
+            discord.ButtonStyle.danger, row=0
+        ))
+        self.add_item(ModerationPanelButton(
+            "⏰ Timeout", "timeout",
+            discord.ButtonStyle.danger, row=0
+        ))
 
-        # Row 1 - Timeout/Mute Actions
-        self.add_item(ModerationPanelButton("⏰ Timeout", "timeout", discord.ButtonStyle.danger, row=1))
-        self.add_item(ModerationPanelButton("🔊 Unmute", "unmute", discord.ButtonStyle.success, row=1))
-        self.add_item(ModerationPanelButton("🔨 Softban", "softban", discord.ButtonStyle.danger, row=1))
-        self.add_item(ModerationPanelButton("🔓 Unban", "unban", discord.ButtonStyle.success, row=1))
+        self.add_item(ModerationPanelButton(
+            "🔊 Unmute", "unmute",
+            discord.ButtonStyle.success, row=1
+        ))
+        self.add_item(ModerationPanelButton(
+            "🔨 Softban", "softban",
+            discord.ButtonStyle.danger, row=1
+        ))
+        self.add_item(ModerationPanelButton(
+            "🔓 Unban", "unban",
+            discord.ButtonStyle.success, row=1
+        ))
+        self.add_item(ModerationPanelButton(
+            "📜 History", "history",
+            discord.ButtonStyle.secondary, row=1
+        ))
 
-        # Row 2 - Channel Actions
-        self.add_item(ModerationPanelButton("🧹 Clear", "clear", discord.ButtonStyle.secondary, row=2))
-        self.add_item(ModerationPanelButton("💥 Thanos Snap", "thanos_snap", discord.ButtonStyle.danger, row=2))
-        self.add_item(ModerationPanelButton("💣 Nuke", "nuke", discord.ButtonStyle.danger, row=2))
-        self.add_item(ModerationPanelButton("🔒 Lock", "lock", discord.ButtonStyle.danger, row=2))
+        self.add_item(ModerationPanelButton(
+            "🧹 Clear", "clear",
+            discord.ButtonStyle.secondary, row=2
+        ))
+        self.add_item(ModerationPanelButton(
+            "💥 Thanos Snap", "thanos_snap",
+            discord.ButtonStyle.danger, row=2
+        ))
+        self.add_item(ModerationPanelButton(
+            "🔒 Lock", "lock",
+            discord.ButtonStyle.danger, row=2
+        ))
+        self.add_item(ModerationPanelButton(
+            "🔓 Unlock", "unlock",
+            discord.ButtonStyle.success, row=2
+        ))
 
-        # Row 3 - More Channel Actions
-        self.add_item(ModerationPanelButton("🔓 Unlock", "unlock", discord.ButtonStyle.success, row=3))
-        self.add_item(ModerationPanelButton("⏱️ Slowmode", "slowmode", discord.ButtonStyle.primary, row=3))
-        self.add_item(ModerationPanelButton("👁️ Hide", "hide", discord.ButtonStyle.secondary, row=3))
-        self.add_item(ModerationPanelButton("👁️ Show", "show", discord.ButtonStyle.secondary, row=3))
+        self.add_item(ModerationPanelButton(
+            "⏱️ Slowmode", "slowmode",
+            discord.ButtonStyle.primary, row=3
+        ))
+        self.add_item(ModerationPanelButton(
+            "👁️ Hide", "hide",
+            discord.ButtonStyle.secondary, row=3
+        ))
+        self.add_item(ModerationPanelButton(
+            "👁️ Show", "show",
+            discord.ButtonStyle.secondary, row=3
+        ))
+        self.add_item(ModerationPanelButton(
+            "🕵️ Snipe", "snipe",
+            discord.ButtonStyle.secondary, row=3
+        ))
+        self.add_item(ModerationPanelButton(
+            "✏️ Edit Snipe", "editsnipe",
+            discord.ButtonStyle.secondary, row=3
+        ))
 
-        # Row 4 - Purge Actions
-        self.add_item(ModerationPanelButton("🧹 Purge User", "purge_user", discord.ButtonStyle.secondary, row=4))
-        self.add_item(ModerationPanelButton("🤖 Purge Bots", "purge_bots", discord.ButtonStyle.secondary, row=4))
-        self.add_item(ModerationPanelButton("🔗 Purge Links", "purge_links", discord.ButtonStyle.secondary, row=4))
-        self.add_item(ModerationPanelButton("🖼️ Purge Images", "purge_images", discord.ButtonStyle.secondary, row=4))
-
-        # Row 5 - More Purge Actions
-        self.add_item(ModerationPanelButton("📦 Purge Attachments", "purge_attachments", discord.ButtonStyle.secondary, row=5))
-        self.add_item(ModerationPanelButton("📨 Purge Embeds", "purge_embeds", discord.ButtonStyle.secondary, row=5))
-        self.add_item(ModerationPanelButton("🔔 Purge Mentions", "purge_mentions", discord.ButtonStyle.secondary, row=5))
-        self.add_item(ModerationPanelButton("📋 Purge Contains", "purge_contains", discord.ButtonStyle.secondary, row=5))
-
-        # Row 6 - Info/History
-        self.add_item(ModerationPanelButton("📜 History", "history", discord.ButtonStyle.secondary, row=6))
-        self.add_item(ModerationPanelButton("🕵️ Snipe", "snipe", discord.ButtonStyle.secondary, row=6))
-        self.add_item(ModerationPanelButton("✏️ Edit Snipe", "editsnipe", discord.ButtonStyle.secondary, row=6))
-        self.add_item(ModerationPanelButton("🎭 Reaction Snipe", "reactionsnipe", discord.ButtonStyle.secondary, row=6))
-
-        # Row 7 - Warning Management
-        self.add_item(ModerationPanelButton("📋 View Warnings", "view_warnings", discord.ButtonStyle.secondary, row=7))
-        self.add_item(ModerationPanelButton("🗑️ Remove Warning", "remove_warning", discord.ButtonStyle.danger, row=7))
-        self.add_item(ModerationPanelButton("🧹 Clear Warnings", "clear_warnings", discord.ButtonStyle.danger, row=7))
-        self.add_item(ModerationPanelButton("📝 Add Note", "add_note", discord.ButtonStyle.secondary, row=7))
-
-        # Row 8 - Nickname/Role Actions
-        self.add_item(ModerationPanelButton("✏️ Nickname", "nickname", discord.ButtonStyle.primary, row=8))
-        self.add_item(ModerationPanelButton("🔄 Reset Nickname", "reset_nickname", discord.ButtonStyle.secondary, row=8))
-        self.add_item(ModerationPanelButton("🎭 Add Role", "addrole", discord.ButtonStyle.success, row=8))
-        self.add_item(ModerationPanelButton("🎭 Remove Role", "removerole", discord.ButtonStyle.danger, row=8))
-
-        # Row 9 - Channel Management
-        self.add_item(ModerationPanelButton("✏️ Rename", "rename_channel", discord.ButtonStyle.primary, row=9))
-        self.add_item(ModerationPanelButton("📝 Topic", "topic", discord.ButtonStyle.secondary, row=9))
-        self.add_item(ModerationPanelButton("🔞 NSFW", "nsfw", discord.ButtonStyle.danger, row=9))
-        self.add_item(ModerationPanelButton("🔄 Sync Perms", "sync_permissions", discord.ButtonStyle.secondary, row=9))
-
-        # Row 10 - Advanced
-        self.add_item(ModerationPanelButton("🔒 Lockdown", "lockdown", discord.ButtonStyle.danger, row=10))
-        self.add_item(ModerationPanelButton("🔓 Unlockdown", "unlockdown", discord.ButtonStyle.success, row=10))
-        self.add_item(ModerationPanelButton("🔒 Lock All", "lockall", discord.ButtonStyle.danger, row=10))
-        self.add_item(ModerationPanelButton("🔓 Unlock All", "unlockall", discord.ButtonStyle.success, row=10))
-
-        # Row 11 - Back and Misc
-        self.add_item(ModerationPanelButton("🔙 Back", "back_to_main", discord.ButtonStyle.secondary, row=11))
-        self.add_item(ModerationPanelButton("📊 User Info", "userinfo", discord.ButtonStyle.secondary, row=11))
-        self.add_item(ModerationPanelButton("📊 Server Info", "serverinfo", discord.ButtonStyle.secondary, row=11))
-        self.add_item(ModerationPanelButton("📋 Cases", "cases", discord.ButtonStyle.secondary, row=11))
+        self.add_item(ModerationPanelButton(
+            "📋 View Warnings", "view_warnings",
+            discord.ButtonStyle.secondary, row=4
+        ))
+        self.add_item(ModerationPanelButton(
+            "🗑️ Remove Warning", "remove_warning",
+            discord.ButtonStyle.danger, row=4
+        ))
+        self.add_item(ModerationPanelButton(
+            "🧹 Clear Warnings", "clear_warnings",
+            discord.ButtonStyle.danger, row=4
+        ))
+        self.add_item(ModerationPanelButton(
+            "🔙 Back", "back_to_main",
+            discord.ButtonStyle.secondary, row=4
+        ))
 
     async def button_callback(self, interaction: discord.Interaction, action: str):
         if not has_owner_role(interaction.user):
@@ -2569,33 +2328,17 @@ class ModerationPanelView(discord.ui.View):
             await self.return_to_main_callback(interaction)
             return
         
-        # Channel actions that need channel selector
-        channel_actions = ["lock", "unlock", "clear", "thanos_snap", "slowmode", "hide", "show", 
-                          "nuke", "rename_channel", "topic", "nsfw", "sync_permissions", "purge"]
-        
-        # Destructive channel actions
-        destructive_actions = ["thanos_snap", "clear", "nuke", "purge"]
-        
-        # Member actions that need member selector
-        member_actions = ["warn", "ban", "tempban", "kick", "timeout", "unmute", "softban", 
-                         "nickname", "reset_nickname", "addrole", "removerole", "view_warnings", 
-                         "clear_warnings", "add_note", "userinfo", "history"]
-        
-        # No-input actions
-        no_input_actions = ["snipe", "editsnipe", "reactionsnipe", "serverinfo", "cases", 
-                           "lockdown", "unlockdown", "lockall", "unlockall"]
-        
-        if action in no_input_actions:
-            await self._handle_no_input_action(interaction, action)
-            return
+        channel_actions = ["lock", "unlock", "clear", "thanos_snap", "slowmode", "hide", "show"]
+        destructive_actions = ["thanos_snap", "clear"]
         
         if action in channel_actions:
-            is_destructive = action in destructive_actions
             embed = discord.Embed(
                 title=f"Select Target Channel for {action.replace('_', ' ').title()}",
                 description=f"Choose a channel from the dropdown below.",
                 color=discord.Color.blue()
             )
+            
+            is_destructive = action in destructive_actions
             view = ModerationChannelSelectView(
                 action, self.guild,
                 self._channel_action_callback,
@@ -2604,7 +2347,61 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        if action in member_actions:
+        if action == "snipe":
+            await self._handle_snipe(interaction)
+            return
+        if action == "editsnipe":
+            await self._handle_edit_snipe(interaction)
+            return
+        
+        if action == "view_warnings":
+            embed = discord.Embed(
+                title="📋 View Warnings",
+                description="Select a member from the dropdown below to view their warnings.",
+                color=discord.Color.blue()
+            )
+            view = ModerationMemberSelectView(
+                action, self.guild,
+                self._view_warnings_callback
+            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            return
+        
+        if action == "clear_warnings":
+            embed = discord.Embed(
+                title="🧹 Clear Warnings",
+                description="Select a member from the dropdown below to clear all their warnings.",
+                color=discord.Color.orange()
+            )
+            view = ModerationMemberSelectView(
+                action, self.guild,
+                self._clear_warnings_callback
+            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            return
+        
+        if action == "remove_warning":
+            await self._handle_remove_warning(interaction)
+            return
+        
+        if action == "history":
+            embed = discord.Embed(
+                title="📜 Moderation History",
+                description="Select a member from the dropdown below to view their history.",
+                color=discord.Color.blue()
+            )
+            view = ModerationMemberSelectView(
+                action, self.guild,
+                self._history_callback
+            )
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+            return
+        
+        if action == "unban":
+            await self._handle_unban(interaction)
+            return
+        
+        if action in ["warn", "ban", "kick", "timeout", "unmute", "softban"]:
             embed = discord.Embed(
                 title=f"Select Target for {action.replace('_', ' ').title()}",
                 description=f"Choose a member from the dropdown below.",
@@ -2617,14 +2414,6 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        if action == "remove_warning":
-            await self._handle_remove_warning(interaction)
-            return
-        
-        if action == "unban":
-            await self._handle_unban(interaction)
-            return
-        
         await interaction.response.send_message(f"❌ Unknown action: {action}", ephemeral=True)
 
     async def _channel_action_callback(self, interaction: discord.Interaction, channel: discord.TextChannel, action: str):
@@ -2635,25 +2424,76 @@ class ModerationPanelView(discord.ui.View):
         modal = ModerationActionModal(action, member)
         await interaction.response.send_modal(modal)
 
-    async def _handle_no_input_action(self, interaction: discord.Interaction, action: str):
-        if action == "snipe":
-            await self._handle_snipe(interaction)
-        elif action == "editsnipe":
-            await self._handle_edit_snipe(interaction)
-        elif action == "reactionsnipe":
-            await self._handle_reaction_snipe(interaction)
-        elif action == "serverinfo":
-            await self._handle_serverinfo(interaction)
-        elif action == "cases":
-            await self._handle_cases(interaction)
-        elif action == "lockdown":
-            await self._handle_lockdown(interaction)
-        elif action == "unlockdown":
-            await self._handle_unlockdown(interaction)
-        elif action == "lockall":
-            await self._handle_lockall(interaction)
-        elif action == "unlockall":
-            await self._handle_unlockall(interaction)
+    async def _view_warnings_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        warnings = await get_warnings(member.id, self.guild.id)
+        if not warnings:
+            embed = discord.Embed(
+                title=f"📋 Warnings for {member.display_name}",
+                description="No warnings found.",
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title=f"📋 Warnings for {member.display_name}",
+                color=discord.Color.orange()
+            )
+            embed.set_footer(text=f"Total: {len(warnings)} warnings")
+            for i, (wid, reason, timestamp) in enumerate(warnings[:10], 1):
+                embed.add_field(
+                    name=f"#{i} (ID: {wid})",
+                    value=f"Reason: {reason}\nTime: {timestamp}",
+                    inline=False
+                )
+            if len(warnings) > 10:
+                embed.add_field(name="...", value=f"And {len(warnings) - 10} more warnings.", inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _clear_warnings_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        warnings = await get_warnings(member.id, self.guild.id)
+        if not warnings:
+            return await interaction.response.send_message(f"⚠️ {member.mention} has no warnings to clear.", ephemeral=True)
+        
+        await clear_warnings(member.id, self.guild.id)
+        await add_history(self.guild.id, member.id, str(member), "WARN_CLEAR", f"All warnings cleared by {interaction.user}")
+        
+        embed = discord.Embed(
+            title="✅ Warnings Cleared",
+            description=f"Cleared {len(warnings)} warnings from {member.mention}",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _history_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        history = await get_user_history(member.id, self.guild.id, limit=15)
+        if not history:
+            embed = discord.Embed(
+                title=f"📜 History for {member.display_name}",
+                description="No history found.",
+                color=discord.Color.green()
+            )
+        else:
+            embed = discord.Embed(
+                title=f"📜 History for {member.display_name}",
+                color=discord.Color.blue()
+            )
+            embed.set_footer(text=f"Showing {len(history)} events")
+            for event_type, details, timestamp in history:
+                embed.add_field(
+                    name=f"🔹 {event_type}",
+                    value=f"{details[:100]}\n{timestamp}",
+                    inline=False
+                )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    async def _handle_remove_warning(self, interaction: discord.Interaction):
+        modal = RemoveWarningModal()
+        await interaction.response.send_modal(modal)
+
+    async def _handle_unban(self, interaction: discord.Interaction):
+        modal = UnbanModal(self.bot, self.guild)
+        await interaction.response.send_modal(modal)
 
     async def _handle_snipe(self, interaction: discord.Interaction):
         result = await get_snipe(self.guild.id, interaction.channel.id)
@@ -2693,7 +2533,7 @@ class ModerationPanelView(discord.ui.View):
         user = await self.bot.fetch_user(author_id)
         
         embed = discord.Embed(
-            title="✏️ Edit Snipe - Edited Message",
+            title="🕵️ Edit Snipe - Edited Message",
             color=discord.Color.blue(),
             timestamp=datetime.fromisoformat(timestamp) if timestamp else datetime.now()
         )
@@ -2703,123 +2543,6 @@ class ModerationPanelView(discord.ui.View):
         embed.add_field(name="After", value=new_content[:500] or "[Empty]", inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def _handle_reaction_snipe(self, interaction: discord.Interaction):
-        result = await get_reaction_snipe(self.guild.id, interaction.channel.id)
-        if not result:
-            return await interaction.response.send_message("❌ No reaction events to snipe.", ephemeral=True)
-        
-        emoji, user_id, action, timestamp, message_id = result
-        user = await self.bot.fetch_user(user_id)
-        
-        embed = discord.Embed(
-            title="🎭 Reaction Snipe",
-            color=discord.Color.gold(),
-            timestamp=datetime.fromisoformat(timestamp) if timestamp else datetime.now()
-        )
-        embed.add_field(name="User", value=f"{user.mention if user else user_id}", inline=True)
-        embed.add_field(name="Action", value=f"{action} reaction", inline=True)
-        embed.add_field(name="Emoji", value=str(emoji), inline=True)
-        embed.add_field(name="Message ID", value=str(message_id), inline=True)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def _handle_serverinfo(self, interaction: discord.Interaction):
-        guild = interaction.guild
-        embed = discord.Embed(
-            title=f"📊 Server Info - {guild.name}",
-            color=discord.Color.blue(),
-            timestamp=datetime.now()
-        )
-        if guild.icon:
-            embed.set_thumbnail(url=guild.icon.url)
-        
-        embed.add_field(name="👑 Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
-        embed.add_field(name="👥 Members", value=guild.member_count, inline=True)
-        embed.add_field(name="💬 Channels", value=len(guild.channels), inline=True)
-        embed.add_field(name="🎭 Roles", value=len(guild.roles), inline=True)
-        embed.add_field(name="📅 Created", value=f"<t:{int(guild.created_at.timestamp())}:R>", inline=True)
-        embed.add_field(name="🆔 ID", value=guild.id, inline=True)
-        embed.add_field(name="🔊 Voice Channels", value=len(guild.voice_channels), inline=True)
-        embed.add_field(name="📝 Text Channels", value=len(guild.text_channels), inline=True)
-        embed.add_field(name="📈 Boost Level", value=guild.premium_tier, inline=True)
-        embed.add_field(name="🔒 Verification", value=str(guild.verification_level).title(), inline=True)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def _handle_cases(self, interaction: discord.Interaction):
-        cases = await get_cases(self.guild.id, limit=10)
-        if not cases:
-            return await interaction.response.send_message("📋 No cases found.", ephemeral=True)
-        
-        embed = discord.Embed(
-            title="📋 Recent Moderation Cases",
-            color=discord.Color.blue(),
-            timestamp=datetime.now()
-        )
-        
-        for case in cases[:10]:
-            case_id, guild_id, user_id, action, reason, mod_id, target_name, timestamp = case
-            embed.add_field(
-                name=f"Case #{case_id} - {action}",
-                value=f"**Target:** {target_name}\n**Reason:** {reason[:100]}\n**Moderator:** <@{mod_id}>\n**Time:** {timestamp[:16]}",
-                inline=False
-            )
-        
-        embed.set_footer(text=f"Showing last {len(cases)} cases")
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    async def _handle_lockdown(self, interaction: discord.Interaction):
-        for channel in interaction.guild.text_channels:
-            if channel.permissions_for(channel.guild.default_role).send_messages:
-                overwrite = channel.overwrites_for(channel.guild.default_role)
-                overwrite.send_messages = False
-                await channel.set_permissions(channel.guild.default_role, overwrite=overwrite)
-        
-        await interaction.response.send_message("🔒 Server lockdown activated! All channels are locked.", ephemeral=True)
-        await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "LOCKDOWN", "Server lockdown activated")
-
-    async def _handle_unlockdown(self, interaction: discord.Interaction):
-        for channel in interaction.guild.text_channels:
-            overwrite = channel.overwrites_for(channel.guild.default_role)
-            overwrite.send_messages = None
-            await channel.set_permissions(channel.guild.default_role, overwrite=overwrite)
-        
-        await interaction.response.send_message("🔓 Server lockdown removed! All channels are unlocked.", ephemeral=True)
-        await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "UNLOCKDOWN", "Server lockdown removed")
-
-    async def _handle_lockall(self, interaction: discord.Interaction):
-        count = 0
-        for channel in interaction.guild.text_channels:
-            if not channel.permissions_for(channel.guild.default_role).send_messages:
-                continue
-            overwrite = channel.overwrites_for(channel.guild.default_role)
-            overwrite.send_messages = False
-            await channel.set_permissions(channel.guild.default_role, overwrite=overwrite)
-            count += 1
-        
-        await interaction.response.send_message(f"🔒 Locked {count} channels.", ephemeral=True)
-        await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "LOCKALL", f"Locked {count} channels")
-
-    async def _handle_unlockall(self, interaction: discord.Interaction):
-        count = 0
-        for channel in interaction.guild.text_channels:
-            overwrite = channel.overwrites_for(channel.guild.default_role)
-            if overwrite.send_messages is False:
-                overwrite.send_messages = None
-                await channel.set_permissions(channel.guild.default_role, overwrite=overwrite)
-                count += 1
-        
-        await interaction.response.send_message(f"🔓 Unlocked {count} channels.", ephemeral=True)
-        await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "UNLOCKALL", f"Unlocked {count} channels")
-
-    async def _handle_remove_warning(self, interaction: discord.Interaction):
-        modal = RemoveWarningModal()
-        await interaction.response.send_modal(modal)
-
-    async def _handle_unban(self, interaction: discord.Interaction):
-        modal = UnbanModal(self.bot, self.guild)
-        await interaction.response.send_modal(modal)
 
 class RemoveWarningModal(discord.ui.Modal, title="Remove Warning"):
     def __init__(self):
@@ -2897,7 +2620,6 @@ class UnbanModal(discord.ui.Modal, title="Unban User"):
             reason = self.reason_input.value or "No reason provided"
             
             await self.guild.unban(user, reason=reason)
-            case_id = await add_case(self.guild.id, user_id, "Unban", reason, interaction.user.id, str(user))
             await add_history(self.guild.id, user_id, str(user), "UNBAN", f"Unbanned by {interaction.user}: {reason}")
             
             embed = discord.Embed(
@@ -2907,7 +2629,6 @@ class UnbanModal(discord.ui.Modal, title="Unban User"):
             embed.add_field(name="User", value=str(user), inline=True)
             embed.add_field(name="Reason", value=reason, inline=False)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
             await interaction.response.send_message(embed=embed, ephemeral=True)
             
         except ValueError:
@@ -2964,15 +2685,10 @@ class ControlPanelButton(discord.ui.Button):
             embed = discord.Embed(
                 title="🛡️ Moderation Control Panel",
                 description="Complete moderation dashboard with all moderation commands.\n\n"
-                           "**👤 User Actions:** Warn, Ban, Tempban, Kick, Timeout, Unmute, Softban, Unban\n"
-                           "**📢 Channel Actions:** Clear, Thanos Snap, Nuke, Lock, Unlock, Slowmode, Hide, Show\n"
-                           "**🧹 Purge Actions:** User, Bots, Links, Images, Attachments, Embeds, Mentions, Contains\n"
-                           "**⚠️ Warning Management:** View, Remove, Clear\n"
-                           "**📋 Info:** History, Snipe, Edit Snipe, Reaction Snipe, User Info, Server Info\n"
-                           "**✏️ Other:** Nickname, Reset Nickname, Add Role, Remove Role, Rename Channel, Topic, NSFW\n"
-                           "**🔒 Advanced:** Lockdown, Unlockdown, Lock All, Unlock All\n"
-                           "**📝 Notes:** Add Note, View Notes, Cases, Case Lookup\n"
-                           "**🛡️ AutoMod:** Anti-Spam, Anti-Invite, Anti-Mention, Bad Words",
+                           "**👤 User Actions:** Warn, Ban, Kick, Timeout, Unmute, Softban, Unban\n"
+                           "**📢 Channel Actions:** Clear, Thanos Snap, Lock, Unlock, Slowmode, Hide, Show\n"
+                           "**⚠️ Warning Management:** View Warnings, Remove Warning, Clear Warnings\n"
+                           "**📋 Info:** History, Snipe, Edit Snipe",
                 color=discord.Color.red(),
                 timestamp=datetime.now()
             )
@@ -3351,20 +3067,6 @@ async def on_voice_state_update(member, before, after):
                     embed.add_field(name="Channel", value=before.channel.mention, inline=True)
                     embed.add_field(name="User", value=str(member), inline=True)
                     await log_to_mod_channel(member.guild, embed)
-                
-            # Track voice channel stats
-            if after.channel:
-                # Track daily voice activity
-                today = datetime.now().strftime("%Y-%m-%d")
-                await db.execute(
-                    """INSERT INTO daily_channel_stats (guild_id, channel_id, date, message_count, unique_users)
-                       VALUES (?, ?, ?, 0, 1)
-                       ON CONFLICT(guild_id, channel_id, date)
-                       DO UPDATE SET unique_users = unique_users + 1""",
-                    (member.guild.id, after.channel.id, today)
-                )
-                await db.commit()
-                    
     except Exception as e:
         logger.error(f"on_voice_state_update error: {e}")
 
@@ -3432,7 +3134,6 @@ async def on_reaction_add(reaction, user):
     try:
         if reaction.message.guild:
             await track_reaction(reaction.message.guild.id, user.id, reaction.emoji, is_given=True)
-            await add_reaction_snipe(reaction.message.guild.id, reaction.message.channel.id, reaction.message.id, reaction.emoji, user.id, "Added")
             
             if reaction.message.author.id != user.id:
                 await track_reaction(reaction.message.guild.id, reaction.message.author.id, reaction.emoji, is_given=False)
@@ -3456,17 +3157,6 @@ async def on_reaction_add(reaction, user):
                 await db.commit()
     except Exception as e:
         logger.error(f"on_reaction_add error: {e}")
-
-@bot.event
-async def on_reaction_remove(reaction, user):
-    if user.bot:
-        return
-    
-    try:
-        if reaction.message.guild:
-            await add_reaction_snipe(reaction.message.guild.id, reaction.message.channel.id, reaction.message.id, reaction.emoji, user.id, "Removed")
-    except Exception as e:
-        logger.error(f"on_reaction_remove error: {e}")
 
 @bot.event
 async def on_message(message):
@@ -3514,10 +3204,10 @@ async def on_ready():
     logger.info(f"🤖 Logged in as {bot.user}")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
-    logger.info(f"   Owner Role: {OWNER_ROLE_NAME} (ID: {OWNER_ROLE_ID if OWNER_ROLE_ID else 'Not set'})")
+    logger.info(f"   Owner Role ID: {OWNER_ROLE_ID if OWNER_ROLE_ID else 'Not set'}")
 
 # =========================
-# MODERATION COG - COMPLETE
+# 🛡️ MODERATION COG - ACTIONS
 # =========================
 class ModerationActions(commands.Cog, name="moderation_actions"):
     def __init__(self, bot: commands.Bot):
@@ -3525,6 +3215,258 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     
     mod_group = app_commands.Group(name="mod", description="Moderation actions - Owner Role Only")
     
+    @mod_group.command(name="clear", description="Delete messages")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def mod_clear(self, interaction: discord.Interaction, amount: int):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            deleted = await interaction.channel.purge(limit=amount)
+            await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages", ephemeral=True)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{interaction.channel.name}")
+            await track_moderation_action(interaction.guild.id, "clear")
+            
+            embed = discord.Embed(
+                title="🧹 Channel Cleared",
+                description=f"{len(deleted)} messages deleted in {interaction.channel.mention}",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, embed)
+        except Exception as e:
+            logger.error(f"Clear error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="thanos_snap", description="Delete all messages in channel")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def mod_clearall(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        total = 0
+        try:
+            while True:
+                deleted = await interaction.channel.purge(limit=100)
+                total += len(deleted)
+                if not deleted:
+                    break
+            await interaction.followup.send(f"🧹 Cleared {total} messages", ephemeral=True)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CLEARALL", f"Cleared {total} messages in #{interaction.channel.name}")
+            await track_moderation_action(interaction.guild.id, "clearall")
+            
+            embed = discord.Embed(
+                title="🧹 Channel Wiped",
+                description=f"All messages deleted in {interaction.channel.mention}",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Total Deleted", value=str(total), inline=True)
+            await log_to_mod_channel(interaction.guild, embed)
+        except Exception as e:
+            logger.error(f"Clearall error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="ban", description="Ban member")
+    @is_owner()
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def mod_ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot ban this member (role hierarchy).", ephemeral=True)
+            
+            await member.ban(reason=reason)
+            await add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "ban")
+            
+            embed = discord.Embed(title="🔨 User Banned", color=discord.Color.red())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="🔨 Member Banned",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            if member.avatar:
+                log_embed.set_thumbnail(url=member.avatar.url)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Ban error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="softban", description="Ban and unban user")
+    @is_owner()
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def mod_softban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot softban this member (role hierarchy).", ephemeral=True)
+            
+            await member.ban(reason=reason)
+            await asyncio.sleep(1)
+            await interaction.guild.unban(member, reason="Softban complete")
+            await add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "softban")
+            
+            embed = discord.Embed(title="🧹 User Softbanned", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="🧹 Member Softbanned",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Softban error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="unban", description="Unban a user by ID")
+    @is_owner()
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def mod_unban(self, interaction: discord.Interaction, user_id: str, reason: str = "No reason"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            user = await self.bot.fetch_user(int(user_id))
+            await interaction.guild.unban(user, reason=reason)
+            await add_history(interaction.guild.id, int(user_id), str(user), "UNBAN", f"Unbanned by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "unban")
+            
+            embed = discord.Embed(title="🔓 User Unbanned", color=discord.Color.green())
+            embed.add_field(name="User", value=user.mention if user else user_id, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="🔓 Member Unbanned",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=str(user), inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except ValueError:
+            await interaction.followup.send("❌ Invalid user ID.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.followup.send("❌ User not found or not banned.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Unban error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="mute", description="Timeout member")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def mod_mute(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot mute this member (role hierarchy).", ephemeral=True)
+            
+            await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
+            await add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "mute")
+            
+            embed = discord.Embed(title="🔇 User Muted", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Duration", value=f"{minutes} minutes", inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="🔇 Member Timed Out",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Duration", value=f"{minutes} minutes", inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Mute error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="unmute", description="Remove timeout")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def mod_unmute(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await member.timeout(None)
+            await add_history(interaction.guild.id, member.id, str(member), "UNMUTE", f"Unmuted by {interaction.user}")
+            
+            embed = discord.Embed(title="🔊 User Unmuted", color=discord.Color.green())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="🔊 Member Unmuted",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Unmute error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="kick", description="Kick a member")
+    @is_owner()
+    @app_commands.checks.has_permissions(kick_members=True)
+    async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot kick this member (role hierarchy).", ephemeral=True)
+            
+            await member.kick(reason=reason)
+            await add_history(interaction.guild.id, member.id, str(member), "KICK", reason)
+            await track_moderation_action(interaction.guild.id, "kick")
+            
+            embed = discord.Embed(title="👢 User Kicked", color=discord.Color.red())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="👢 Member Kicked",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Kick error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
     @mod_group.command(name="warn", description="Warn a member")
     @is_owner()
     @app_commands.checks.has_permissions(moderate_members=True)
@@ -3535,12 +3477,10 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
                 return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
             
             await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
-            case_id = await add_case(interaction.guild.id, member.id, "Warn", reason, interaction.user.id, str(member))
             await add_history(interaction.guild.id, member.id, str(member), "WARN", reason)
-            await track_moderation_action(interaction.guild.id, "warn")
             
             try:
-                dm_embed = discord.Embed(title=f"You were warned in {interaction.guild.name}", description=f"Reason: {reason}\nCase #{case_id}", color=discord.Color.orange())
+                dm_embed = discord.Embed(title=f"You were warned in {interaction.guild.name}", description=f"Reason: {reason}", color=discord.Color.orange())
                 await member.send(embed=dm_embed)
             except:
                 pass
@@ -3549,7 +3489,6 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             embed.add_field(name="User", value=member.mention, inline=True)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
             embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
             await interaction.followup.send(embed=embed, ephemeral=True)
             
             log_embed = discord.Embed(
@@ -3560,7 +3499,6 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
             log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
             log_embed.add_field(name="Reason", value=reason, inline=False)
-            log_embed.add_field(name="Case", value=f"#{case_id}", inline=True)
             await log_to_mod_channel(interaction.guild, log_embed)
             
         except Exception as e:
@@ -3581,7 +3519,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             embed = discord.Embed(title=f"📋 Warnings for {member.display_name}", color=discord.Color.orange())
             embed.set_footer(text=f"Total: {len(warnings)} warnings")
             for i, (wid, reason, timestamp) in enumerate(warnings[:10], 1):
-                embed.add_field(name=f"#{i} (ID: {wid})", value=f"Reason: {reason}\nTime: {timestamp}", inline=False)
+                embed.add_field(name=f"#{i}", value=f"Reason: {reason}\nTime: {timestamp}", inline=False)
             if len(warnings) > 10:
                 embed.add_field(name="...", value=f"And {len(warnings) - 10} more warnings.", inline=False)
             await interaction.followup.send(embed=embed, ephemeral=True)
@@ -3589,342 +3527,54 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Warnings error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="clearwarnings", description="Clear all warnings from a member")
-    @is_owner()
-    @app_commands.checks.has_permissions(moderate_members=True)
-    async def mod_clearwarnings(self, interaction: discord.Interaction, member: discord.Member):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            warnings = await get_warnings(member.id, interaction.guild.id)
-            if not warnings:
-                return await interaction.followup.send(f"⚠️ {member.mention} has no warnings to clear.", ephemeral=True)
-            
-            await clear_warnings(member.id, interaction.guild.id)
-            case_id = await add_case(interaction.guild.id, member.id, "ClearWarnings", f"Cleared {len(warnings)} warnings", interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "WARN_CLEAR", f"All warnings cleared by {interaction.user}")
-            
-            embed = discord.Embed(
-                title="✅ Warnings Cleared",
-                description=f"Cleared {len(warnings)} warnings from {member.mention}",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            log_embed = discord.Embed(
-                title="⚠️ Warnings Cleared",
-                color=discord.Color.green(),
-                timestamp=datetime.now()
-            )
-            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
-            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            log_embed.add_field(name="Warnings Cleared", value=str(len(warnings)), inline=True)
-            log_embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await log_to_mod_channel(interaction.guild, log_embed)
-            
-        except Exception as e:
-            logger.error(f"Clear warnings error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="removewarning", description="Remove a specific warning by ID")
-    @is_owner()
-    @app_commands.checks.has_permissions(moderate_members=True)
-    @app_commands.describe(warning_id="ID of the warning to remove")
-    async def mod_removewarning(self, interaction: discord.Interaction, warning_id: int):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            result = await db.fetchone("SELECT user_id, reason FROM warnings WHERE id=?", (warning_id,))
-            if not result:
-                return await interaction.followup.send(f"❌ Warning ID {warning_id} not found.", ephemeral=True)
-            
-            user_id, reason = result
-            await remove_warning(warning_id)
-            
-            embed = discord.Embed(
-                title="✅ Warning Removed",
-                description=f"Removed warning #{warning_id}",
-                color=discord.Color.green()
-            )
-            embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Remove warning error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="ban", description="Ban a member")
-    @is_owner()
-    @app_commands.checks.has_permissions(ban_members=True)
-    async def mod_ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
-                return await interaction.followup.send("❌ You cannot ban this member (role hierarchy).", ephemeral=True)
-            
-            await member.ban(reason=reason)
-            case_id = await add_case(interaction.guild.id, member.id, "Ban", reason, interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
-            await track_moderation_action(interaction.guild.id, "ban")
-            
-            embed = discord.Embed(title="🔨 User Banned", color=discord.Color.red())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-            log_embed = discord.Embed(
-                title="🔨 Member Banned",
-                color=discord.Color.red(),
-                timestamp=datetime.now()
-            )
-            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
-            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            log_embed.add_field(name="Reason", value=reason, inline=False)
-            log_embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            if member.avatar:
-                log_embed.set_thumbnail(url=member.avatar.url)
-            await log_to_mod_channel(interaction.guild, log_embed)
-            
-        except Exception as e:
-            logger.error(f"Ban error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="tempban", description="Temporarily ban a member")
-    @is_owner()
-    @app_commands.checks.has_permissions(ban_members=True)
-    async def mod_tempban(self, interaction: discord.Interaction, member: discord.Member, duration: int, reason: str = "No reason provided"):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
-                return await interaction.followup.send("❌ You cannot tempban this member (role hierarchy).", ephemeral=True)
-            
-            await member.ban(reason=f"{reason} (Tempban: {duration} minutes)")
-            case_id = await add_case(interaction.guild.id, member.id, "TempBan", f"{reason} ({duration}m)", interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "TEMP_BAN", f"Tempbanned for {duration}min by {interaction.user}: {reason}")
-            await track_moderation_action(interaction.guild.id, "tempban")
-            
-            # Schedule unban
-            async def unban_after():
-                await asyncio.sleep(duration * 60)
-                try:
-                    await interaction.guild.unban(member, reason="Tempban expired")
-                except:
-                    pass
-            
-            asyncio.create_task(unban_after())
-            
-            embed = discord.Embed(title="🔨 User Temporarily Banned", color=discord.Color.red())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Tempban error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="softban", description="Softban a member (ban and unban)")
-    @is_owner()
-    @app_commands.checks.has_permissions(ban_members=True)
-    async def mod_softban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
-                return await interaction.followup.send("❌ You cannot softban this member (role hierarchy).", ephemeral=True)
-            
-            await member.ban(reason=reason)
-            await asyncio.sleep(1)
-            await interaction.guild.unban(member, reason="Softban complete")
-            case_id = await add_case(interaction.guild.id, member.id, "SoftBan", reason, interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
-            await track_moderation_action(interaction.guild.id, "softban")
-            
-            embed = discord.Embed(title="🧹 User Softbanned", color=discord.Color.orange())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Softban error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="kick", description="Kick a member")
-    @is_owner()
-    @app_commands.checks.has_permissions(kick_members=True)
-    async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
-                return await interaction.followup.send("❌ You cannot kick this member (role hierarchy).", ephemeral=True)
-            
-            await member.kick(reason=reason)
-            case_id = await add_case(interaction.guild.id, member.id, "Kick", reason, interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "KICK", reason)
-            await track_moderation_action(interaction.guild.id, "kick")
-            
-            embed = discord.Embed(title="👢 User Kicked", color=discord.Color.red())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Kick error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="mute", description="Timeout a member")
-    @is_owner()
-    @app_commands.checks.has_permissions(moderate_members=True)
-    async def mod_mute(self, interaction: discord.Interaction, member: discord.Member, duration: int, reason: str = "No reason provided"):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
-                return await interaction.followup.send("❌ You cannot mute this member (role hierarchy).", ephemeral=True)
-            
-            await member.timeout(utcnow() + timedelta(minutes=duration), reason=reason)
-            case_id = await add_case(interaction.guild.id, member.id, "Mute", f"{reason} ({duration}m)", interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {duration}min by {interaction.user}: {reason}")
-            await track_moderation_action(interaction.guild.id, "mute")
-            
-            embed = discord.Embed(title="🔇 User Muted", color=discord.Color.orange())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Duration", value=f"{duration} minutes", inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Mute error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="unmute", description="Remove timeout from a member")
-    @is_owner()
-    @app_commands.checks.has_permissions(moderate_members=True)
-    async def mod_unmute(self, interaction: discord.Interaction, member: discord.Member):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            await member.timeout(None)
-            case_id = await add_case(interaction.guild.id, member.id, "Unmute", "Timeout removed", interaction.user.id, str(member))
-            await add_history(interaction.guild.id, member.id, str(member), "UNMUTE", f"Unmuted by {interaction.user}")
-            
-            embed = discord.Embed(title="🔊 User Unmuted", color=discord.Color.green())
-            embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Unmute error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="clear", description="Delete messages in the current channel")
+    @mod_group.command(name="clean", description="Delete messages (optional user filter)")
     @is_owner()
     @app_commands.checks.has_permissions(manage_messages=True)
-    async def mod_clear(self, interaction: discord.Interaction, amount: int):
+    async def mod_clean(self, interaction: discord.Interaction, amount: int, member: discord.Member = None):
         await interaction.response.defer(ephemeral=True)
         try:
             amount = min(amount, 100)
-            deleted = await interaction.channel.purge(limit=amount)
-            case_id = await add_case(interaction.guild.id, interaction.user.id, "Clear", f"Cleared {len(deleted)} messages", interaction.user.id, f"#{interaction.channel.name}")
-            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{interaction.channel.name}")
-            await track_moderation_action(interaction.guild.id, "clear")
+            def check(msg):
+                return True if member is None else msg.author.id == member.id
+            deleted = await interaction.channel.purge(limit=amount, check=check)
             
             embed = discord.Embed(title="🧹 Messages Deleted", color=discord.Color.green())
             embed.add_field(name="Amount", value=str(len(deleted)), inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Clear error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="purge", description="Purge messages with various filters")
-    @is_owner()
-    @app_commands.checks.has_permissions(manage_messages=True)
-    @app_commands.describe(
-        filter_type="Type of messages to purge",
-        amount="Number of messages to check (max 100)"
-    )
-    @app_commands.choices(filter_type=[
-        discord.app_commands.Choice(name="User", value="user"),
-        discord.app_commands.Choice(name="Bots", value="bots"),
-        discord.app_commands.Choice(name="Images", value="images"),
-        discord.app_commands.Choice(name="Attachments", value="attachments"),
-        discord.app_commands.Choice(name="Embeds", value="embeds"),
-        discord.app_commands.Choice(name="Links", value="links"),
-        discord.app_commands.Choice(name="Mentions", value="mentions"),
-    ])
-    async def mod_purge(self, interaction: discord.Interaction, filter_type: str, amount: int = 50, member: discord.Member = None):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            amount = min(amount, 100)
-            check_funcs = {
-                "user": lambda m: m.author.id == member.id if member else False,
-                "bots": lambda m: m.author.bot,
-                "images": lambda m: any(a.content_type and a.content_type.startswith("image/") for a in m.attachments),
-                "attachments": lambda m: len(m.attachments) > 0,
-                "embeds": lambda m: len(m.embeds) > 0,
-                "links": lambda m: bool(re.search(r'https?://[^\s]+|www\.[^\s]+', m.content.lower())),
-                "mentions": lambda m: len(m.mentions) > 0 or len(m.role_mentions) > 0,
-            }
-            
-            check = check_funcs.get(filter_type)
-            if not check:
-                return await interaction.followup.send("❌ Invalid filter type.", ephemeral=True)
-            
-            deleted = await interaction.channel.purge(limit=amount, check=check)
-            case_id = await add_case(interaction.guild.id, interaction.user.id, f"Purge_{filter_type}", f"Purged {len(deleted)} {filter_type} messages", interaction.user.id, f"#{interaction.channel.name}")
-            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), f"PURGE_{filter_type.upper()}", f"Purged {len(deleted)} messages")
-            await track_moderation_action(interaction.guild.id, f"purge_{filter_type}")
-            
-            embed = discord.Embed(title=f"🧹 {filter_type.title()} Messages Purged", color=discord.Color.orange())
-            embed.add_field(name="Deleted", value=str(len(deleted)), inline=True)
             if member:
-                embed.add_field(name="User", value=member.mention, inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
+                embed.add_field(name="Filter", value=member.mention, inline=True)
             await interaction.followup.send(embed=embed, ephemeral=True)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CLEAN", f"Cleaned {len(deleted)} messages in #{interaction.channel.name}")
             
         except Exception as e:
-            logger.error(f"Purge error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+            logger.error(f"Clean error: {e}")
+            await interaction.followup.send("❌ Failed to delete messages.", ephemeral=True)
 
     @mod_group.command(name="lock", description="Lock a channel")
     @is_owner()
     @app_commands.checks.has_permissions(manage_channels=True)
-    async def mod_lock(self, interaction: discord.Interaction, channel: discord.TextChannel = None, reason: str = "No reason provided"):
+    async def mod_lock(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         try:
             channel = channel or interaction.channel
             overwrite = channel.overwrites_for(interaction.guild.default_role)
             overwrite.send_messages = False
             await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-            
-            await db.execute(
-                "INSERT OR REPLACE INTO locked_channels (guild_id, channel_id, locked_at, locked_by, reason) VALUES (?, ?, ?, ?, ?)",
-                (interaction.guild.id, channel.id, datetime.now().isoformat(), interaction.user.id, reason)
-            )
-            await db.commit()
-            
-            case_id = await add_case(interaction.guild.id, interaction.user.id, "Lock", reason, interaction.user.id, f"#{channel.name}")
-            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{channel.name}: {reason}")
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{channel.name}")
             await track_moderation_action(interaction.guild.id, "lock")
             
             embed = discord.Embed(title="🔒 Channel Locked", color=discord.Color.red())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
             await interaction.followup.send(embed=embed, ephemeral=False)
+            
+            log_embed = discord.Embed(
+                title="🔒 Channel Locked",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
             
         except Exception as e:
             logger.error(f"Lock error: {e}")
@@ -3940,22 +3590,22 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             overwrite = channel.overwrites_for(interaction.guild.default_role)
             overwrite.send_messages = None
             await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
-            
-            await db.execute(
-                "DELETE FROM locked_channels WHERE guild_id=? AND channel_id=?",
-                (interaction.guild.id, channel.id)
-            )
-            await db.commit()
-            
-            case_id = await add_case(interaction.guild.id, interaction.user.id, "Unlock", "Channel unlocked", interaction.user.id, f"#{channel.name}")
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{channel.name}")
             await track_moderation_action(interaction.guild.id, "unlock")
             
             embed = discord.Embed(title="🔓 Channel Unlocked", color=discord.Color.green())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
             await interaction.followup.send(embed=embed, ephemeral=False)
+            
+            log_embed = discord.Embed(
+                title="🔓 Channel Unlocked",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
             
         except Exception as e:
             logger.error(f"Unlock error: {e}")
@@ -3971,8 +3621,6 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             if seconds < 0 or seconds > 21600:
                 return await interaction.followup.send("❌ Slowmode must be between 0 and 21600 seconds.", ephemeral=True)
             await channel.edit(slowmode_delay=seconds)
-            
-            case_id = await add_case(interaction.guild.id, interaction.user.id, "Slowmode", f"Set to {seconds}s", interaction.user.id, f"#{channel.name}")
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode in #{channel.name} to {seconds}s")
             await track_moderation_action(interaction.guild.id, "slowmode")
             
@@ -3980,11 +3628,40 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             embed.add_field(name="Channel", value=channel.mention, inline=True)
             embed.add_field(name="Slowmode", value=f"{seconds} seconds", inline=True)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
-            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
             await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="⏱️ Slowmode Updated",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Slowmode", value=f"{seconds} seconds", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
             
         except Exception as e:
             logger.error(f"Slowmode error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @mod_group.command(name="history", description="Show moderation history of a member")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def mod_history(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            history = await get_user_history(member.id, interaction.guild.id, limit=15)
+            if not history:
+                embed = discord.Embed(title=f"📜 History for {member.display_name}", description="No moderation history found.", color=discord.Color.green())
+                return await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            embed = discord.Embed(title=f"📜 Moderation History for {member.display_name}", color=discord.Color.blue())
+            embed.set_footer(text=f"Showing {len(history)} events")
+            for event_type, details, timestamp in history:
+                embed.add_field(name=f"🔹 {event_type}", value=f"{details[:100]}\n<{timestamp}>", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"History error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
     @mod_group.command(name="snipe", description="Show the last deleted message")
@@ -4007,7 +3684,6 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             )
             embed.add_field(name="Author", value=f"{user.mention if user else author_id}", inline=True)
             embed.add_field(name="Channel", value=interaction.channel.mention, inline=True)
-            embed.add_field(name="Message ID", value=message_id, inline=True)
             
             if content:
                 embed.add_field(name="Content", value=content[:1000] or "[Empty]", inline=False)
@@ -4040,13 +3716,12 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             user = await self.bot.fetch_user(author_id)
             
             embed = discord.Embed(
-                title="✏️ Edit Snipe - Edited Message",
+                title="🕵️ Edit Snipe - Edited Message",
                 color=discord.Color.blue(),
                 timestamp=datetime.fromisoformat(timestamp) if timestamp else datetime.now()
             )
             embed.add_field(name="Author", value=f"{user.mention if user else author_id}", inline=True)
             embed.add_field(name="Channel", value=interaction.channel.mention, inline=True)
-            embed.add_field(name="Message ID", value=message_id, inline=True)
             embed.add_field(name="Before", value=old_content[:500] or "[Empty]", inline=False)
             embed.add_field(name="After", value=new_content[:500] or "[Empty]", inline=False)
             
@@ -4056,154 +3731,1063 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Edit snipe error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="reactionsnipe", description="Show the last reaction event")
+    @mod_group.command(name="hide", description="Hide a channel from @everyone")
     @is_owner()
-    @app_commands.checks.has_permissions(manage_messages=True)
-    async def mod_reactionsnipe(self, interaction: discord.Interaction):
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def mod_hide(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         try:
-            result = await get_reaction_snipe(interaction.guild.id, interaction.channel.id)
-            if not result:
-                return await interaction.followup.send("❌ No reaction events to snipe.", ephemeral=True)
+            channel = channel or interaction.channel
+            await channel.set_permissions(interaction.guild.default_role, view_channel=False)
+            await track_moderation_action(interaction.guild.id, "hide")
             
-            emoji, user_id, action, timestamp, message_id = result
-            user = await self.bot.fetch_user(user_id)
-            
-            embed = discord.Embed(
-                title="🎭 Reaction Snipe",
-                color=discord.Color.gold(),
-                timestamp=datetime.fromisoformat(timestamp) if timestamp else datetime.now()
-            )
-            embed.add_field(name="User", value=f"{user.mention if user else user_id}", inline=True)
-            embed.add_field(name="Action", value=f"{action} reaction", inline=True)
-            embed.add_field(name="Emoji", value=str(emoji), inline=True)
-            embed.add_field(name="Message ID", value=str(message_id), inline=True)
-            
+            embed = discord.Embed(title="👁️ Channel Hidden", color=discord.Color.orange())
+            embed.add_field(name="Channel", value=channel.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
             await interaction.followup.send(embed=embed, ephemeral=True)
             
-        except Exception as e:
-            logger.error(f"Reaction snipe error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="case", description="Look up a specific case")
-    @is_owner()
-    @app_commands.describe(case_id="The case ID to look up")
-    async def mod_case(self, interaction: discord.Interaction, case_id: int):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            case = await get_case(case_id, interaction.guild.id)
-            if not case:
-                return await interaction.followup.send(f"❌ Case #{case_id} not found.", ephemeral=True)
-            
-            cid, gid, user_id, action, reason, mod_id, target_name, timestamp = case
-            
-            embed = discord.Embed(
-                title=f"📋 Case #{cid} - {action}",
-                color=discord.Color.blue(),
-                timestamp=datetime.fromisoformat(timestamp)
-            )
-            embed.add_field(name="Target", value=target_name, inline=True)
-            embed.add_field(name="Moderator", value=f"<@{mod_id}>", inline=True)
-            embed.add_field(name="Reason", value=reason, inline=False)
-            
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            
-        except Exception as e:
-            logger.error(f"Case lookup error: {e}")
-            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
-
-    @mod_group.command(name="cases", description="View recent moderation cases")
-    @is_owner()
-    @app_commands.describe(member="Filter by member (optional)", limit="Number of cases to show (max 25)")
-    async def mod_cases(self, interaction: discord.Interaction, member: discord.Member = None, limit: int = 10):
-        await interaction.response.defer(ephemeral=True)
-        try:
-            limit = min(limit, 25)
-            cases = await get_cases(interaction.guild.id, member.id if member else None, limit)
-            
-            if not cases:
-                return await interaction.followup.send("📋 No cases found.", ephemeral=True)
-            
-            embed = discord.Embed(
-                title=f"📋 Moderation Cases{ ' for ' + member.display_name if member else ''}",
-                color=discord.Color.blue(),
+            log_embed = discord.Embed(
+                title="👁️ Channel Hidden",
+                color=discord.Color.orange(),
                 timestamp=datetime.now()
             )
-            
-            for case in cases[:limit]:
-                cid, gid, user_id, action, reason, mod_id, target_name, timestamp = case
-                embed.add_field(
-                    name=f"Case #{cid} - {action}",
-                    value=f"**Target:** {target_name}\n**Reason:** {reason[:100]}\n**Moderator:** <@{mod_id}>\n**Time:** {timestamp[:16]}",
-                    inline=False
-                )
-            
-            embed.set_footer(text=f"Showing {len(cases)} cases")
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
             
         except Exception as e:
-            logger.error(f"Cases error: {e}")
+            logger.error(f"Hide error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
-    @mod_group.command(name="reason", description="Update the reason for a case")
+    @mod_group.command(name="show", description="Show a channel to @everyone")
     @is_owner()
-    @app_commands.describe(case_id="The case ID to update", new_reason="The new reason")
-    async def mod_reason(self, interaction: discord.Interaction, case_id: int, new_reason: str):
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def mod_show(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
         await interaction.response.defer(ephemeral=True)
         try:
-            case = await get_case(case_id, interaction.guild.id)
-            if not case:
-                return await interaction.followup.send(f"❌ Case #{case_id} not found.", ephemeral=True)
+            channel = channel or interaction.channel
+            await channel.set_permissions(interaction.guild.default_role, view_channel=None)
+            await track_moderation_action(interaction.guild.id, "show")
             
-            old_reason = case[4]
-            await update_case_reason(case_id, interaction.guild.id, new_reason)
+            embed = discord.Embed(title="👁️ Channel Shown", color=discord.Color.green())
+            embed.add_field(name="Channel", value=channel.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
             
-            embed = discord.Embed(
-                title=f"✅ Case #{case_id} Reason Updated",
-                color=discord.Color.green()
+            log_embed = discord.Embed(
+                title="👁️ Channel Shown",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
             )
-            embed.add_field(name="Old Reason", value=old_reason, inline=False)
-            embed.add_field(name="New Reason", value=new_reason, inline=False)
+            log_embed.add_field(name="Channel", value=channel.mention, inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Show error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# =========================
+# 🎭 ROLE MANAGEMENT COG
+# =========================
+class RoleManagement(commands.Cog, name="role_management"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    role_group = app_commands.Group(name="role", description="Role management - Owner Role Only")
+    
+    @role_group.command(name="nick", description="Change a member's nickname")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_nicknames=True)
+    async def role_nick(self, interaction: discord.Interaction, member: discord.Member, nickname: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot change this member's nickname (role hierarchy).", ephemeral=True)
+            
+            old_nick = member.nick or member.name
+            await member.edit(nick=nickname, reason=f"Changed by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "NICK_CHANGE", f"{old_nick} -> {nickname} by {interaction.user}")
+            
+            embed = discord.Embed(title="✏️ Nickname Changed", color=discord.Color.blue())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Old Nickname", value=old_nick, inline=True)
+            embed.add_field(name="New Nickname", value=nickname, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to change this member's nickname.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Nick error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @role_group.command(name="resetnick", description="Remove a member's nickname")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_nicknames=True)
+    async def role_resetnick(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot reset this member's nickname (role hierarchy).", ephemeral=True)
+            
+            old_nick = member.nick or member.name
+            await member.edit(nick=None, reason=f"Reset by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "NICK_RESET", f"{old_nick} -> {member.name} by {interaction.user}")
+            
+            embed = discord.Embed(title="🔄 Nickname Reset", color=discord.Color.blue())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Previous Nickname", value=old_nick, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to reset this member's nickname.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Resetnick error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @role_group.command(name="give", description="Give a role to a member")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def role_give(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot give this role (role hierarchy).", ephemeral=True)
+            if role in member.roles:
+                return await interaction.followup.send(f"❌ {member.mention} already has the {role.name} role.", ephemeral=True)
+            
+            await member.add_roles(role, reason=f"Added by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "ROLE_ADD", f"Role {role.name} added by {interaction.user}")
+            
+            embed = discord.Embed(title="🎭 Role Given", color=discord.Color.green())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Role", value=role.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to give this role.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Give role error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @role_group.command(name="remove", description="Remove a role from a member")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_roles=True)
+    async def role_remove(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot remove this role (role hierarchy).", ephemeral=True)
+            if role not in member.roles:
+                return await interaction.followup.send(f"❌ {member.mention} doesn't have the {role.name} role.", ephemeral=True)
+            
+            await member.remove_roles(role, reason=f"Removed by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "ROLE_REMOVE", f"Role {role.name} removed by {interaction.user}")
+            
+            embed = discord.Embed(title="🎭 Role Removed", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Role", value=role.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.followup.send("❌ I don't have permission to remove this role.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Remove role error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# =========================
+# 🔊 VOICE MODERATION COG
+# =========================
+class VoiceModeration(commands.Cog, name="voice_moderation"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    voice_group = app_commands.Group(name="voice", description="Voice moderation - Owner Role Only")
+    
+    @voice_group.command(name="kick", description="Disconnect a member from voice")
+    @is_owner()
+    @app_commands.checks.has_permissions(move_members=True)
+    async def voice_kick(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot voice kick this member (role hierarchy).", ephemeral=True)
+            if not member.voice or not member.voice.channel:
+                return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
+            
+            channel_name = member.voice.channel.name
+            await member.move_to(None, reason=f"Voice kicked by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "VOICE_KICK", f"Disconnected from voice by {interaction.user}")
+            await track_moderation_action(interaction.guild.id, "voice_kick")
+            
+            embed = discord.Embed(title="🔊 User Voice Kicked", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Channel", value=channel_name, inline=True)
             embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
             await interaction.followup.send(embed=embed, ephemeral=True)
             
         except Exception as e:
-            logger.error(f"Reason update error: {e}")
+            logger.error(f"Voice kick error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @voice_group.command(name="move", description="Move a member to another voice channel")
+    @is_owner()
+    @app_commands.checks.has_permissions(move_members=True)
+    async def voice_move(self, interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot move this member (role hierarchy).", ephemeral=True)
+            if not member.voice or not member.voice.channel:
+                return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
+            
+            old_channel = member.voice.channel
+            await member.move_to(channel, reason=f"Moved by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "VOICE_MOVE", f"Moved from {old_channel.name} to {channel.name} by {interaction.user}")
+            await track_moderation_action(interaction.guild.id, "voice_move")
+            
+            embed = discord.Embed(title="🔊 User Moved", color=discord.Color.blue())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="From", value=old_channel.mention, inline=True)
+            embed.add_field(name="To", value=channel.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Voice move error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @voice_group.command(name="deafen", description="Deafen a member in voice")
+    @is_owner()
+    @app_commands.checks.has_permissions(deafen_members=True)
+    async def voice_deafen(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot deafen this member (role hierarchy).", ephemeral=True)
+            if not member.voice or not member.voice.channel:
+                return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
+            
+            await member.edit(deafen=True, reason=f"Deafened by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "DEAFEN", f"Deafened by {interaction.user}")
+            
+            embed = discord.Embed(title="🔇 User Deafened", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Deafen error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @voice_group.command(name="undeafen", description="Undeafen a member in voice")
+    @is_owner()
+    @app_commands.checks.has_permissions(deafen_members=True)
+    async def voice_undeafen(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot undeafen this member (role hierarchy).", ephemeral=True)
+            if not member.voice or not member.voice.channel:
+                return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
+            
+            await member.edit(deafen=False, reason=f"Undeafened by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "UNDEAFEN", f"Undeafened by {interaction.user}")
+            
+            embed = discord.Embed(title="🔊 User Undeafened", color=discord.Color.green())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Undeafen error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @voice_group.command(name="mute", description="Mute a member in voice")
+    @is_owner()
+    @app_commands.checks.has_permissions(mute_members=True)
+    async def voice_mute(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot mute this member in voice (role hierarchy).", ephemeral=True)
+            if not member.voice or not member.voice.channel:
+                return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
+            
+            await member.edit(mute=True, reason=f"Muted in voice by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "VOICE_MUTE", f"Muted in voice by {interaction.user}")
+            
+            embed = discord.Embed(title="🔇 User Voice Muted", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Voice mute error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @voice_group.command(name="unmute", description="Unmute a member in voice")
+    @is_owner()
+    @app_commands.checks.has_permissions(mute_members=True)
+    async def voice_unmute(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot unmute this member in voice (role hierarchy).", ephemeral=True)
+            if not member.voice or not member.voice.channel:
+                return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
+            
+            await member.edit(mute=False, reason=f"Unmuted in voice by {interaction.user}")
+            await add_history(interaction.guild.id, member.id, str(member), "VOICE_UNMUTE", f"Unmuted in voice by {interaction.user}")
+            
+            embed = discord.Embed(title="🔊 User Voice Unmuted", color=discord.Color.green())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Voice unmute error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 # =========================
-# ⚠️ ERROR HANDLER
+# 🧹 CHANNEL MANAGEMENT COG
 # =========================
-class CommandErrorHandler(commands.Cog):
+class ChannelManagement(commands.Cog, name="channel_management"):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    @commands.Cog.listener()
-    async def on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
-        if isinstance(error, discord.app_commands.CommandOnCooldown):
-            return await interaction.response.send_message(f"⏰ Command on cooldown. Try again in {error.retry_after:.0f}s.", ephemeral=True)
-        elif isinstance(error, discord.app_commands.MissingPermissions):
-            return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
-        elif isinstance(error, discord.app_commands.BotMissingPermissions):
-            return await interaction.response.send_message("❌ I don't have the required permissions.", ephemeral=True)
-        elif isinstance(error, discord.app_commands.CheckFailure):
-            return await interaction.response.send_message(
-                f"❌ This command is restricted to {owner_role_mention()} only.",
-                ephemeral=True
-            )
-        else:
-            error_details = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
-            logger.error(f"App command error: {error}\n{error_details}")
-            try:
-                await interaction.response.send_message(f"❌ An error occurred: {str(error)[:100]}", ephemeral=True)
-            except:
-                try:
-                    await interaction.followup.send(f"❌ An error occurred: {str(error)[:100]}", ephemeral=True)
-                except:
-                    pass
+    purge_group = app_commands.Group(name="purge", description="Message purging - Owner Role Only")
+    
+    @purge_group.command(name="user", description="Delete messages from a specific user")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_user(self, interaction: discord.Interaction, member: discord.Member, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            def check(msg):
+                return msg.author.id == member.id
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, member.id, str(member), "PURGE_USER", f"Purged {len(deleted)} messages by {interaction.user}")
+            await track_moderation_action(interaction.guild.id, "purge_user")
+            
+            embed = discord.Embed(title="🧹 User Messages Purged", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge user error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @purge_group.command(name="bots", description="Delete messages from bots")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_bots(self, interaction: discord.Interaction, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            def check(msg):
+                return msg.author.bot
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_BOTS", f"Purged {len(deleted)} bot messages")
+            await track_moderation_action(interaction.guild.id, "purge_bots")
+            
+            embed = discord.Embed(title="🤖 Bot Messages Purged", color=discord.Color.orange())
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge bots error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @purge_group.command(name="images", description="Delete messages with images")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_images(self, interaction: discord.Interaction, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            def check(msg):
+                return any(a.content_type and a.content_type.startswith("image/") for a in msg.attachments)
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_IMAGES", f"Purged {len(deleted)} images")
+            await track_moderation_action(interaction.guild.id, "purge_images")
+            
+            embed = discord.Embed(title="🖼️ Images Purged", color=discord.Color.orange())
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge images error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @purge_group.command(name="attachments", description="Delete messages with attachments")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_attachments(self, interaction: discord.Interaction, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            def check(msg):
+                return len(msg.attachments) > 0
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_ATTACHMENTS", f"Purged {len(deleted)} attachments")
+            await track_moderation_action(interaction.guild.id, "purge_attachments")
+            
+            embed = discord.Embed(title="📎 Attachments Purged", color=discord.Color.orange())
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge attachments error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @purge_group.command(name="embeds", description="Delete messages with embeds")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_embeds(self, interaction: discord.Interaction, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            def check(msg):
+                return len(msg.embeds) > 0
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_EMBEDS", f"Purged {len(deleted)} embeds")
+            await track_moderation_action(interaction.guild.id, "purge_embeds")
+            
+            embed = discord.Embed(title="📦 Embeds Purged", color=discord.Color.orange())
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge embeds error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @purge_group.command(name="contains", description="Delete messages containing specific text")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.describe(text="Text to search for", amount="Number of messages to check (max 100)")
+    async def purge_contains(self, interaction: discord.Interaction, text: str, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            def check(msg):
+                return text.lower() in msg.content.lower()
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_CONTAINS", f"Purged {len(deleted)} messages containing '{text}'")
+            await track_moderation_action(interaction.guild.id, "purge_contains")
+            
+            embed = discord.Embed(title="🔍 Messages Purged", color=discord.Color.orange())
+            embed.add_field(name="Contains", value=text, inline=True)
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge contains error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @purge_group.command(name="links", description="Delete messages containing links")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def purge_links(self, interaction: discord.Interaction, amount: int = 50):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            amount = min(amount, 100)
+            link_regex = r"https?://[^\s]+|www\.[^\s]+"
+            def check(msg):
+                return re.search(link_regex, msg.content.lower()) is not None
+            deleted = await interaction.channel.purge(limit=amount, check=check)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_LINKS", f"Purged {len(deleted)} messages with links")
+            await track_moderation_action(interaction.guild.id, "purge_links")
+            
+            embed = discord.Embed(title="🔗 Links Purged", color=discord.Color.orange())
+            embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Purge links error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 # =========================
-# 🎮 FUN COG (PUBLIC)
+# 📊 INFORMATION COG
+# =========================
+class Information(commands.Cog, name="information"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    info_group = app_commands.Group(name="info", description="Server information - Owner Role Only")
+    
+    @info_group.command(name="server", description="Display detailed server information")
+    @is_owner()
+    async def info_server(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            guild = interaction.guild
+            embed = discord.Embed(title=f"📋 {guild.name}", color=discord.Color.blue())
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
+            embed.add_field(name="👑 Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+            embed.add_field(name="👥 Members", value=guild.member_count, inline=True)
+            embed.add_field(name="💬 Channels", value=len(guild.channels), inline=True)
+            embed.add_field(name="🎭 Roles", value=len(guild.roles), inline=True)
+            embed.add_field(name="📅 Created", value=f"<t:{int(guild.created_at.timestamp())}:R>", inline=True)
+            embed.add_field(name="🆔 ID", value=guild.id, inline=True)
+            embed.add_field(name="🔊 Voice Channels", value=len(guild.voice_channels), inline=True)
+            embed.add_field(name="📝 Text Channels", value=len(guild.text_channels), inline=True)
+            embed.add_field(name="📈 Boost Level", value=guild.premium_tier, inline=True)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Server info error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @info_group.command(name="user", description="Display detailed user information")
+    @is_owner()
+    @app_commands.describe(member="Member to look up (optional)")
+    async def info_user(self, interaction: discord.Interaction, member: discord.Member = None):
+        await interaction.response.defer()
+        try:
+            target = member or interaction.user
+            embed = discord.Embed(title=f"👤 {target.display_name}", color=target.color or discord.Color.blue())
+            if target.avatar:
+                embed.set_thumbnail(url=target.avatar.url)
+            embed.add_field(name="Username", value=str(target), inline=True)
+            embed.add_field(name="🆔 ID", value=target.id, inline=True)
+            if target.joined_at:
+                embed.add_field(name="📅 Joined", value=f"<t:{int(target.joined_at.timestamp())}:R>", inline=True)
+            embed.add_field(name="📅 Created", value=f"<t:{int(target.created_at.timestamp())}:R>", inline=True)
+            embed.add_field(name="🎭 Top Role", value=target.top_role.mention if target.top_role else "None", inline=True)
+            embed.add_field(name="🤖 Bot", value="✅ Yes" if target.bot else "❌ No", inline=True)
+            if len(target.roles) > 1:
+                roles = [r.mention for r in target.roles[1:]][:10]
+                embed.add_field(name="🎭 Roles", value=" ".join(roles) if roles else "None", inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"User info error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @info_group.command(name="role", description="Display role information")
+    @is_owner()
+    @app_commands.describe(role="Role to look up")
+    async def info_role(self, interaction: discord.Interaction, role: discord.Role):
+        await interaction.response.defer()
+        try:
+            embed = discord.Embed(title=f"🎭 {role.name}", color=role.color)
+            embed.add_field(name="🆔 ID", value=role.id, inline=True)
+            embed.add_field(name="📅 Created", value=f"<t:{int(role.created_at.timestamp())}:R>", inline=True)
+            embed.add_field(name="👥 Members", value=len(role.members), inline=True)
+            embed.add_field(name="🎨 Color", value=str(role.color), inline=True)
+            embed.add_field(name="🔝 Position", value=role.position, inline=True)
+            embed.add_field(name="🔒 Mentionable", value="✅ Yes" if role.mentionable else "❌ No", inline=True)
+            embed.add_field(name="🔐 Hoist", value="✅ Yes" if role.hoist else "❌ No", inline=True)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Role info error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @info_group.command(name="channel", description="Display channel information")
+    @is_owner()
+    @app_commands.describe(channel="Channel to look up (optional)")
+    async def info_channel(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        await interaction.response.defer()
+        try:
+            target = channel or interaction.channel
+            embed = discord.Embed(title=f"📢 #{target.name}", color=discord.Color.blue())
+            embed.add_field(name="🆔 ID", value=target.id, inline=True)
+            embed.add_field(name="📅 Created", value=f"<t:{int(target.created_at.timestamp())}:R>", inline=True)
+            embed.add_field(name="📝 Type", value=str(target.type).title(), inline=True)
+            embed.add_field(name="🔒 Slowmode", value=f"{target.slowmode_delay}s" if target.slowmode_delay > 0 else "Off", inline=True)
+            if isinstance(target, discord.TextChannel):
+                embed.add_field(name="👥 Topic", value=target.topic or "None", inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Channel info error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+    @info_group.command(name="avatar", description="Display a user's avatar")
+    @is_owner()
+    @app_commands.describe(member="Member to look up (optional)")
+    async def info_avatar(self, interaction: discord.Interaction, member: discord.Member = None):
+        await interaction.response.defer()
+        try:
+            target = member or interaction.user
+            embed = discord.Embed(title=f"🖼️ {target.display_name}'s Avatar", color=discord.Color.blue())
+            if target.avatar:
+                embed.set_image(url=target.avatar.url)
+                embed.add_field(name="Link", value=f"[Click here]({target.avatar.url})", inline=False)
+            await interaction.followup.send(embed=embed)
+        except Exception as e:
+            logger.error(f"Avatar error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}")
+
+# =========================
+# 💬 MESSAGE COMMANDS COG
+# =========================
+class MessageCommands(commands.Cog, name="message_commands"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    msg_group = app_commands.Group(name="msg", description="Message commands - Owner Role Only")
+    
+    @msg_group.command(name="announce", description="Send an announcement embed")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.describe(title="Announcement title", description="Announcement description", color="Color hex code (e.g., #FF0000)")
+    async def msg_announce(self, interaction: discord.Interaction, title: str, description: str, color: str = "#00FF00"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            color_int = int(color.replace("#", ""), 16) if color.startswith("#") else int(color, 16)
+            embed = discord.Embed(title=f"📢 {title}", description=description, color=color_int)
+            embed.set_footer(text=f"Announced by {interaction.user.display_name}", icon_url=interaction.user.avatar.url if interaction.user.avatar else None)
+            embed.timestamp = datetime.now()
+            await interaction.channel.send(embed=embed)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "ANNOUNCE", f"Announcement: {title}")
+            
+            embed_response = discord.Embed(title="✅ Announcement Sent", color=discord.Color.green())
+            embed_response.add_field(name="Title", value=title, inline=True)
+            embed_response.add_field(name="Channel", value=interaction.channel.mention, inline=True)
+            await interaction.followup.send(embed=embed_response, ephemeral=True)
+            
+        except ValueError:
+            await interaction.followup.send("❌ Invalid color format. Use hex like #FF0000 or a number.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Announce error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @msg_group.command(name="say", description="Make the bot send a message")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.describe(message="Message to send")
+    async def msg_say(self, interaction: discord.Interaction, message: str):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.channel.send(message)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "SAY", f"Sent message: {message[:100]}")
+            
+            embed = discord.Embed(title="✅ Message Sent", color=discord.Color.green())
+            embed.add_field(name="Channel", value=interaction.channel.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Say error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @msg_group.command(name="poll", description="Create a poll")
+    @is_owner()
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.describe(question="Poll question", option1="First option", option2="Second option", option3="Third option (optional)", option4="Fourth option (optional)", option5="Fifth option (optional)")
+    async def msg_poll(self, interaction: discord.Interaction, question: str, option1: str, option2: str,
+                        option3: str = None, option4: str = None, option5: str = None):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            options = [option1, option2]
+            if option3:
+                options.append(option3)
+            if option4:
+                options.append(option4)
+            if option5:
+                options.append(option5)
+            if len(options) > 10:
+                return await interaction.followup.send("❌ Maximum 10 options allowed.", ephemeral=True)
+            
+            poll_id = random.randint(100000, 999999)
+            votes_data = {str(i): [] for i in range(len(options))}
+            await db.execute(
+                "INSERT INTO polls (id, guild_id, channel_id, question, options, votes) VALUES (?, ?, ?, ?, ?, ?)",
+                (poll_id, interaction.guild.id, interaction.channel.id, question, json.dumps(options), json.dumps(votes_data))
+            )
+            await db.commit()
+            
+            embed = discord.Embed(title=f"📊 Poll: {question}", color=discord.Color.blue())
+            emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+            for i, option in enumerate(options):
+                embed.add_field(name=f"{emojis[i]} {option}", value="0 votes", inline=False)
+            embed.set_footer(text=f"Poll ID: {poll_id} | React with the buttons below to vote")
+            
+            view = PollView(poll_id, options)
+            await interaction.channel.send(embed=embed, view=view)
+            await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "POLL", f"Created poll: {question}")
+            
+            embed_response = discord.Embed(title="✅ Poll Created", color=discord.Color.green())
+            embed_response.add_field(name="Question", value=question, inline=True)
+            embed_response.add_field(name="Options", value=str(len(options)), inline=True)
+            await interaction.followup.send(embed=embed_response, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Poll error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# =========================
+# 📋 LOGS CONFIGURATION COG
+# =========================
+class LogsConfig(commands.Cog, name="logs_config"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    logs_group = app_commands.Group(name="logs", description="Mod logs configuration - Owner Role Only")
+    
+    @logs_group.command(name="set", description="Set the mod logs channel")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(channel="Channel for moderation logs")
+    async def logs_set(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await set_mod_logs_config(interaction.guild.id, channel.id, enabled=True)
+            
+            embed = discord.Embed(
+                title="✅ Mod Logs Configured",
+                description=f"Moderation logs will be sent to {channel.mention}",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            test_embed = discord.Embed(
+                title="📋 Mod Logs Test",
+                description="This is a test message to confirm logs are working.",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            await log_to_mod_channel(interaction.guild, test_embed)
+            
+        except Exception as e:
+            logger.error(f"Logs set error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @logs_group.command(name="disable", description="Disable mod logs")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    async def logs_disable(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await set_mod_logs_config(interaction.guild.id, 0, enabled=False)
+            
+            embed = discord.Embed(
+                title="✅ Mod Logs Disabled",
+                description="Moderation logs have been disabled.",
+                color=discord.Color.orange()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Logs disable error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @logs_group.command(name="status", description="Show mod logs configuration")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    async def logs_status(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            config = await get_mod_logs_config(interaction.guild.id)
+            if not config or not config["enabled"]:
+                return await interaction.followup.send("❌ Mod logs are not configured or disabled.", ephemeral=True)
+            
+            channel = interaction.guild.get_channel(config["channel_id"])
+            channel_name = channel.mention if channel else "Unknown (deleted)"
+            
+            embed = discord.Embed(
+                title="📋 Mod Logs Configuration",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Channel", value=channel_name, inline=True)
+            embed.add_field(name="Enabled", value="✅ Yes" if config["enabled"] else "❌ No", inline=True)
+            embed.add_field(name="Message Deletes", value="✅" if config["log_deletes"] else "❌", inline=True)
+            embed.add_field(name="Message Edits", value="✅" if config["log_edits"] else "❌", inline=True)
+            embed.add_field(name="Member Joins", value="✅" if config["log_joins"] else "❌", inline=True)
+            embed.add_field(name="Member Leaves", value="✅" if config["log_leaves"] else "❌", inline=True)
+            embed.add_field(name="Bans", value="✅" if config["log_bans"] else "❌", inline=True)
+            embed.add_field(name="Kicks", value="✅" if config["log_kicks"] else "❌", inline=True)
+            embed.add_field(name="Timeouts", value="✅" if config["log_timeouts"] else "❌", inline=True)
+            embed.add_field(name="Voice", value="✅" if config["log_voice"] else "❌", inline=True)
+            embed.add_field(name="Role Updates", value="✅" if config["log_roles"] else "❌", inline=True)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Logs status error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# =========================
+# 🛡️ AUTOMOD CONFIGURATION COG
+# =========================
+class AutoModConfig(commands.Cog, name="automod_config"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    automod_group = app_commands.Group(name="automod", description="AutoModeration configuration - Owner Role Only")
+    
+    @automod_group.command(name="antispam", description="Configure anti-spam protection")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        enabled="Enable/disable anti-spam",
+        threshold="Number of messages in the window",
+        window="Time window in seconds"
+    )
+    async def automod_antispam(self, interaction: discord.Interaction, enabled: bool, threshold: int = 5, window: int = 5):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await set_automod_config(interaction.guild.id, anti_spam=enabled, spam_threshold=threshold, spam_window=window)
+            
+            embed = discord.Embed(
+                title="🛡️ Anti-Spam Configuration",
+                description=f"Anti-spam is now {'✅ ENABLED' if enabled else '❌ DISABLED'}",
+                color=discord.Color.green() if enabled else discord.Color.red()
+            )
+            embed.add_field(name="Threshold", value=f"{threshold} messages", inline=True)
+            embed.add_field(name="Window", value=f"{window} seconds", inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"AutoMod antispam error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @automod_group.command(name="antiinvite", description="Configure anti-invite link protection")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(enabled="Enable/disable anti-invite")
+    async def automod_antiinvite(self, interaction: discord.Interaction, enabled: bool):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await set_automod_config(interaction.guild.id, anti_invite=enabled)
+            
+            embed = discord.Embed(
+                title="🛡️ Anti-Invite Configuration",
+                description=f"Anti-invite is now {'✅ ENABLED' if enabled else '❌ DISABLED'}",
+                color=discord.Color.green() if enabled else discord.Color.red()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"AutoMod antiinvite error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @automod_group.command(name="antimentions", description="Configure anti-mass-mention protection")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        enabled="Enable/disable anti-mass-mentions",
+        limit="Maximum mentions allowed per message"
+    )
+    async def automod_antimentions(self, interaction: discord.Interaction, enabled: bool, limit: int = 5):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await set_automod_config(interaction.guild.id, anti_mentions=enabled, mention_limit=limit)
+            
+            embed = discord.Embed(
+                title="🛡️ Anti-Mass-Mention Configuration",
+                description=f"Anti-mass-mentions is now {'✅ ENABLED' if enabled else '❌ DISABLED'}",
+                color=discord.Color.green() if enabled else discord.Color.red()
+            )
+            embed.add_field(name="Mention Limit", value=str(limit), inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"AutoMod antimentions error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @automod_group.command(name="badwords", description="Configure bad words filter")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        enabled="Enable/disable bad words filter",
+        words="Comma-separated list of bad words"
+    )
+    async def automod_badwords(self, interaction: discord.Interaction, enabled: bool, words: str = ""):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await set_automod_config(interaction.guild.id, bad_words=enabled, bad_words_list=words)
+            
+            embed = discord.Embed(
+                title="🛡️ Bad Words Filter Configuration",
+                description=f"Bad words filter is now {'✅ ENABLED' if enabled else '❌ DISABLED'}",
+                color=discord.Color.green() if enabled else discord.Color.red()
+            )
+            if words:
+                word_list = [w.strip() for w in words.split(",") if w.strip()]
+                embed.add_field(name="Filtered Words", value=", ".join(word_list[:20]) + (f" and {len(word_list)-20} more" if len(word_list) > 20 else ""), inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"AutoMod badwords error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @automod_group.command(name="status", description="Show automod configuration")
+    @is_owner()
+    @app_commands.checks.has_permissions(administrator=True)
+    async def automod_status(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            config = await get_automod_config(interaction.guild.id)
+            
+            embed = discord.Embed(
+                title="🛡️ AutoMod Configuration",
+                color=discord.Color.blue()
+            )
+            embed.add_field(name="Anti-Spam", value="✅ Enabled" if config["anti_spam"] else "❌ Disabled", inline=True)
+            embed.add_field(name="Anti-Invite", value="✅ Enabled" if config["anti_invite"] else "❌ Disabled", inline=True)
+            embed.add_field(name="Anti-Mass-Mentions", value="✅ Enabled" if config["anti_mentions"] else "❌ Disabled", inline=True)
+            embed.add_field(name="Bad Words Filter", value="✅ Enabled" if config["bad_words"] else "❌ Disabled", inline=True)
+            
+            if config["anti_spam"]:
+                embed.add_field(name="Spam Threshold", value=f"{config['spam_threshold']} messages", inline=True)
+                embed.add_field(name="Spam Window", value=f"{config['spam_window']} seconds", inline=True)
+            if config["anti_mentions"]:
+                embed.add_field(name="Mention Limit", value=str(config["mention_limit"]), inline=True)
+            if config["bad_words"] and config["bad_words_list"]:
+                words = [w.strip() for w in config["bad_words_list"].split(",") if w.strip()]
+                embed.add_field(name="Filtered Words", value=", ".join(words[:20]) + (f" and {len(words)-20} more" if len(words) > 20 else ""), inline=False)
+            
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"AutoMod status error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# =========================
+# ⚠️ WARNING MANAGEMENT COG
+# =========================
+class WarningManagement(commands.Cog, name="warning_management"):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    warn_group = app_commands.Group(name="warn", description="Warning management - Owner Role Only")
+    
+    @warn_group.command(name="add", description="Warn a member")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warn_add(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+                return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
+            
+            await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
+            await add_history(interaction.guild.id, member.id, str(member), "WARN", reason)
+            
+            try:
+                dm_embed = discord.Embed(title=f"You were warned in {interaction.guild.name}", description=f"Reason: {reason}", color=discord.Color.orange())
+                await member.send(embed=dm_embed)
+            except:
+                pass
+            
+            embed = discord.Embed(title="⚠️ User Warned", color=discord.Color.orange())
+            embed.add_field(name="User", value=member.mention, inline=True)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="⚠️ Member Warned",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Reason", value=reason, inline=False)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Warn add error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @warn_group.command(name="list", description="View a member's warnings")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warn_list(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            warnings = await get_warnings(member.id, interaction.guild.id)
+            if not warnings:
+                embed = discord.Embed(title=f"📋 Warnings for {member.display_name}", description="No warnings found.", color=discord.Color.green())
+                return await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            embed = discord.Embed(title=f"📋 Warnings for {member.display_name}", color=discord.Color.orange())
+            embed.set_footer(text=f"Total: {len(warnings)} warnings")
+            for i, (wid, reason, timestamp) in enumerate(warnings[:10], 1):
+                embed.add_field(name=f"#{i}", value=f"Reason: {reason}\nTime: {timestamp}", inline=False)
+            if len(warnings) > 10:
+                embed.add_field(name="...", value=f"And {len(warnings) - 10} more warnings.", inline=False)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"Warn list error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @warn_group.command(name="clear", description="Clear all warnings from a member")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warn_clear(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            warnings = await get_warnings(member.id, interaction.guild.id)
+            if not warnings:
+                return await interaction.followup.send(f"⚠️ {member.mention} has no warnings to clear.", ephemeral=True)
+            
+            await clear_warnings(member.id, interaction.guild.id)
+            await add_history(interaction.guild.id, member.id, str(member), "WARN_CLEAR", f"All warnings cleared by {interaction.user}")
+            
+            embed = discord.Embed(
+                title="✅ Warnings Cleared",
+                description=f"Cleared {len(warnings)} warnings from {member.mention}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+            log_embed = discord.Embed(
+                title="⚠️ Warnings Cleared",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            log_embed.add_field(name="User", value=f"{member.mention} ({member})", inline=True)
+            log_embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            log_embed.add_field(name="Warnings Cleared", value=str(len(warnings)), inline=True)
+            await log_to_mod_channel(interaction.guild, log_embed)
+            
+        except Exception as e:
+            logger.error(f"Warn clear error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+    @warn_group.command(name="remove", description="Remove a specific warning by ID")
+    @is_owner()
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.describe(warning_id="ID of the warning to remove")
+    async def warn_remove(self, interaction: discord.Interaction, warning_id: int):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            result = await db.fetchone("SELECT user_id, reason FROM warnings WHERE id=?", (warning_id,))
+            if not result:
+                return await interaction.followup.send(f"❌ Warning ID {warning_id} not found.", ephemeral=True)
+            
+            user_id, reason = result
+            await remove_warning(warning_id)
+            
+            embed = discord.Embed(
+                title="✅ Warning Removed",
+                description=f"Removed warning #{warning_id}",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="User", value=f"<@{user_id}>", inline=True)
+            embed.add_field(name="Reason", value=reason, inline=False)
+            embed.add_field(name="Moderator", value=interaction.user.mention, inline=True)
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Warn remove error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+
+# =========================
+# 🎮 FUN COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class Fun(commands.Cog, name="fun"):
     fun_group = app_commands.Group(name="fun", description="Fun commands")
@@ -4280,7 +4864,7 @@ class Fun(commands.Cog, name="fun"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 💰 ECONOMY COG (PUBLIC)
+# 💰 ECONOMY COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class Economy(commands.Cog, name="economy"):
     economy_group = app_commands.Group(name="economy", description="Economy commands")
@@ -4382,7 +4966,7 @@ class Economy(commands.Cog, name="economy"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 🎉 GIVEAWAY COG (PUBLIC)
+# 🎉 GIVEAWAY COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class Giveaway(commands.Cog, name="giveaway"):
     giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
@@ -4446,7 +5030,7 @@ class Giveaway(commands.Cog, name="giveaway"):
         await interaction.response.send_message("❌ Could not find that giveaway or it hasn't ended yet.", ephemeral=True)
 
 # =========================
-# 🎫 TICKET COG (PUBLIC)
+# 🎫 TICKET COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class Ticket(commands.Cog, name="ticket"):
     ticket_group = app_commands.Group(name="ticket", description="Ticket commands")
@@ -4487,7 +5071,7 @@ class Ticket(commands.Cog, name="ticket"):
             await interaction.response.send_message(f"❌ Error: {e}")
 
 # =========================
-# 📊 LEVELING COG (PUBLIC)
+# 📊 LEVELING COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class Leveling(commands.Cog, name="leveling"):
     leveling_group = app_commands.Group(name="leveling", description="Leveling commands")
@@ -4544,7 +5128,7 @@ class Leveling(commands.Cog, name="leveling"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 🤖 AI COG (PUBLIC)
+# 🤖 AI COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class AI(commands.Cog, name="ai"):
     ai_group = app_commands.Group(name="ai", description="AI commands")
@@ -4619,7 +5203,7 @@ class Statistics(commands.Cog, name="statistics"):
         
         stats = await get_user_stats(member.id, interaction.guild.id)
         if not stats:
-            return await interaction.followup.send(f"📊 No statistics recorded for {member.mention} yet.", ephemeral=True)
+            return await interaction.followup.send(f"📊 No statistics recorded for {member.mention} yet. Stats begin tracking after the feature is added.")
         
         guild = interaction.guild
         
@@ -4725,11 +5309,305 @@ class Statistics(commands.Cog, name="statistics"):
         embed.set_footer(text=f"Updated: {stats['updated_at']}")
         await interaction.followup.send(embed=embed)
     
+    @stats_group.command(name="server", description="View server-wide statistics")
+    @is_owner()
+    async def stats_server(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        stats = await get_server_stats(interaction.guild.id)
+        if not stats:
+            return await interaction.followup.send("📊 No server statistics available yet. Stats begin tracking after the feature is added.")
+        
+        guild = interaction.guild
+        
+        most_active_user = None
+        if stats["most_active_user_id"]:
+            most_active_user = guild.get_member(stats["most_active_user_id"])
+        
+        most_active_channel = None
+        if stats["most_active_channel_id"]:
+            most_active_channel = guild.get_channel(stats["most_active_channel_id"])
+        
+        embed = discord.Embed(
+            title=f"📊 Server Statistics - {guild.name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        
+        embed.add_field(
+            name="💬 Messages",
+            value=f"**{stats['total_messages']:,}** total messages",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎙️ Voice",
+            value=f"**{stats['total_vc_hours']:.1f}** total hours",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⚙️ Commands",
+            value=f"**{stats['total_commands_executed']:,}** executed",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📎 Files",
+            value=f"**{stats['total_files_uploaded']:,}** uploaded",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎭 Reactions",
+            value=f"**{stats['total_reactions_used']:,}** used",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🛡️ Moderation",
+            value=f"**{stats['total_moderation_actions']:,}** actions",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👑 Most Active User",
+            value=most_active_user.mention if most_active_user else "None",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📢 Most Active Channel",
+            value=most_active_channel.mention if most_active_channel else "None",
+            inline=True
+        )
+        
+        embed.set_footer(text=f"Updated: {stats['updated_at']}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="channel", description="View channel statistics")
+    @is_owner()
+    @app_commands.describe(channel="Channel to view statistics for")
+    async def stats_channel(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        await interaction.response.defer()
+        
+        target = channel or interaction.channel
+        stats = await get_channel_stats(interaction.guild.id, target.id)
+        if not stats:
+            return await interaction.followup.send(f"📊 No statistics recorded for {target.mention} yet.")
+        
+        most_active_user = None
+        if stats["most_active_user_id"]:
+            most_active_user = interaction.guild.get_member(stats["most_active_user_id"])
+        
+        avg_daily = 0
+        if stats["total_days_tracked"] > 0:
+            avg_daily = stats["total_messages"] / stats["total_days_tracked"]
+        
+        avg_length = 0
+        if stats["total_messages"] > 0:
+            avg_length = stats["total_message_length"] / stats["total_messages"]
+        
+        embed = discord.Embed(
+            title=f"📊 Channel Statistics - #{target.name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="💬 Total Messages",
+            value=f"**{stats['total_messages']:,}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📅 Days Tracked",
+            value=f"**{stats['total_days_tracked']}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 Average Daily",
+            value=f"**{avg_daily:.1f}** messages/day",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📏 Average Length",
+            value=f"**{avg_length:.1f}** chars",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👑 Most Active User",
+            value=most_active_user.mention if most_active_user else "None",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⏰ Peak Hour",
+            value=f"**{stats['peak_hour']}:00**" if stats["peak_hour"] else "None",
+            inline=True
+        )
+        
+        if stats["peak_day"]:
+            embed.add_field(
+                name="📅 Peak Day",
+                value=f"**{stats['peak_day']}**",
+                inline=True
+            )
+        
+        embed.set_footer(text=f"Updated: {stats['updated_at']}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="leaderboard", description="View leaderboards for various stats")
+    @is_owner()
+    @app_commands.describe(
+        stat_type="Type of leaderboard to view",
+        limit="Number of entries to show (max 25)"
+    )
+    @app_commands.choices(stat_type=[
+        discord.app_commands.Choice(name="Messages", value="messages"),
+        discord.app_commands.Choice(name="Voice Hours", value="vc_hours"),
+        discord.app_commands.Choice(name="Commands", value="commands"),
+        discord.app_commands.Choice(name="Reactions", value="reactions"),
+        discord.app_commands.Choice(name="Attachments", value="attachments"),
+        discord.app_commands.Choice(name="Mentions", value="mentions"),
+        discord.app_commands.Choice(name="Streaks", value="streak"),
+        discord.app_commands.Choice(name="Channels", value="channels"),
+    ])
+    async def stats_leaderboard(self, interaction: discord.Interaction, stat_type: str, limit: int = 10):
+        await interaction.response.defer()
+        
+        limit = min(limit, 25)
+        results = await get_leaderboard(interaction.guild.id, stat_type, limit)
+        
+        if not results:
+            return await interaction.followup.send(f"📊 No data available for {stat_type} leaderboard yet.")
+        
+        stat_names = {
+            "messages": "Total Messages",
+            "vc_hours": "Voice Hours",
+            "commands": "Commands Used",
+            "reactions": "Reactions Given",
+            "attachments": "Attachments Sent",
+            "mentions": "Mentions Sent",
+            "streak": "Longest Streak",
+            "channels": "Channel Messages"
+        }
+        
+        stat_name = stat_names.get(stat_type, stat_type.title())
+        embed = discord.Embed(
+            title=f"🏆 {stat_name} Leaderboard",
+            color=discord.Color.gold(),
+            timestamp=datetime.now()
+        )
+        
+        medals = ["🥇", "🥈", "🥉"]
+        description = ""
+        
+        for i, result in enumerate(results):
+            user_id = result[0]
+            value = result[1]
+            
+            member = interaction.guild.get_member(user_id)
+            name = member.display_name if member else f"Unknown ({user_id})"
+            prefix = medals[i] if i < 3 else f"{i+1}."
+            
+            if stat_type == "vc_hours":
+                display_value = f"{value:.1f} hours"
+            elif stat_type == "channels":
+                channel = interaction.guild.get_channel(user_id)
+                name = f"#{channel.name}" if channel else f"Unknown ({user_id})"
+                display_value = f"{value:,} messages"
+            elif stat_type == "streak":
+                display_value = f"{value} messages"
+            else:
+                display_value = f"{value:,}"
+            
+            description += f"{prefix} **{name}** - {display_value}\n"
+        
+        embed.description = description
+        embed.set_footer(text=f"Showing top {len(results)} • {interaction.guild.name}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="titles", description="View fun titles for a user")
+    @is_owner()
+    @app_commands.describe(member="Member to view titles for")
+    async def stats_titles(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer()
+        
+        stats = await get_user_stats(member.id, interaction.guild.id)
+        if not stats:
+            return await interaction.followup.send(f"📊 No statistics recorded for {member.mention} yet.")
+        
+        titles = await get_fun_titles(stats, interaction.guild, member)
+        
+        embed = discord.Embed(
+            title=f"🏅 Titles for {member.display_name}",
+            color=member.color or discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
+        
+        if titles:
+            embed.description = "\n".join([f"• {title}" for title in titles])
+        else:
+            embed.description = "No titles earned yet. Keep chatting!"
+        
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="reset", description="Reset statistics for a user (Owner Role Only)")
+    @is_owner()
+    @app_commands.describe(
+        member="Member to reset statistics for",
+        confirm="Type 'CONFIRM' to confirm reset"
+    )
+    async def stats_reset(self, interaction: discord.Interaction, member: discord.Member, confirm: str):
+        if confirm != "CONFIRM":
+            return await interaction.response.send_message(
+                "⚠️ To confirm reset, type `CONFIRM` in the confirm parameter.",
+                ephemeral=True
+            )
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            await db.execute(
+                "DELETE FROM user_stats WHERE user_id=? AND guild_id=?",
+                (member.id, interaction.guild.id)
+            )
+            await db.execute(
+                "DELETE FROM daily_user_stats WHERE user_id=? AND guild_id=?",
+                (member.id, interaction.guild.id)
+            )
+            await db.execute(
+                "DELETE FROM user_emoji_stats WHERE user_id=? AND guild_id=?",
+                (member.id, interaction.guild.id)
+            )
+            await db.commit()
+            
+            embed = discord.Embed(
+                title="✅ Statistics Reset",
+                description=f"All statistics for {member.mention} have been reset.",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Stats reset error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+    
     def _format_duration(self, seconds: int) -> str:
         if seconds <= 0:
             return "0s"
+        
         minutes = seconds // 60
         hours = minutes // 60
+        
         if hours > 0:
             minutes = minutes % 60
             return f"{hours}h {minutes}m"
@@ -4739,7 +5617,7 @@ class Statistics(commands.Cog, name="statistics"):
             return f"{seconds}s"
 
 # =========================
-# 📋 UTILITY COMMANDS (PUBLIC)
+# 📋 UTILITY COMMANDS (PUBLIC - NO OWNER CHECK)
 # =========================
 class Utility(commands.Cog, name="utility"):
     def __init__(self, bot: commands.Bot):
@@ -4780,7 +5658,7 @@ class Utility(commands.Cog, name="utility"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 📋 VOICE COMMANDS (PUBLIC)
+# 📋 VOICE COMMANDS (PUBLIC - NO OWNER CHECK)
 # =========================
 class VoiceCommands(commands.Cog, name="voice_commands"):
     def __init__(self, bot: commands.Bot):
@@ -4809,7 +5687,7 @@ class VoiceCommands(commands.Cog, name="voice_commands"):
         await interaction.response.send_message("👋 Disconnected from voice channel.")
 
 # =========================
-# 📋 HELP COG (PUBLIC)
+# 📋 HELP COG (PUBLIC - NO OWNER CHECK)
 # =========================
 class Help(commands.Cog, name="help"):
     def __init__(self, bot: commands.Bot):
@@ -4824,12 +5702,20 @@ class Help(commands.Cog, name="help"):
         )
         embed.add_field(
             name="🛡️ Moderation (Owner Role Only)",
-            value="`/mod warn`, `/mod warnings`, `/mod clearwarnings`, `/mod removewarning`\n"
-                  "`/mod ban`, `/mod tempban`, `/mod softban`, `/mod kick`\n"
-                  "`/mod mute`, `/mod unmute`, `/mod clear`, `/mod purge`\n"
-                  "`/mod lock`, `/mod unlock`, `/mod slowmode`\n"
-                  "`/mod snipe`, `/mod editsnipe`, `/mod reactionsnipe`\n"
-                  "`/mod case`, `/mod cases`, `/mod reason`",
+            value="`/mod clear`, `/mod thanos_snap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
+                  "`/role nick`, `/role resetnick`, `/role give`, `/role remove`\n"
+                  "`/voice kick`, `/voice move`, `/voice deafen`, `/voice undeafen`, `/voice mute`, `/voice unmute`\n"
+                  "`/purge user`, `/purge bots`, `/purge images`, `/purge attachments`, `/purge embeds`, `/purge contains`, `/purge links`\n"
+                  "`/info server`, `/info user`, `/info role`, `/info channel`, `/info avatar`\n"
+                  "`/msg announce`, `/msg say`, `/msg poll`\n"
+                  "`/logs set`, `/logs disable`, `/logs status`\n"
+                  "`/automod antispam`, `/automod antiinvite`, `/automod antimentions`, `/automod badwords`, `/automod status`\n"
+                  "`/warn add`, `/warn list`, `/warn clear`, `/warn remove`",
+            inline=False
+        )
+        embed.add_field(
+            name="📊 Statistics (Owner Role Only)",
+            value="`/stats user`, `/stats server`, `/stats channel`, `/stats leaderboard`, `/stats titles`, `/stats reset`",
             inline=False
         )
         embed.add_field(
@@ -4871,7 +5757,35 @@ class Help(commands.Cog, name="help"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# HISTORY COMMANDS
+# ⚠️ ERROR HANDLER
+# =========================
+class CommandErrorHandler(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @commands.Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+        if isinstance(error, discord.app_commands.CommandOnCooldown):
+            return await interaction.response.send_message(f"⏰ Command on cooldown. Try again in {error.retry_after:.0f}s.", ephemeral=True)
+        elif isinstance(error, discord.app_commands.MissingPermissions):
+            return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        elif isinstance(error, discord.app_commands.BotMissingPermissions):
+            return await interaction.response.send_message("❌ I don't have the required permissions.", ephemeral=True)
+        elif isinstance(error, discord.app_commands.CheckFailure):
+            return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+        else:
+            error_details = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+            logger.error(f"App command error: {error}\n{error_details}")
+            try:
+                await interaction.response.send_message(f"❌ An error occurred: {str(error)[:100]}", ephemeral=True)
+            except:
+                try:
+                    await interaction.followup.send(f"❌ An error occurred: {str(error)[:100]}", ephemeral=True)
+                except:
+                    pass
+
+# =========================
+# 📋 HISTORY COMMANDS
 # =========================
 class HistoryCommands(commands.Cog, name="history"):
     history_group = app_commands.Group(name="history", description="View server history")
@@ -5062,6 +5976,14 @@ async def main():
         await db.connect()
         await initialize_bot_state()
         await bot.add_cog(ModerationActions(bot))
+        await bot.add_cog(RoleManagement(bot))
+        await bot.add_cog(VoiceModeration(bot))
+        await bot.add_cog(ChannelManagement(bot))
+        await bot.add_cog(Information(bot))
+        await bot.add_cog(MessageCommands(bot))
+        await bot.add_cog(LogsConfig(bot))
+        await bot.add_cog(AutoModConfig(bot))
+        await bot.add_cog(WarningManagement(bot))
         await bot.add_cog(Fun(bot))
         await bot.add_cog(Economy(bot))
         await bot.add_cog(Giveaway(bot))
@@ -5076,6 +5998,7 @@ async def main():
         await bot.add_cog(HistoryCommands(bot))
         await bot.add_cog(ControlPanelCommands(bot))
         await bot.start(TOKEN)
+
 
 if __name__ == "__main__":
     try:
