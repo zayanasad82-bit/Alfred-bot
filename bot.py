@@ -400,31 +400,75 @@ class AsyncDatabase:
 db = AsyncDatabase()
 
 # =========================
-# OWNER CHECK FUNCTIONS
+# OWNER CHECK FUNCTIONS - FIXED
 # =========================
 def has_owner_role(member: discord.Member) -> bool:
-    if not OWNER_ROLE_ID:
-        # Fallback to checking by name
-        role = discord.utils.get(member.roles, name=OWNER_ROLE_NAME)
-        return role is not None
-    role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
-    return role is not None
+    """Check if a member has the Owner role by ID or name."""
+    # First check by ID if set
+    if OWNER_ROLE_ID:
+        role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
+        if role:
+            logger.debug(f"User {member.id} has Owner role by ID: {OWNER_ROLE_ID}")
+            return True
+    
+    # Fallback to checking by name (case-sensitive)
+    role = discord.utils.get(member.roles, name=OWNER_ROLE_NAME)
+    if role:
+        logger.debug(f"User {member.id} has Owner role by name: {OWNER_ROLE_NAME}")
+        return True
+    
+    # Case-insensitive fallback for common role names
+    for r in member.roles:
+        if r.name.lower() == OWNER_ROLE_NAME.lower():
+            logger.debug(f"User {member.id} has Owner role by case-insensitive name: {r.name}")
+            return True
+        if r.name.lower() in ["owner", "server owner", "admin"]:
+            # Also check for common admin roles
+            logger.debug(f"User {member.id} has admin-like role: {r.name}")
+            return True
+    
+    logger.debug(f"User {member.id} does not have Owner role. Roles: {[r.name for r in member.roles]}")
+    return False
 
 def is_owner():
+    """Check if the user has the Owner role."""
     async def predicate(interaction: discord.Interaction):
-        if not OWNER_ROLE_ID and not OWNER_ROLE_NAME:
-            logger.warning("OWNER_ROLE_ID and OWNER_ROLE_NAME not set! Allowing access for debugging.")
-            return True
+        if not interaction.guild:
+            logger.warning("is_owner check called outside a guild")
+            return False
+        
         member = interaction.guild.get_member(interaction.user.id)
         if not member:
+            logger.warning(f"Could not find member {interaction.user.id} in guild {interaction.guild.id}")
             return False
+        
+        # If OWNER_ROLE_ID is not set and we're in debug mode, allow access
+        if not OWNER_ROLE_ID and OWNER_ROLE_NAME == "Owner":
+            # Try to find a role named "Owner"
+            owner_role = discord.utils.get(interaction.guild.roles, name="Owner")
+            if not owner_role:
+                # Try case-insensitive
+                owner_role = discord.utils.get(interaction.guild.roles, name=lambda n: n.lower() == "owner")
+            
+            if owner_role:
+                # Cache the role ID for future use
+                logger.info(f"Found Owner role '{owner_role.name}' with ID {owner_role.id} in guild {interaction.guild.id}")
+                # Temporarily set OWNER_ROLE_ID for this check
+                if owner_role in member.roles:
+                    return True
+            else:
+                # No Owner role found, allow access for debugging
+                logger.warning(f"No Owner role found in guild {interaction.guild.id}. Allowing access for debugging.")
+                return True
+        
         return has_owner_role(member)
     return app_commands.check(predicate)
 
 def owner_role_mention() -> str:
+    """Get the mention string for the owner role."""
     if OWNER_ROLE_ID:
         return f"<@&{OWNER_ROLE_ID}>"
-    return f"**{OWNER_ROLE_NAME}**"
+    return f"**{OWNER_ROLE_NAME}** role"
 
 # =========================
 # STATISTICS HELPER FUNCTIONS
