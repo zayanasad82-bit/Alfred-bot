@@ -249,7 +249,7 @@ class AsyncDatabase:
                 last_updated TEXT
             )""",
             # =========================
-            # STATISTICS TABLES
+            # STATISTICS TABLES - FIXED SCHEMA
             # =========================
             """CREATE TABLE IF NOT EXISTS user_stats (
                 user_id INTEGER,
@@ -362,721 +362,903 @@ class AsyncDatabase:
 db = AsyncDatabase()
 
 # =========================
-# STATISTICS HELPER FUNCTIONS
+# STATISTICS HELPER FUNCTIONS - FIXED
 # =========================
+
+async def reset_weekly_monthly_stats():
+    """Reset weekly and monthly message counts if needed."""
+    today = datetime.now()
+    current_week = today.strftime("%Y-%W")
+    current_month = today.strftime("%Y-%m")
+    
+    # Check if we need to reset weekly stats
+    result = await db.fetchone(
+        "SELECT value FROM bot_state WHERE key = 'current_week'"
+    )
+    if result:
+        stored_week = result[0]
+        if stored_week != current_week:
+            # Reset weekly counts for all users
+            await db.execute(
+                "UPDATE user_stats SET messages_week = 0"
+            )
+            await db.execute(
+                "UPDATE bot_state SET value = ? WHERE key = 'current_week'",
+                (current_week,)
+            )
+            await db.commit()
+            logger.info(f"Reset weekly stats for week {current_week}")
+    else:
+        await db.execute(
+            "INSERT INTO bot_state (key, value) VALUES ('current_week', ?)",
+            (current_week,)
+        )
+        await db.commit()
+    
+    # Check if we need to reset monthly stats
+    result = await db.fetchone(
+        "SELECT value FROM bot_state WHERE key = 'current_month'"
+    )
+    if result:
+        stored_month = result[0]
+        if stored_month != current_month:
+            # Reset monthly counts for all users
+            await db.execute(
+                "UPDATE user_stats SET messages_month = 0"
+            )
+            await db.execute(
+                "UPDATE bot_state SET value = ? WHERE key = 'current_month'",
+                (current_month,)
+            )
+            await db.commit()
+            logger.info(f"Reset monthly stats for month {current_month}")
+    else:
+        await db.execute(
+            "INSERT INTO bot_state (key, value) VALUES ('current_month', ?)",
+            (current_month,)
+        )
+        await db.commit()
+
+async def initialize_bot_state():
+    """Initialize bot state table if it doesn't exist."""
+    await db.execute(
+        """CREATE TABLE IF NOT EXISTS bot_state (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )"""
+    )
+    await db.commit()
+    
+    # Initialize week and month tracking
+    today = datetime.now()
+    current_week = today.strftime("%Y-%W")
+    current_month = today.strftime("%Y-%m")
+    
+    result = await db.fetchone(
+        "SELECT value FROM bot_state WHERE key = 'current_week'"
+    )
+    if not result:
+        await db.execute(
+            "INSERT INTO bot_state (key, value) VALUES ('current_week', ?)",
+            (current_week,)
+        )
+        await db.commit()
+    
+    result = await db.fetchone(
+        "SELECT value FROM bot_state WHERE key = 'current_month'"
+    )
+    if not result:
+        await db.execute(
+            "INSERT INTO bot_state (key, value) VALUES ('current_month', ?)",
+            (current_month,)
+        )
+        await db.commit()
 
 async def update_user_stats(user_id: int, guild_id: int, message: discord.Message = None, is_command: bool = False):
     """Update user statistics for a message or command."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
-    month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
-    
-    # Get current stats
-    result = await db.fetchone(
-        "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
-    )
-    
-    if not result:
-        # Initialize stats
-        await db.execute(
-            """INSERT INTO user_stats (
-                user_id, guild_id, total_messages, messages_today, messages_week, messages_month,
-                commands_used, updated_at, last_message_time
-            ) VALUES (?, ?, 0, 0, 0, 0, 0, ?, ?)""",
-            (user_id, guild_id, datetime.now().isoformat(), datetime.now().isoformat())
-        )
-        await db.commit()
+    try:
+        # Reset weekly/monthly stats if needed
+        await reset_weekly_monthly_stats()
+        
+        today = datetime.now().strftime("%Y-%m-%d")
+        
+        # Get current stats
         result = await db.fetchone(
             "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
             (user_id, guild_id)
         )
-    
-    current_stats = {
-        "total_messages": result[2],
-        "messages_today": result[3],
-        "messages_week": result[4],
-        "messages_month": result[5],
-        "commands_used": result[6],
-        "attachments_sent": result[7],
-        "images_sent": result[8],
-        "gifs_sent": result[9],
-        "stickers_used": result[10],
-        "reactions_given": result[11],
-        "reactions_received": result[12],
-        "links_shared": result[13],
-        "mentions_sent": result[14],
-        "mentions_received": result[15],
-        "longest_message_length": result[16],
-        "total_message_length": result[17],
-        "message_count_with_content": result[18],
-        "favorite_channel_id": result[19],
-        "favorite_emoji": result[20],
-        "voice_hours": result[21],
-        "voice_join_count": result[22],
-        "longest_vc_session": result[23],
-        "current_vc_session_start": result[24],
-        "current_message_streak": result[25],
-        "longest_message_streak": result[26],
-        "last_message_time": result[27],
-    }
-    
-    # Determine if message streak continues
-    current_streak = current_stats["current_message_streak"]
-    if current_stats["last_message_time"]:
-        last_msg_time = datetime.fromisoformat(current_stats["last_message_time"])
-        time_diff = (datetime.now() - last_msg_time).total_seconds()
-        if time_diff < 3600:  # Within 1 hour
-            current_streak += 1
+        
+        if not result:
+            # Initialize stats
+            await db.execute(
+                """INSERT INTO user_stats (
+                    user_id, guild_id, total_messages, messages_today, messages_week, messages_month,
+                    commands_used, updated_at, last_message_time
+                ) VALUES (?, ?, 0, 0, 0, 0, 0, ?, ?)""",
+                (user_id, guild_id, datetime.now().isoformat(), datetime.now().isoformat())
+            )
+            await db.commit()
+            result = await db.fetchone(
+                "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id)
+            )
+            if not result:
+                logger.error(f"Failed to create user stats for {user_id} in guild {guild_id}")
+                return
+        
+        # Parse result - using indexes carefully
+        try:
+            current_stats = {
+                "total_messages": result[2] if len(result) > 2 else 0,
+                "messages_today": result[3] if len(result) > 3 else 0,
+                "messages_week": result[4] if len(result) > 4 else 0,
+                "messages_month": result[5] if len(result) > 5 else 0,
+                "commands_used": result[6] if len(result) > 6 else 0,
+                "attachments_sent": result[7] if len(result) > 7 else 0,
+                "images_sent": result[8] if len(result) > 8 else 0,
+                "gifs_sent": result[9] if len(result) > 9 else 0,
+                "stickers_used": result[10] if len(result) > 10 else 0,
+                "reactions_given": result[11] if len(result) > 11 else 0,
+                "reactions_received": result[12] if len(result) > 12 else 0,
+                "links_shared": result[13] if len(result) > 13 else 0,
+                "mentions_sent": result[14] if len(result) > 14 else 0,
+                "mentions_received": result[15] if len(result) > 15 else 0,
+                "longest_message_length": result[16] if len(result) > 16 else 0,
+                "total_message_length": result[17] if len(result) > 17 else 0,
+                "message_count_with_content": result[18] if len(result) > 18 else 0,
+                "favorite_channel_id": result[19] if len(result) > 19 else 0,
+                "favorite_emoji": result[20] if len(result) > 20 else "",
+                "voice_hours": result[21] if len(result) > 21 else 0.0,
+                "voice_join_count": result[22] if len(result) > 22 else 0,
+                "longest_vc_session": result[23] if len(result) > 23 else 0,
+                "current_vc_session_start": result[24] if len(result) > 24 else 0,
+                "current_message_streak": result[25] if len(result) > 25 else 0,
+                "longest_message_streak": result[26] if len(result) > 26 else 0,
+                "last_message_time": result[27] if len(result) > 27 else None,
+            }
+        except IndexError as e:
+            logger.error(f"Index error parsing user_stats: {e}. Result length: {len(result) if result else 0}")
+            return
+        
+        # Determine if message streak continues
+        current_streak = current_stats["current_message_streak"]
+        if current_stats["last_message_time"]:
+            try:
+                last_msg_time = datetime.fromisoformat(current_stats["last_message_time"])
+                time_diff = (datetime.now() - last_msg_time).total_seconds()
+                if time_diff < 3600:  # Within 1 hour
+                    current_streak += 1
+                else:
+                    current_streak = 1
+            except (ValueError, TypeError):
+                current_streak = 1
         else:
             current_streak = 1
-    else:
-        current_streak = 1
-    
-    if current_streak > current_stats["longest_message_streak"]:
-        longest_streak = current_streak
-    else:
-        longest_streak = current_stats["longest_message_streak"]
-    
-    updates = {
-        "total_messages": current_stats["total_messages"] + 1,
-        "messages_today": current_stats["messages_today"] + 1,
-        "messages_week": current_stats["messages_week"] + 1,
-        "messages_month": current_stats["messages_month"] + 1,
-        "current_message_streak": current_streak,
-        "longest_message_streak": longest_streak,
-        "last_message_time": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
-    }
-    
-    if is_command:
-        updates["commands_used"] = current_stats["commands_used"] + 1
-    
-    if message:
-        # Track attachments
-        if message.attachments:
-            updates["attachments_sent"] = current_stats["attachments_sent"] + len(message.attachments)
-            for att in message.attachments:
-                if att.content_type and att.content_type.startswith("image/"):
-                    updates["images_sent"] = current_stats["images_sent"] + 1
-                elif att.content_type and att.content_type == "image/gif":
-                    updates["gifs_sent"] = current_stats["gifs_sent"] + 1
         
-        # Track stickers
-        if message.stickers:
-            updates["stickers_used"] = current_stats["stickers_used"] + len(message.stickers)
+        if current_streak > current_stats["longest_message_streak"]:
+            longest_streak = current_streak
+        else:
+            longest_streak = current_stats["longest_message_streak"]
         
-        # Track links
-        link_pattern = r'https?://[^\s]+|www\.[^\s]+'
-        if re.search(link_pattern, message.content):
-            updates["links_shared"] = current_stats["links_shared"] + 1
+        updates = {
+            "total_messages": current_stats["total_messages"] + 1,
+            "messages_today": current_stats["messages_today"] + 1,
+            "messages_week": current_stats["messages_week"] + 1,
+            "messages_month": current_stats["messages_month"] + 1,
+            "current_message_streak": current_streak,
+            "longest_message_streak": longest_streak,
+            "last_message_time": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
         
-        # Track mentions sent
-        if message.mentions:
-            updates["mentions_sent"] = current_stats["mentions_sent"] + len(message.mentions)
+        if is_command:
+            updates["commands_used"] = current_stats["commands_used"] + 1
         
-        # Track message length
-        content_len = len(message.content)
-        updates["total_message_length"] = current_stats["total_message_length"] + content_len
-        updates["message_count_with_content"] = current_stats["message_count_with_content"] + 1
-        if content_len > current_stats["longest_message_length"]:
-            updates["longest_message_length"] = content_len
-        
-        # Track favorite channel
-        if message.channel.id != current_stats.get("favorite_channel_id", 0):
-            # Count messages per channel in the database
-            channel_count_result = await db.fetchone(
-                "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND user_id=? AND channel_id=?",
-                (guild_id, user_id, message.channel.id)
-            )
-            channel_count = channel_count_result[0] if channel_count_result else 0
+        if message:
+            # Track attachments
+            if message.attachments:
+                updates["attachments_sent"] = current_stats["attachments_sent"] + len(message.attachments)
+                for att in message.attachments:
+                    if att.content_type and att.content_type.startswith("image/"):
+                        updates["images_sent"] = current_stats["images_sent"] + 1
+                    elif att.content_type and att.content_type == "image/gif":
+                        updates["gifs_sent"] = current_stats["gifs_sent"] + 1
             
-            fav_channel_result = await db.fetchone(
-                "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND user_id=? AND channel_id=?",
-                (guild_id, user_id, current_stats.get("favorite_channel_id", 0))
-            )
-            fav_count = fav_channel_result[0] if fav_channel_result else 0
+            # Track stickers
+            if message.stickers:
+                updates["stickers_used"] = current_stats["stickers_used"] + len(message.stickers)
             
-            if channel_count > fav_count:
-                updates["favorite_channel_id"] = message.channel.id
-    
-    # Update daily user stats
-    await db.execute(
-        """INSERT INTO daily_user_stats (user_id, guild_id, date, message_count)
-           VALUES (?, ?, ?, 1)
-           ON CONFLICT(user_id, guild_id, date)
-           DO UPDATE SET message_count = message_count + 1""",
-        (user_id, guild_id, today)
-    )
-    
-    # Build update query
-    set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-    values = list(updates.values())
-    values.extend([user_id, guild_id])
-    
-    await db.execute(
-        f"UPDATE user_stats SET {set_clause} WHERE user_id=? AND guild_id=?",
-        tuple(values)
-    )
-    await db.commit()
-    
-    # Update server stats
-    await update_server_stats(guild_id, message, is_command)
-    
-    # Update channel stats
-    if message:
-        await update_channel_stats(guild_id, message.channel.id, user_id, message.content)
+            # Track links
+            link_pattern = r'https?://[^\s]+|www\.[^\s]+'
+            if re.search(link_pattern, message.content):
+                updates["links_shared"] = current_stats["links_shared"] + 1
+            
+            # Track mentions sent
+            if message.mentions:
+                updates["mentions_sent"] = current_stats["mentions_sent"] + len(message.mentions)
+            
+            # Track message length
+            content_len = len(message.content)
+            updates["total_message_length"] = current_stats["total_message_length"] + content_len
+            updates["message_count_with_content"] = current_stats["message_count_with_content"] + 1
+            if content_len > current_stats["longest_message_length"]:
+                updates["longest_message_length"] = content_len
+            
+            # Track favorite channel (using message_stats table for accurate counts)
+            if message.channel.id:
+                channel_count_result = await db.fetchone(
+                    "SELECT count FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=? AND date=?",
+                    (guild_id, message.channel.id, user_id, today)
+                )
+                channel_count = channel_count_result[0] if channel_count_result else 1
+                
+                fav_id = current_stats.get("favorite_channel_id", 0)
+                if fav_id:
+                    fav_count_result = await db.fetchone(
+                        "SELECT count FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=? AND date=?",
+                        (guild_id, fav_id, user_id, today)
+                    )
+                    fav_count = fav_count_result[0] if fav_count_result else 0
+                    if channel_count > fav_count:
+                        updates["favorite_channel_id"] = message.channel.id
+                else:
+                    updates["favorite_channel_id"] = message.channel.id
+        
+        # Update daily user stats
+        await db.execute(
+            """INSERT INTO daily_user_stats (user_id, guild_id, date, message_count)
+               VALUES (?, ?, ?, 1)
+               ON CONFLICT(user_id, guild_id, date)
+               DO UPDATE SET message_count = message_count + 1""",
+            (user_id, guild_id, today)
+        )
+        
+        # Build update query
+        if updates:
+            set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+            values = list(updates.values())
+            values.extend([user_id, guild_id])
+            
+            await db.execute(
+                f"UPDATE user_stats SET {set_clause} WHERE user_id=? AND guild_id=?",
+                tuple(values)
+            )
+            await db.commit()
+            logger.debug(f"Updated user stats for {user_id} in guild {guild_id}")
+        
+        # Update server stats
+        await update_server_stats(guild_id, message, is_command)
+        
+        # Update channel stats
+        if message:
+            await update_channel_stats(guild_id, message.channel.id, user_id, message.content)
+            
+    except Exception as e:
+        logger.error(f"Error updating user stats: {e}")
+        logger.error(traceback.format_exc())
 
 async def update_server_stats(guild_id: int, message: discord.Message = None, is_command: bool = False):
     """Update server-wide statistics."""
-    result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
-    
-    if not result:
-        await db.execute(
-            """INSERT INTO server_stats (
-                guild_id, total_messages, total_vc_hours, total_commands_executed,
-                total_files_uploaded, total_reactions_used, total_moderation_actions,
-                updated_at
-            ) VALUES (?, 0, 0, 0, 0, 0, 0, ?)""",
-            (guild_id, datetime.now().isoformat())
-        )
-        await db.commit()
+    try:
         result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
-    
-    updates = {}
-    if message:
-        updates["total_messages"] = result[1] + 1
-        if message.attachments:
-            updates["total_files_uploaded"] = result[5] + len(message.attachments)
-        if message.reactions:
-            updates["total_reactions_used"] = result[6] + len(message.reactions)
-    
-    if is_command:
-        updates["total_commands_executed"] = result[3] + 1
-    
-    if updates:
-        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-        values = list(updates.values())
-        values.append(datetime.now().isoformat())
-        values.append(guild_id)
-        await db.execute(
-            f"UPDATE server_stats SET {set_clause}, updated_at=? WHERE guild_id=?",
-            tuple(values)
-        )
-        await db.commit()
-    
-    # Update most active user and channel periodically
-    await update_most_active(guild_id)
+        
+        if not result:
+            await db.execute(
+                """INSERT INTO server_stats (
+                    guild_id, total_messages, total_vc_hours, total_commands_executed,
+                    total_files_uploaded, total_reactions_used, total_moderation_actions,
+                    updated_at
+                ) VALUES (?, 0, 0, 0, 0, 0, 0, ?)""",
+                (guild_id, datetime.now().isoformat())
+            )
+            await db.commit()
+            result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
+            if not result:
+                logger.error(f"Failed to create server stats for guild {guild_id}")
+                return
+        
+        updates = {}
+        if message:
+            updates["total_messages"] = (result[1] if result[1] is not None else 0) + 1
+            if message.attachments:
+                updates["total_files_uploaded"] = (result[6] if result[6] is not None else 0) + len(message.attachments)
+        
+        if is_command:
+            updates["total_commands_executed"] = (result[3] if result[3] is not None else 0) + 1
+        
+        if updates:
+            set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+            values = list(updates.values())
+            values.append(datetime.now().isoformat())
+            values.append(guild_id)
+            await db.execute(
+                f"UPDATE server_stats SET {set_clause}, updated_at=? WHERE guild_id=?",
+                tuple(values)
+            )
+            await db.commit()
+            logger.debug(f"Updated server stats for guild {guild_id}")
+        
+        # Update most active user and channel periodically
+        await update_most_active(guild_id)
+        
+    except Exception as e:
+        logger.error(f"Error updating server stats: {e}")
 
 async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, content: str):
     """Update channel statistics."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    
-    result = await db.fetchone(
-        "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
-        (guild_id, channel_id)
-    )
-    
-    if not result:
-        await db.execute(
-            """INSERT INTO channel_stats (
-                guild_id, channel_id, total_messages, most_active_user_id,
-                total_days_tracked, total_message_length, updated_at
-            ) VALUES (?, ?, 0, 0, 0, 0, ?)""",
-            (guild_id, channel_id, datetime.now().isoformat())
-        )
-        await db.commit()
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        
         result = await db.fetchone(
             "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
             (guild_id, channel_id)
         )
-    
-    updates = {
-        "total_messages": result[2] + 1,
-        "total_message_length": result[5] + len(content),
-        "updated_at": datetime.now().isoformat()
-    }
-    
-    # Update daily channel stats
-    await db.execute(
-        """INSERT INTO daily_channel_stats (guild_id, channel_id, date, message_count, unique_users)
-           VALUES (?, ?, ?, 1, 1)
-           ON CONFLICT(guild_id, channel_id, date)
-           DO UPDATE SET message_count = message_count + 1""",
-        (guild_id, channel_id, today)
-    )
-    
-    # Update most active user for channel
-    user_count = await db.fetchone(
-        "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=?",
-        (guild_id, channel_id, user_id)
-    )
-    current_most = result[3]
-    if current_most:
-        current_count = await db.fetchone(
-            "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=?",
-            (guild_id, channel_id, current_most)
+        
+        if not result:
+            await db.execute(
+                """INSERT INTO channel_stats (
+                    guild_id, channel_id, total_messages, most_active_user_id,
+                    total_days_tracked, total_message_length, updated_at
+                ) VALUES (?, ?, 0, 0, 0, 0, ?)""",
+                (guild_id, channel_id, datetime.now().isoformat())
+            )
+            await db.commit()
+            result = await db.fetchone(
+                "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
+                (guild_id, channel_id)
+            )
+            if not result:
+                logger.error(f"Failed to create channel stats for channel {channel_id}")
+                return
+        
+        updates = {
+            "total_messages": (result[2] if result[2] is not None else 0) + 1,
+            "total_message_length": (result[5] if result[5] is not None else 0) + len(content),
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        # Update daily channel stats
+        await db.execute(
+            """INSERT INTO daily_channel_stats (guild_id, channel_id, date, message_count, unique_users)
+               VALUES (?, ?, ?, 1, 1)
+               ON CONFLICT(guild_id, channel_id, date)
+               DO UPDATE SET message_count = message_count + 1""",
+            (guild_id, channel_id, today)
         )
-        current_count_val = current_count[0] if current_count else 0
-        new_count = user_count[0] if user_count else 0
-        if new_count > current_count_val:
+        
+        # Update most active user for channel
+        user_count = await db.fetchone(
+            "SELECT count FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=? AND date=?",
+            (guild_id, channel_id, user_id, today)
+        )
+        current_most = result[3] if result[3] is not None else 0
+        if current_most:
+            current_count = await db.fetchone(
+                "SELECT count FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=? AND date=?",
+                (guild_id, channel_id, current_most, today)
+            )
+            current_count_val = current_count[0] if current_count else 0
+            new_count = user_count[0] if user_count else 1
+            if new_count > current_count_val:
+                updates["most_active_user_id"] = user_id
+        else:
             updates["most_active_user_id"] = user_id
-    else:
-        updates["most_active_user_id"] = user_id
-    
-    # Update peak activity
-    hour = datetime.now().hour
-    current_peak_hour = result[6] or 0
-    if hour > current_peak_hour:
-        updates["peak_hour"] = hour
-    
-    day = datetime.now().strftime("%A")
-    current_peak_day = result[7] or ""
-    if day and not current_peak_day:
-        updates["peak_day"] = day
-    
-    # Update total days tracked
-    day_count = await db.fetchone(
-        "SELECT COUNT(DISTINCT date) FROM daily_channel_stats WHERE guild_id=? AND channel_id=?",
-        (guild_id, channel_id)
-    )
-    if day_count and day_count[0] > 0:
-        updates["total_days_tracked"] = day_count[0]
-    
-    set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-    values = list(updates.values())
-    values.extend([guild_id, channel_id])
-    
-    await db.execute(
-        f"UPDATE channel_stats SET {set_clause} WHERE guild_id=? AND channel_id=?",
-        tuple(values)
-    )
-    await db.commit()
+        
+        # Update peak activity
+        hour = datetime.now().hour
+        current_peak_hour = result[6] if result[6] is not None else 0
+        if hour > current_peak_hour:
+            updates["peak_hour"] = hour
+        
+        # Update peak day
+        day = datetime.now().strftime("%A")
+        current_peak_day = result[7] if result[7] is not None else ""
+        if day and not current_peak_day:
+            updates["peak_day"] = day
+        
+        # Update total days tracked
+        day_count = await db.fetchone(
+            "SELECT COUNT(DISTINCT date) FROM daily_channel_stats WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id)
+        )
+        if day_count and day_count[0] > 0:
+            updates["total_days_tracked"] = day_count[0]
+        
+        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+        values = list(updates.values())
+        values.extend([guild_id, channel_id])
+        
+        await db.execute(
+            f"UPDATE channel_stats SET {set_clause} WHERE guild_id=? AND channel_id=?",
+            tuple(values)
+        )
+        await db.commit()
+        logger.debug(f"Updated channel stats for channel {channel_id}")
+        
+    except Exception as e:
+        logger.error(f"Error updating channel stats: {e}")
 
 async def update_most_active(guild_id: int):
     """Update the most active user and channel in server stats."""
-    # Most active user
-    user_result = await db.fetchone(
-        """SELECT user_id, SUM(message_count) as total
-           FROM member_message_counts
-           WHERE guild_id=?
-           GROUP BY user_id
-           ORDER BY total DESC
-           LIMIT 1""",
-        (guild_id,)
-    )
-    
-    if user_result:
-        await db.execute(
-            "UPDATE server_stats SET most_active_user_id=? WHERE guild_id=?",
-            (user_result[0], guild_id)
+    try:
+        # Most active user
+        user_result = await db.fetchone(
+            """SELECT user_id, SUM(message_count) as total
+               FROM member_message_counts
+               WHERE guild_id=?
+               GROUP BY user_id
+               ORDER BY total DESC
+               LIMIT 1""",
+            (guild_id,)
         )
-        await db.commit()
-    
-    # Most active channel
-    channel_result = await db.fetchone(
-        """SELECT channel_id, COUNT(*) as total
-           FROM message_stats
-           WHERE guild_id=?
-           GROUP BY channel_id
-           ORDER BY total DESC
-           LIMIT 1""",
-        (guild_id,)
-    )
-    
-    if channel_result:
-        await db.execute(
-            "UPDATE server_stats SET most_active_channel_id=? WHERE guild_id=?",
-            (channel_result[0], guild_id)
+        
+        if user_result and user_result[0]:
+            await db.execute(
+                "UPDATE server_stats SET most_active_user_id=? WHERE guild_id=?",
+                (user_result[0], guild_id)
+            )
+            await db.commit()
+        
+        # Most active channel
+        channel_result = await db.fetchone(
+            """SELECT channel_id, COUNT(*) as total
+               FROM message_stats
+               WHERE guild_id=?
+               GROUP BY channel_id
+               ORDER BY total DESC
+               LIMIT 1""",
+            (guild_id,)
         )
-        await db.commit()
+        
+        if channel_result and channel_result[0]:
+            await db.execute(
+                "UPDATE server_stats SET most_active_channel_id=? WHERE guild_id=?",
+                (channel_result[0], guild_id)
+            )
+            await db.commit()
+            
+    except Exception as e:
+        logger.error(f"Error updating most active: {e}")
 
 async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, duration: float = 0):
     """Update voice statistics for a user."""
-    result = await db.fetchone(
-        "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
-    )
-    
-    if not result:
-        await db.execute(
-            """INSERT INTO user_stats (
-                user_id, guild_id, voice_hours, voice_join_count, updated_at
-            ) VALUES (?, ?, 0, 0, ?)""",
-            (user_id, guild_id, datetime.now().isoformat())
-        )
-        await db.commit()
+    try:
         result = await db.fetchone(
             "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
             (user_id, guild_id)
         )
-    
-    if is_join:
-        # User joined voice
-        updates = {
-            "voice_join_count": result[22] + 1,
-            "current_vc_session_start": int(time.time()),
-            "updated_at": datetime.now().isoformat()
-        }
         
-        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
-        values = list(updates.values())
-        values.extend([user_id, guild_id])
+        if not result:
+            await db.execute(
+                """INSERT INTO user_stats (
+                    user_id, guild_id, voice_hours, voice_join_count, updated_at
+                ) VALUES (?, ?, 0, 0, ?)""",
+                (user_id, guild_id, datetime.now().isoformat())
+            )
+            await db.commit()
+            result = await db.fetchone(
+                "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id)
+            )
+            if not result:
+                logger.error(f"Failed to create user stats for voice tracking for {user_id}")
+                return
         
-        await db.execute(
-            f"UPDATE user_stats SET {set_clause} WHERE user_id=? AND guild_id=?",
-            tuple(values)
-        )
-        await db.commit()
-    else:
-        # User left voice - update total hours
-        session_start = result[24]
-        if session_start > 0:
-            session_duration = int(time.time()) - session_start
-            if session_duration > 0:
-                hours = session_duration / 3600.0
-                new_total_hours = result[21] + hours
-                
-                # Update longest session
-                longest = result[23]
-                if session_duration > longest:
-                    longest = session_duration
-                
-                await db.execute(
-                    """UPDATE user_stats
-                       SET voice_hours = ?, longest_vc_session = ?, current_vc_session_start = 0, updated_at = ?
-                       WHERE user_id = ? AND guild_id = ?""",
-                    (new_total_hours, longest, datetime.now().isoformat(), user_id, guild_id)
-                )
-                await db.commit()
-                
-                # Update server total VC hours
-                server_result = await db.fetchone(
-                    "SELECT total_vc_hours FROM server_stats WHERE guild_id=?",
-                    (guild_id,)
-                )
-                if server_result:
+        if is_join:
+            # User joined voice
+            voice_join_count = (result[22] if len(result) > 22 and result[22] is not None else 0) + 1
+            await db.execute(
+                """UPDATE user_stats
+                   SET voice_join_count = ?, current_vc_session_start = ?, updated_at = ?
+                   WHERE user_id = ? AND guild_id = ?""",
+                (voice_join_count, int(time.time()), datetime.now().isoformat(), user_id, guild_id)
+            )
+            await db.commit()
+            logger.debug(f"User {user_id} joined voice in guild {guild_id}")
+        else:
+            # User left voice - update total hours
+            session_start = result[24] if len(result) > 24 else 0
+            if session_start and session_start > 0:
+                session_duration = int(time.time()) - session_start
+                if session_duration > 0:
+                    hours = session_duration / 3600.0
+                    current_hours = result[21] if len(result) > 21 and result[21] is not None else 0.0
+                    new_total_hours = current_hours + hours
+                    
+                    # Update longest session
+                    longest = result[23] if len(result) > 23 and result[23] is not None else 0
+                    if session_duration > longest:
+                        longest = session_duration
+                    
                     await db.execute(
-                        "UPDATE server_stats SET total_vc_hours = ? WHERE guild_id=?",
-                        (server_result[0] + hours, guild_id)
+                        """UPDATE user_stats
+                           SET voice_hours = ?, longest_vc_session = ?, current_vc_session_start = 0, updated_at = ?
+                           WHERE user_id = ? AND guild_id = ?""",
+                        (new_total_hours, longest, datetime.now().isoformat(), user_id, guild_id)
                     )
                     await db.commit()
+                    
+                    # Update server total VC hours
+                    server_result = await db.fetchone(
+                        "SELECT total_vc_hours FROM server_stats WHERE guild_id=?",
+                        (guild_id,)
+                    )
+                    if server_result:
+                        current_total = server_result[0] if server_result[0] is not None else 0.0
+                        await db.execute(
+                            "UPDATE server_stats SET total_vc_hours = ? WHERE guild_id=?",
+                            (current_total + hours, guild_id)
+                        )
+                        await db.commit()
+                    
+                    logger.debug(f"User {user_id} left voice after {session_duration}s in guild {guild_id}")
+                    
+    except Exception as e:
+        logger.error(f"Error updating voice stats: {e}")
 
 async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool = True):
     """Track reaction usage."""
-    if is_given:
-        # Track reactions given
-        await db.execute(
-            """INSERT INTO user_stats (user_id, guild_id, reactions_given, updated_at)
-               VALUES (?, ?, 1, ?)
-               ON CONFLICT(user_id, guild_id)
-               DO UPDATE SET reactions_given = reactions_given + 1, updated_at = excluded.updated_at""",
-            (user_id, guild_id, datetime.now().isoformat())
-        )
-        await db.commit()
-        
-        # Track favorite emoji
-        emoji_result = await db.fetchone(
-            "SELECT count FROM user_emoji_stats WHERE user_id=? AND guild_id=? AND emoji=?",
-            (user_id, guild_id, str(emoji))
-        )
-        if emoji_result:
-            await db.execute(
-                "UPDATE user_emoji_stats SET count = count + 1 WHERE user_id=? AND guild_id=? AND emoji=?",
-                (user_id, guild_id, str(emoji))
+    try:
+        if is_given:
+            # Track reactions given
+            result = await db.fetchone(
+                "SELECT reactions_given FROM user_stats WHERE user_id=? AND guild_id=?",
+                (user_id, guild_id)
             )
-        else:
-            await db.execute(
-                "INSERT INTO user_emoji_stats (user_id, guild_id, emoji, count) VALUES (?, ?, ?, 1)",
-                (user_id, guild_id, str(emoji))
+            
+            if result:
+                new_count = (result[0] if result[0] is not None else 0) + 1
+                await db.execute(
+                    """UPDATE user_stats SET reactions_given = ?, updated_at = ?
+                       WHERE user_id=? AND guild_id=?""",
+                    (new_count, datetime.now().isoformat(), user_id, guild_id)
+                )
+            else:
+                await db.execute(
+                    """INSERT INTO user_stats (user_id, guild_id, reactions_given, updated_at)
+                       VALUES (?, ?, 1, ?)""",
+                    (user_id, guild_id, datetime.now().isoformat())
+                )
+            await db.commit()
+            
+            # Track favorite emoji
+            emoji_str = str(emoji)
+            emoji_result = await db.fetchone(
+                "SELECT count FROM user_emoji_stats WHERE user_id=? AND guild_id=? AND emoji=?",
+                (user_id, guild_id, emoji_str)
             )
-        await db.commit()
+            if emoji_result:
+                await db.execute(
+                    "UPDATE user_emoji_stats SET count = count + 1 WHERE user_id=? AND guild_id=? AND emoji=?",
+                    (user_id, guild_id, emoji_str)
+                )
+            else:
+                await db.execute(
+                    "INSERT INTO user_emoji_stats (user_id, guild_id, emoji, count) VALUES (?, ?, ?, 1)",
+                    (user_id, guild_id, emoji_str)
+                )
+            await db.commit()
+            
+            # Update favorite emoji
+            fav_emoji_result = await db.fetchone(
+                """SELECT emoji FROM user_emoji_stats
+                   WHERE user_id=? AND guild_id=?
+                   ORDER BY count DESC LIMIT 1""",
+                (user_id, guild_id)
+            )
+            if fav_emoji_result and fav_emoji_result[0]:
+                await db.execute(
+                    "UPDATE user_stats SET favorite_emoji = ? WHERE user_id=? AND guild_id=?",
+                    (fav_emoji_result[0], user_id, guild_id)
+                )
+                await db.commit()
         
-        # Update favorite emoji
-        fav_emoji_result = await db.fetchone(
-            """SELECT emoji FROM user_emoji_stats
-               WHERE user_id=? AND guild_id=?
-               ORDER BY count DESC LIMIT 1""",
-            (user_id, guild_id)
+        # Track server total reactions
+        server_result = await db.fetchone(
+            "SELECT total_reactions_used FROM server_stats WHERE guild_id=?",
+            (guild_id,)
         )
-        if fav_emoji_result:
+        if server_result:
+            new_total = (server_result[0] if server_result[0] is not None else 0) + 1
             await db.execute(
-                "UPDATE user_stats SET favorite_emoji = ? WHERE user_id=? AND guild_id=?",
-                (fav_emoji_result[0], user_id, guild_id)
+                "UPDATE server_stats SET total_reactions_used = ? WHERE guild_id=?",
+                (new_total, guild_id)
             )
             await db.commit()
-    
-    # Track server total reactions
-    server_result = await db.fetchone(
-        "SELECT total_reactions_used FROM server_stats WHERE guild_id=?",
-        (guild_id,)
-    )
-    if server_result:
-        await db.execute(
-            "UPDATE server_stats SET total_reactions_used = ? WHERE guild_id=?",
-            (server_result[0] + 1, guild_id)
-        )
-        await db.commit()
+            
+    except Exception as e:
+        logger.error(f"Error tracking reaction: {e}")
 
 async def track_moderation_action(guild_id: int, action: str):
     """Track moderation actions."""
-    await db.execute(
-        """INSERT INTO server_stats (guild_id, total_moderation_actions)
-           VALUES (?, 1)
-           ON CONFLICT(guild_id)
-           DO UPDATE SET total_moderation_actions = total_moderation_actions + 1""",
-        (guild_id,)
-    )
-    await db.commit()
+    try:
+        result = await db.fetchone(
+            "SELECT total_moderation_actions FROM server_stats WHERE guild_id=?",
+            (guild_id,)
+        )
+        if result:
+            new_total = (result[0] if result[0] is not None else 0) + 1
+            await db.execute(
+                "UPDATE server_stats SET total_moderation_actions = ? WHERE guild_id=?",
+                (new_total, guild_id)
+            )
+        else:
+            await db.execute(
+                "INSERT INTO server_stats (guild_id, total_moderation_actions) VALUES (?, 1)",
+                (guild_id,)
+            )
+        await db.commit()
+    except Exception as e:
+        logger.error(f"Error tracking moderation action: {e}")
 
 async def get_user_stats(user_id: int, guild_id: int) -> Dict:
     """Get comprehensive user statistics."""
-    result = await db.fetchone(
-        "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
-        (user_id, guild_id)
-    )
-    
-    if not result:
+    try:
+        result = await db.fetchone(
+            "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+            (user_id, guild_id)
+        )
+        
+        if not result:
+            return None
+        
+        return {
+            "user_id": result[0],
+            "guild_id": result[1],
+            "total_messages": result[2] if result[2] is not None else 0,
+            "messages_today": result[3] if result[3] is not None else 0,
+            "messages_week": result[4] if result[4] is not None else 0,
+            "messages_month": result[5] if result[5] is not None else 0,
+            "commands_used": result[6] if result[6] is not None else 0,
+            "attachments_sent": result[7] if result[7] is not None else 0,
+            "images_sent": result[8] if result[8] is not None else 0,
+            "gifs_sent": result[9] if result[9] is not None else 0,
+            "stickers_used": result[10] if result[10] is not None else 0,
+            "reactions_given": result[11] if result[11] is not None else 0,
+            "reactions_received": result[12] if result[12] is not None else 0,
+            "links_shared": result[13] if result[13] is not None else 0,
+            "mentions_sent": result[14] if result[14] is not None else 0,
+            "mentions_received": result[15] if result[15] is not None else 0,
+            "longest_message_length": result[16] if result[16] is not None else 0,
+            "total_message_length": result[17] if result[17] is not None else 0,
+            "message_count_with_content": result[18] if result[18] is not None else 0,
+            "favorite_channel_id": result[19] if result[19] is not None else 0,
+            "favorite_emoji": result[20] if result[20] is not None else "",
+            "voice_hours": result[21] if result[21] is not None else 0.0,
+            "voice_join_count": result[22] if result[22] is not None else 0,
+            "longest_vc_session": result[23] if result[23] is not None else 0,
+            "current_vc_session_start": result[24] if result[24] is not None else 0,
+            "current_message_streak": result[25] if result[25] is not None else 0,
+            "longest_message_streak": result[26] if result[26] is not None else 0,
+            "last_message_time": result[27] if len(result) > 27 else None,
+            "updated_at": result[28] if len(result) > 28 else None,
+        }
+    except Exception as e:
+        logger.error(f"Error getting user stats: {e}")
         return None
-    
-    return {
-        "user_id": result[0],
-        "guild_id": result[1],
-        "total_messages": result[2],
-        "messages_today": result[3],
-        "messages_week": result[4],
-        "messages_month": result[5],
-        "commands_used": result[6],
-        "attachments_sent": result[7],
-        "images_sent": result[8],
-        "gifs_sent": result[9],
-        "stickers_used": result[10],
-        "reactions_given": result[11],
-        "reactions_received": result[12],
-        "links_shared": result[13],
-        "mentions_sent": result[14],
-        "mentions_received": result[15],
-        "longest_message_length": result[16],
-        "total_message_length": result[17],
-        "message_count_with_content": result[18],
-        "favorite_channel_id": result[19],
-        "favorite_emoji": result[20],
-        "voice_hours": result[21],
-        "voice_join_count": result[22],
-        "longest_vc_session": result[23],
-        "current_vc_session_start": result[24],
-        "current_message_streak": result[25],
-        "longest_message_streak": result[26],
-        "last_message_time": result[27],
-        "updated_at": result[28],
-    }
 
 async def get_server_stats(guild_id: int) -> Dict:
     """Get server-wide statistics."""
-    result = await db.fetchone(
-        "SELECT * FROM server_stats WHERE guild_id=?",
-        (guild_id,)
-    )
-    
-    if not result:
+    try:
+        result = await db.fetchone(
+            "SELECT * FROM server_stats WHERE guild_id=?",
+            (guild_id,)
+        )
+        
+        if not result:
+            return None
+        
+        return {
+            "guild_id": result[0],
+            "total_messages": result[1] if result[1] is not None else 0,
+            "total_vc_hours": result[2] if result[2] is not None else 0.0,
+            "total_commands_executed": result[3] if result[3] is not None else 0,
+            "most_active_user_id": result[4] if result[4] is not None else 0,
+            "most_active_channel_id": result[5] if result[5] is not None else 0,
+            "total_files_uploaded": result[6] if result[6] is not None else 0,
+            "total_reactions_used": result[7] if result[7] is not None else 0,
+            "total_moderation_actions": result[8] if result[8] is not None else 0,
+            "updated_at": result[9] if len(result) > 9 else None,
+        }
+    except Exception as e:
+        logger.error(f"Error getting server stats: {e}")
         return None
-    
-    return {
-        "guild_id": result[0],
-        "total_messages": result[1],
-        "total_vc_hours": result[2],
-        "total_commands_executed": result[3],
-        "most_active_user_id": result[4],
-        "most_active_channel_id": result[5],
-        "total_files_uploaded": result[6],
-        "total_reactions_used": result[7],
-        "total_moderation_actions": result[8],
-        "updated_at": result[9],
-    }
 
 async def get_channel_stats(guild_id: int, channel_id: int) -> Dict:
     """Get channel statistics."""
-    result = await db.fetchone(
-        "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
-        (guild_id, channel_id)
-    )
-    
-    if not result:
+    try:
+        result = await db.fetchone(
+            "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id)
+        )
+        
+        if not result:
+            return None
+        
+        return {
+            "guild_id": result[0],
+            "channel_id": result[1],
+            "total_messages": result[2] if result[2] is not None else 0,
+            "most_active_user_id": result[3] if result[3] is not None else 0,
+            "total_days_tracked": result[4] if result[4] is not None else 0,
+            "total_message_length": result[5] if result[5] is not None else 0,
+            "peak_hour": result[6] if result[6] is not None else 0,
+            "peak_day": result[7] if result[7] is not None else "",
+            "updated_at": result[8] if len(result) > 8 else None,
+        }
+    except Exception as e:
+        logger.error(f"Error getting channel stats: {e}")
         return None
-    
-    return {
-        "guild_id": result[0],
-        "channel_id": result[1],
-        "total_messages": result[2],
-        "most_active_user_id": result[3],
-        "total_days_tracked": result[4],
-        "total_message_length": result[5],
-        "peak_hour": result[6],
-        "peak_day": result[7],
-        "updated_at": result[8],
-    }
 
 async def get_leaderboard(guild_id: int, stat_type: str, limit: int = 10) -> List:
     """Get leaderboard for a specific stat type."""
-    query = ""
-    
-    if stat_type == "messages":
-        query = """
-            SELECT user_id, total_messages
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY total_messages DESC
-            LIMIT ?
-        """
-    elif stat_type == "vc_hours":
-        query = """
-            SELECT user_id, voice_hours
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY voice_hours DESC
-            LIMIT ?
-        """
-    elif stat_type == "commands":
-        query = """
-            SELECT user_id, commands_used
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY commands_used DESC
-            LIMIT ?
-        """
-    elif stat_type == "reactions":
-        query = """
-            SELECT user_id, reactions_given
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY reactions_given DESC
-            LIMIT ?
-        """
-    elif stat_type == "attachments":
-        query = """
-            SELECT user_id, attachments_sent
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY attachments_sent DESC
-            LIMIT ?
-        """
-    elif stat_type == "mentions":
-        query = """
-            SELECT user_id, mentions_sent
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY mentions_sent DESC
-            LIMIT ?
-        """
-    elif stat_type == "streak":
-        query = """
-            SELECT user_id, longest_message_streak
-            FROM user_stats
-            WHERE guild_id=?
-            ORDER BY longest_message_streak DESC
-            LIMIT ?
-        """
-    elif stat_type == "channels":
-        query = """
-            SELECT channel_id, total_messages
-            FROM channel_stats
-            WHERE guild_id=?
-            ORDER BY total_messages DESC
-            LIMIT ?
-        """
-    else:
+    try:
+        query = ""
+        
+        if stat_type == "messages":
+            query = """
+                SELECT user_id, total_messages
+                FROM user_stats
+                WHERE guild_id=? AND total_messages > 0
+                ORDER BY total_messages DESC
+                LIMIT ?
+            """
+        elif stat_type == "vc_hours":
+            query = """
+                SELECT user_id, voice_hours
+                FROM user_stats
+                WHERE guild_id=? AND voice_hours > 0
+                ORDER BY voice_hours DESC
+                LIMIT ?
+            """
+        elif stat_type == "commands":
+            query = """
+                SELECT user_id, commands_used
+                FROM user_stats
+                WHERE guild_id=? AND commands_used > 0
+                ORDER BY commands_used DESC
+                LIMIT ?
+            """
+        elif stat_type == "reactions":
+            query = """
+                SELECT user_id, reactions_given
+                FROM user_stats
+                WHERE guild_id=? AND reactions_given > 0
+                ORDER BY reactions_given DESC
+                LIMIT ?
+            """
+        elif stat_type == "attachments":
+            query = """
+                SELECT user_id, attachments_sent
+                FROM user_stats
+                WHERE guild_id=? AND attachments_sent > 0
+                ORDER BY attachments_sent DESC
+                LIMIT ?
+            """
+        elif stat_type == "mentions":
+            query = """
+                SELECT user_id, mentions_sent
+                FROM user_stats
+                WHERE guild_id=? AND mentions_sent > 0
+                ORDER BY mentions_sent DESC
+                LIMIT ?
+            """
+        elif stat_type == "streak":
+            query = """
+                SELECT user_id, longest_message_streak
+                FROM user_stats
+                WHERE guild_id=? AND longest_message_streak > 0
+                ORDER BY longest_message_streak DESC
+                LIMIT ?
+            """
+        elif stat_type == "channels":
+            query = """
+                SELECT channel_id, total_messages
+                FROM channel_stats
+                WHERE guild_id=? AND total_messages > 0
+                ORDER BY total_messages DESC
+                LIMIT ?
+            """
+        else:
+            return []
+        
+        return await db.fetchall(query, (guild_id, limit))
+    except Exception as e:
+        logger.error(f"Error getting leaderboard: {e}")
         return []
-    
-    return await db.fetchall(query, (guild_id, limit))
 
 async def get_fun_titles(user_stats: Dict, guild: discord.Guild, member: discord.Member) -> List[str]:
     """Get fun titles for a user based on their statistics."""
     titles = []
     
-    if user_stats["total_messages"] > 1000:
-        titles.append("💬 Biggest Yapper")
-    elif user_stats["total_messages"] > 500:
-        titles.append("🗣️ Professional Chatter")
-    elif user_stats["total_messages"] > 100:
-        titles.append("📢 Talkative")
-    
-    if user_stats["voice_hours"] > 100:
-        titles.append("🎧 VC Addict")
-    elif user_stats["voice_hours"] > 50:
-        titles.append("🎙️ VC Enthusiast")
-    elif user_stats["voice_hours"] > 10:
-        titles.append("🔊 VC Regular")
-    
-    if user_stats["longest_message_streak"] > 100:
-        titles.append("🔥 Streak God")
-    elif user_stats["longest_message_streak"] > 50:
-        titles.append("⚡ Streak Master")
-    elif user_stats["longest_message_streak"] > 20:
-        titles.append("📈 Streaker")
-    
-    if user_stats["attachments_sent"] > 100:
-        titles.append("📎 Attachment Dealer")
-    elif user_stats["attachments_sent"] > 50:
-        titles.append("📦 Attachment Enthusiast")
-    
-    if user_stats["reactions_given"] > 500:
-        titles.append("🎭 Emoji Criminal")
-    elif user_stats["reactions_given"] > 200:
-        titles.append("😄 Emoji Addict")
-    elif user_stats["reactions_given"] > 50:
-        titles.append("👍 Reaction Giver")
-    
-    if user_stats["links_shared"] > 50:
-        titles.append("🔗 Link Lord")
-    elif user_stats["links_shared"] > 20:
-        titles.append("📎 Linker")
-    
-    if user_stats["commands_used"] > 100:
-        titles.append("🎮 Command Master")
-    elif user_stats["commands_used"] > 50:
-        titles.append("⌨️ Command User")
-    
-    if user_stats["images_sent"] > 100:
-        titles.append("🖼️ Image Lord")
-    elif user_stats["images_sent"] > 50:
-        titles.append("📸 Image Sharer")
-    
-    if user_stats["gifs_sent"] > 50:
-        titles.append("🎬 GIF Master")
-    elif user_stats["gifs_sent"] > 20:
-        titles.append("🎞️ GIF Sharer")
-    
-    if user_stats["stickers_used"] > 50:
-        titles.append("🎨 Sticker Lord")
-    elif user_stats["stickers_used"] > 20:
-        titles.append("🎭 Sticker User")
-    
-    # Midnight Goblin - check messages between midnight and 6 AM
-    # This is tracked via last_message_time
-    if user_stats["last_message_time"]:
-        try:
-            last_msg = datetime.fromisoformat(user_stats["last_message_time"])
-            if 0 <= last_msg.hour < 6:
-                titles.append("🦉 Midnight Goblin")
-        except:
-            pass
-    
-    # Check if user is in the top 10 for any stat
-    top_messages = await db.fetchone(
-        "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND total_messages > ?",
-        (user_stats["guild_id"], user_stats["total_messages"])
-    )
-    if top_messages and top_messages[0] < 10:
-        titles.append("👑 Top Chatter")
-    
-    top_vc = await db.fetchone(
-        "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND voice_hours > ?",
-        (user_stats["guild_id"], user_stats["voice_hours"])
-    )
-    if top_vc and top_vc[0] < 10 and user_stats["voice_hours"] > 0:
-        titles.append("🎵 VC Royalty")
-    
-    if not titles:
+    try:
+        if user_stats["total_messages"] > 1000:
+            titles.append("💬 Biggest Yapper")
+        elif user_stats["total_messages"] > 500:
+            titles.append("🗣️ Professional Chatter")
+        elif user_stats["total_messages"] > 100:
+            titles.append("📢 Talkative")
+        
+        if user_stats["voice_hours"] > 100:
+            titles.append("🎧 VC Addict")
+        elif user_stats["voice_hours"] > 50:
+            titles.append("🎙️ VC Enthusiast")
+        elif user_stats["voice_hours"] > 10:
+            titles.append("🔊 VC Regular")
+        
+        if user_stats["longest_message_streak"] > 100:
+            titles.append("🔥 Streak God")
+        elif user_stats["longest_message_streak"] > 50:
+            titles.append("⚡ Streak Master")
+        elif user_stats["longest_message_streak"] > 20:
+            titles.append("📈 Streaker")
+        
+        if user_stats["attachments_sent"] > 100:
+            titles.append("📎 Attachment Dealer")
+        elif user_stats["attachments_sent"] > 50:
+            titles.append("📦 Attachment Enthusiast")
+        
+        if user_stats["reactions_given"] > 500:
+            titles.append("🎭 Emoji Criminal")
+        elif user_stats["reactions_given"] > 200:
+            titles.append("😄 Emoji Addict")
+        elif user_stats["reactions_given"] > 50:
+            titles.append("👍 Reaction Giver")
+        
+        if user_stats["links_shared"] > 50:
+            titles.append("🔗 Link Lord")
+        elif user_stats["links_shared"] > 20:
+            titles.append("📎 Linker")
+        
+        if user_stats["commands_used"] > 100:
+            titles.append("🎮 Command Master")
+        elif user_stats["commands_used"] > 50:
+            titles.append("⌨️ Command User")
+        
+        if user_stats["images_sent"] > 100:
+            titles.append("🖼️ Image Lord")
+        elif user_stats["images_sent"] > 50:
+            titles.append("📸 Image Sharer")
+        
+        if user_stats["gifs_sent"] > 50:
+            titles.append("🎬 GIF Master")
+        elif user_stats["gifs_sent"] > 20:
+            titles.append("🎞️ GIF Sharer")
+        
+        if user_stats["stickers_used"] > 50:
+            titles.append("🎨 Sticker Lord")
+        elif user_stats["stickers_used"] > 20:
+            titles.append("🎭 Sticker User")
+        
+        # Midnight Goblin - check messages between midnight and 6 AM
+        if user_stats.get("last_message_time"):
+            try:
+                last_msg = datetime.fromisoformat(user_stats["last_message_time"])
+                if 0 <= last_msg.hour < 6:
+                    titles.append("🦉 Midnight Goblin")
+            except:
+                pass
+        
+        # Check if user is in the top 10 for any stat
+        top_messages = await db.fetchone(
+            "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND total_messages > ?",
+            (user_stats["guild_id"], user_stats["total_messages"])
+        )
+        if top_messages and top_messages[0] < 10:
+            titles.append("👑 Top Chatter")
+        
+        top_vc = await db.fetchone(
+            "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND voice_hours > ?",
+            (user_stats["guild_id"], user_stats["voice_hours"])
+        )
+        if top_vc and top_vc[0] < 10 and user_stats["voice_hours"] > 0:
+            titles.append("🎵 VC Royalty")
+        
+        if not titles:
+            titles.append("🌱 Newbie")
+            
+    except Exception as e:
+        logger.error(f"Error getting fun titles: {e}")
         titles.append("🌱 Newbie")
     
     return titles
@@ -3034,13 +3216,22 @@ async def on_reaction_add(reaction, user):
                 await track_reaction(reaction.message.guild.id, reaction.message.author.id, reaction.emoji, is_given=False)
                 
                 # Update user stats for reactions received
-                await db.execute(
-                    """INSERT INTO user_stats (user_id, guild_id, reactions_received, updated_at)
-                       VALUES (?, ?, 1, ?)
-                       ON CONFLICT(user_id, guild_id)
-                       DO UPDATE SET reactions_received = reactions_received + 1, updated_at = excluded.updated_at""",
-                    (reaction.message.author.id, reaction.message.guild.id, datetime.now().isoformat())
+                result = await db.fetchone(
+                    "SELECT reactions_received FROM user_stats WHERE user_id=? AND guild_id=?",
+                    (reaction.message.author.id, reaction.message.guild.id)
                 )
+                if result:
+                    new_count = (result[0] if result[0] is not None else 0) + 1
+                    await db.execute(
+                        "UPDATE user_stats SET reactions_received = ?, updated_at = ? WHERE user_id=? AND guild_id=?",
+                        (new_count, datetime.now().isoformat(), reaction.message.author.id, reaction.message.guild.id)
+                    )
+                else:
+                    await db.execute(
+                        """INSERT INTO user_stats (user_id, guild_id, reactions_received, updated_at)
+                           VALUES (?, ?, 1, ?)""",
+                        (reaction.message.author.id, reaction.message.guild.id, datetime.now().isoformat())
+                    )
                 await db.commit()
     except Exception as e:
         logger.error(f"on_reaction_add error: {e}")
@@ -3087,6 +3278,9 @@ async def on_ready():
 
     _tasks_started = True
 
+    # Initialize bot state for statistics
+    await initialize_bot_state()
+    
     logger.info(f"🤖 Logged in as {bot.user}")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
@@ -5893,6 +6087,7 @@ async def get_ai_response(prompt: str) -> str:
 async def main():
     async with bot:
         await db.connect()
+        await initialize_bot_state()
         await bot.add_cog(ModerationActions(bot))
         await bot.add_cog(RoleManagement(bot))
         await bot.add_cog(VoiceModeration(bot))
