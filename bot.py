@@ -37,7 +37,7 @@ logger = logging.getLogger("HackerBot")
 # =========================
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-OWNER_ROLE_ID = int(os.getenv("OWNER_ROLE_ID", "0"))  # Role ID for owner permissions
+OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -81,11 +81,11 @@ class MyBot(commands.Bot):
                     timestamp=datetime.utcnow()
                 )
                 embed.add_field(name="🤖 Status", value="🟢 Online", inline=True)
-                embed.add_field(name="👑 Owner Role", value=f"<@&{OWNER_ROLE_ID}>" if OWNER_ROLE_ID else "Not set", inline=True)
+                embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
                 embed.add_field(name="📊 Commands", value=str(len(self.tree.get_commands())), inline=True)
-                embed.set_footer(text="Control Panel • Owner Role Only")
+                embed.set_footer(text="Control Panel • Owner Only")
 
-                view = ControlPanelView(self)
+                view = ControlPanelView(self, OWNER_ID)
 
                 try:
                     message = await channel.fetch_message(message_id)
@@ -248,7 +248,9 @@ class AsyncDatabase:
                 message_id INTEGER,
                 last_updated TEXT
             )""",
-            # Statistics Tables
+            # =========================
+            # STATISTICS TABLES - FIXED SCHEMA
+            # =========================
             """CREATE TABLE IF NOT EXISTS user_stats (
                 user_id INTEGER,
                 guild_id INTEGER,
@@ -327,10 +329,6 @@ class AsyncDatabase:
                 message_count INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, guild_id, date)
             )""",
-            """CREATE TABLE IF NOT EXISTS bot_state (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )""",
         ]
         for query in queries:
             self._conn.execute(query)
@@ -364,36 +362,7 @@ class AsyncDatabase:
 db = AsyncDatabase()
 
 # =========================
-# OWNER CHECK FUNCTIONS
-# =========================
-def is_owner():
-    """Check if the user has the Owner role."""
-    async def predicate(interaction: discord.Interaction):
-        if not OWNER_ROLE_ID:
-            logger.warning("OWNER_ROLE_ID not set! Allowing access for debugging.")
-            return True
-        member = interaction.guild.get_member(interaction.user.id)
-        if not member:
-            return False
-        role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
-        return role is not None
-    return app_commands.check(predicate)
-
-def has_owner_role(member: discord.Member) -> bool:
-    """Check if a member has the Owner role."""
-    if not OWNER_ROLE_ID:
-        return False
-    role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
-    return role is not None
-
-def owner_role_mention() -> str:
-    """Get the mention string for the owner role."""
-    if OWNER_ROLE_ID:
-        return f"<@&{OWNER_ROLE_ID}>"
-    return "Owner role not set"
-
-# =========================
-# STATISTICS HELPER FUNCTIONS
+# STATISTICS HELPER FUNCTIONS - FIXED
 # =========================
 
 async def reset_weekly_monthly_stats():
@@ -488,16 +457,19 @@ async def initialize_bot_state():
 async def update_user_stats(user_id: int, guild_id: int, message: discord.Message = None, is_command: bool = False):
     """Update user statistics for a message or command."""
     try:
+        # Reset weekly/monthly stats if needed
         await reset_weekly_monthly_stats()
         
         today = datetime.now().strftime("%Y-%m-%d")
         
+        # Get current stats
         result = await db.fetchone(
             "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
             (user_id, guild_id)
         )
         
         if not result:
+            # Initialize stats
             await db.execute(
                 """INSERT INTO user_stats (
                     user_id, guild_id, total_messages, messages_today, messages_week, messages_month,
@@ -514,6 +486,7 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
                 logger.error(f"Failed to create user stats for {user_id} in guild {guild_id}")
                 return
         
+        # Parse result - using indexes carefully
         try:
             current_stats = {
                 "total_messages": result[2] if len(result) > 2 else 0,
@@ -544,15 +517,16 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
                 "last_message_time": result[27] if len(result) > 27 else None,
             }
         except IndexError as e:
-            logger.error(f"Index error parsing user_stats: {e}")
+            logger.error(f"Index error parsing user_stats: {e}. Result length: {len(result) if result else 0}")
             return
         
+        # Determine if message streak continues
         current_streak = current_stats["current_message_streak"]
         if current_stats["last_message_time"]:
             try:
                 last_msg_time = datetime.fromisoformat(current_stats["last_message_time"])
                 time_diff = (datetime.now() - last_msg_time).total_seconds()
-                if time_diff < 3600:
+                if time_diff < 3600:  # Within 1 hour
                     current_streak += 1
                 else:
                     current_streak = 1
@@ -581,6 +555,7 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
             updates["commands_used"] = current_stats["commands_used"] + 1
         
         if message:
+            # Track attachments
             if message.attachments:
                 updates["attachments_sent"] = current_stats["attachments_sent"] + len(message.attachments)
                 for att in message.attachments:
@@ -589,22 +564,27 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
                     elif att.content_type and att.content_type == "image/gif":
                         updates["gifs_sent"] = current_stats["gifs_sent"] + 1
             
+            # Track stickers
             if message.stickers:
                 updates["stickers_used"] = current_stats["stickers_used"] + len(message.stickers)
             
+            # Track links
             link_pattern = r'https?://[^\s]+|www\.[^\s]+'
             if re.search(link_pattern, message.content):
                 updates["links_shared"] = current_stats["links_shared"] + 1
             
+            # Track mentions sent
             if message.mentions:
                 updates["mentions_sent"] = current_stats["mentions_sent"] + len(message.mentions)
             
+            # Track message length
             content_len = len(message.content)
             updates["total_message_length"] = current_stats["total_message_length"] + content_len
             updates["message_count_with_content"] = current_stats["message_count_with_content"] + 1
             if content_len > current_stats["longest_message_length"]:
                 updates["longest_message_length"] = content_len
             
+            # Track favorite channel (using message_stats table for accurate counts)
             if message.channel.id:
                 channel_count_result = await db.fetchone(
                     "SELECT count FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=? AND date=?",
@@ -624,6 +604,7 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
                 else:
                     updates["favorite_channel_id"] = message.channel.id
         
+        # Update daily user stats
         await db.execute(
             """INSERT INTO daily_user_stats (user_id, guild_id, date, message_count)
                VALUES (?, ?, ?, 1)
@@ -632,6 +613,7 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
             (user_id, guild_id, today)
         )
         
+        # Build update query
         if updates:
             set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
             values = list(updates.values())
@@ -642,9 +624,12 @@ async def update_user_stats(user_id: int, guild_id: int, message: discord.Messag
                 tuple(values)
             )
             await db.commit()
+            logger.debug(f"Updated user stats for {user_id} in guild {guild_id}")
         
+        # Update server stats
         await update_server_stats(guild_id, message, is_command)
         
+        # Update channel stats
         if message:
             await update_channel_stats(guild_id, message.channel.id, user_id, message.content)
             
@@ -669,6 +654,7 @@ async def update_server_stats(guild_id: int, message: discord.Message = None, is
             await db.commit()
             result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
             if not result:
+                logger.error(f"Failed to create server stats for guild {guild_id}")
                 return
         
         updates = {}
@@ -690,7 +676,9 @@ async def update_server_stats(guild_id: int, message: discord.Message = None, is
                 tuple(values)
             )
             await db.commit()
+            logger.debug(f"Updated server stats for guild {guild_id}")
         
+        # Update most active user and channel periodically
         await update_most_active(guild_id)
         
     except Exception as e:
@@ -720,6 +708,7 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
                 (guild_id, channel_id)
             )
             if not result:
+                logger.error(f"Failed to create channel stats for channel {channel_id}")
                 return
         
         updates = {
@@ -728,6 +717,7 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
             "updated_at": datetime.now().isoformat()
         }
         
+        # Update daily channel stats
         await db.execute(
             """INSERT INTO daily_channel_stats (guild_id, channel_id, date, message_count, unique_users)
                VALUES (?, ?, ?, 1, 1)
@@ -736,6 +726,7 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
             (guild_id, channel_id, today)
         )
         
+        # Update most active user for channel
         user_count = await db.fetchone(
             "SELECT count FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=? AND date=?",
             (guild_id, channel_id, user_id, today)
@@ -753,16 +744,19 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
         else:
             updates["most_active_user_id"] = user_id
         
+        # Update peak activity
         hour = datetime.now().hour
         current_peak_hour = result[6] if result[6] is not None else 0
         if hour > current_peak_hour:
             updates["peak_hour"] = hour
         
+        # Update peak day
         day = datetime.now().strftime("%A")
         current_peak_day = result[7] if result[7] is not None else ""
         if day and not current_peak_day:
             updates["peak_day"] = day
         
+        # Update total days tracked
         day_count = await db.fetchone(
             "SELECT COUNT(DISTINCT date) FROM daily_channel_stats WHERE guild_id=? AND channel_id=?",
             (guild_id, channel_id)
@@ -779,6 +773,7 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
             tuple(values)
         )
         await db.commit()
+        logger.debug(f"Updated channel stats for channel {channel_id}")
         
     except Exception as e:
         logger.error(f"Error updating channel stats: {e}")
@@ -786,6 +781,7 @@ async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, con
 async def update_most_active(guild_id: int):
     """Update the most active user and channel in server stats."""
     try:
+        # Most active user
         user_result = await db.fetchone(
             """SELECT user_id, SUM(message_count) as total
                FROM member_message_counts
@@ -803,6 +799,7 @@ async def update_most_active(guild_id: int):
             )
             await db.commit()
         
+        # Most active channel
         channel_result = await db.fetchone(
             """SELECT channel_id, COUNT(*) as total
                FROM message_stats
@@ -844,9 +841,11 @@ async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, 
                 (user_id, guild_id)
             )
             if not result:
+                logger.error(f"Failed to create user stats for voice tracking for {user_id}")
                 return
         
         if is_join:
+            # User joined voice
             voice_join_count = (result[22] if len(result) > 22 and result[22] is not None else 0) + 1
             await db.execute(
                 """UPDATE user_stats
@@ -855,7 +854,9 @@ async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, 
                 (voice_join_count, int(time.time()), datetime.now().isoformat(), user_id, guild_id)
             )
             await db.commit()
+            logger.debug(f"User {user_id} joined voice in guild {guild_id}")
         else:
+            # User left voice - update total hours
             session_start = result[24] if len(result) > 24 else 0
             if session_start and session_start > 0:
                 session_duration = int(time.time()) - session_start
@@ -864,6 +865,7 @@ async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, 
                     current_hours = result[21] if len(result) > 21 and result[21] is not None else 0.0
                     new_total_hours = current_hours + hours
                     
+                    # Update longest session
                     longest = result[23] if len(result) > 23 and result[23] is not None else 0
                     if session_duration > longest:
                         longest = session_duration
@@ -876,6 +878,7 @@ async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, 
                     )
                     await db.commit()
                     
+                    # Update server total VC hours
                     server_result = await db.fetchone(
                         "SELECT total_vc_hours FROM server_stats WHERE guild_id=?",
                         (guild_id,)
@@ -888,6 +891,8 @@ async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, 
                         )
                         await db.commit()
                     
+                    logger.debug(f"User {user_id} left voice after {session_duration}s in guild {guild_id}")
+                    
     except Exception as e:
         logger.error(f"Error updating voice stats: {e}")
 
@@ -895,6 +900,7 @@ async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool
     """Track reaction usage."""
     try:
         if is_given:
+            # Track reactions given
             result = await db.fetchone(
                 "SELECT reactions_given FROM user_stats WHERE user_id=? AND guild_id=?",
                 (user_id, guild_id)
@@ -915,6 +921,7 @@ async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool
                 )
             await db.commit()
             
+            # Track favorite emoji
             emoji_str = str(emoji)
             emoji_result = await db.fetchone(
                 "SELECT count FROM user_emoji_stats WHERE user_id=? AND guild_id=? AND emoji=?",
@@ -932,6 +939,7 @@ async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool
                 )
             await db.commit()
             
+            # Update favorite emoji
             fav_emoji_result = await db.fetchone(
                 """SELECT emoji FROM user_emoji_stats
                    WHERE user_id=? AND guild_id=?
@@ -945,6 +953,7 @@ async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool
                 )
                 await db.commit()
         
+        # Track server total reactions
         server_result = await db.fetchone(
             "SELECT total_reactions_used FROM server_stats WHERE guild_id=?",
             (guild_id,)
@@ -1221,6 +1230,7 @@ async def get_fun_titles(user_stats: Dict, guild: discord.Guild, member: discord
         elif user_stats["stickers_used"] > 20:
             titles.append("🎭 Sticker User")
         
+        # Midnight Goblin - check messages between midnight and 6 AM
         if user_stats.get("last_message_time"):
             try:
                 last_msg = datetime.fromisoformat(user_stats["last_message_time"])
@@ -1229,6 +1239,7 @@ async def get_fun_titles(user_stats: Dict, guild: discord.Guild, member: discord
             except:
                 pass
         
+        # Check if user is in the top 10 for any stat
         top_messages = await db.fetchone(
             "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND total_messages > ?",
             (user_stats["guild_id"], user_stats["total_messages"])
@@ -1253,7 +1264,7 @@ async def get_fun_titles(user_stats: Dict, guild: discord.Guild, member: discord
     return titles
 
 # =========================
-# DATABASE HELPER FUNCTIONS
+# DATABASE HELPER FUNCTIONS (EXISTING)
 # =========================
 
 async def add_warning(user_id, guild_id, reason, moderator=None):
@@ -1314,6 +1325,7 @@ async def log_message(guild_id, channel_id, user_id, content):
     await db.commit()
 
 async def cache_message(message):
+    """Cache a message for snipe/delete logging."""
     attachments = json.dumps([{"filename": a.filename, "url": a.url} for a in message.attachments])
     await db.execute(
         """INSERT OR REPLACE INTO message_cache (message_id, content, author_id, channel_id, guild_id, timestamp, attachments)
@@ -1471,6 +1483,7 @@ async def increment_message_count(user_id, guild_id):
     await db.commit()
 
 async def save_control_panel(guild_id: int, channel_id: int, message_id: int):
+    """Save control panel configuration to database."""
     await db.execute(
         """INSERT OR REPLACE INTO control_panel (guild_id, channel_id, message_id, last_updated)
            VALUES (?, ?, ?, ?)""",
@@ -1479,6 +1492,7 @@ async def save_control_panel(guild_id: int, channel_id: int, message_id: int):
     await db.commit()
 
 async def get_control_panel(guild_id: int):
+    """Get control panel configuration from database."""
     result = await db.fetchone(
         "SELECT channel_id, message_id, last_updated FROM control_panel WHERE guild_id=?",
         (guild_id,)
@@ -1492,10 +1506,12 @@ async def get_control_panel(guild_id: int):
     return None
 
 async def delete_control_panel(guild_id: int):
+    """Delete control panel configuration from database."""
     await db.execute("DELETE FROM control_panel WHERE guild_id=?", (guild_id,))
     await db.commit()
 
 async def log_to_mod_channel(guild, embed):
+    """Send an embed to the configured mod-logs channel."""
     config = await get_mod_logs_config(guild.id)
     if not config or not config["enabled"]:
         return
@@ -1508,6 +1524,7 @@ async def log_to_mod_channel(guild, embed):
             logger.error(f"Failed to send mod log: {e}")
 
 async def get_balance_simple(user_id: int) -> Tuple[int, int]:
+    """Get user's balance from database."""
     result = await db.fetchone(
         "SELECT balance, bank FROM economy WHERE user_id=?",
         (user_id,)
@@ -1522,11 +1539,20 @@ async def get_balance_simple(user_id: int) -> Tuple[int, int]:
     return 0, 0
 
 async def count_events_for_date(guild_id: int, date: str, event_type: str) -> int:
+    """Count events of a specific type for a date."""
     result = await db.fetchone(
         "SELECT COUNT(*) FROM history WHERE guild_id=? AND event_type=? AND timestamp LIKE ?",
         (guild_id, event_type, f"{date}%")
     )
     return result[0] if result else 0
+
+# =========================
+# OWNER CHECK
+# =========================
+def is_owner():
+    async def predicate(interaction: discord.Interaction):
+        return interaction.user.id == OWNER_ID
+    return app_commands.check(predicate)
 
 # =========================
 # CONSTANTS
@@ -1583,7 +1609,7 @@ async def add_xp(user_id, guild_id):
     return None
 
 # =========================
-# GIVEAWAY TRACKING
+# GIVEAWAY TRACKING (in-memory)
 # =========================
 active_giveaways = {}
 
@@ -1591,6 +1617,7 @@ active_giveaways = {}
 # TICKET VIEWS
 # =========================
 class TicketCloseView(discord.ui.View):
+    """View with close button for tickets."""
     def __init__(self):
         super().__init__(timeout=None)
     
@@ -1612,6 +1639,7 @@ class TicketCloseView(discord.ui.View):
             logger.error(f"Error deleting ticket channel: {e}")
 
 class TicketPanelView(discord.ui.View):
+    """View with create ticket button."""
     def __init__(self):
         super().__init__(timeout=None)
     
@@ -1665,7 +1693,11 @@ class TicketPanelView(discord.ui.View):
             logger.error(f"Error creating ticket: {e}")
             await interaction.response.send_message("❌ Failed to create ticket. Check my permissions.", ephemeral=True)
 
+# =========================
+# GIVEAWAY VIEWS
+# =========================
 class GiveawayView(discord.ui.View):
+    """View for entering a giveaway."""
     def __init__(self, giveaway_id: str):
         super().__init__(timeout=None)
         self.giveaway_id = giveaway_id
@@ -1697,6 +1729,9 @@ class GiveawayView(discord.ui.View):
 
         await interaction.response.send_message("❌ This giveaway has ended.", ephemeral=True)
 
+# =========================
+# POLL VIEW
+# =========================
 class PollView(discord.ui.View):
     def __init__(self, poll_id, options):
         super().__init__(timeout=None)
@@ -1744,10 +1779,13 @@ class PollView(discord.ui.View):
 # AUTOMODERATION SYSTEM
 # =========================
 class AutoMod:
+    """Handles automoderation features."""
+    
     def __init__(self):
         self.user_messages = defaultdict(lambda: defaultdict(list))
 
     async def check_message(self, message):
+        """Check a message against automod rules."""
         if message.author.bot:
             return
         
@@ -1790,6 +1828,7 @@ class AutoMod:
         return False
     
     async def take_action(self, message, reason):
+        """Take action on a violating message."""
         try:
             await message.delete()
             await message.channel.send(
@@ -1820,6 +1859,7 @@ automod = AutoMod()
 # =========================
 
 async def handle_refresh_panel(interaction: discord.Interaction):
+    """Handle refresh panel command."""
     config = await get_control_panel(interaction.guild_id)
     if not config:
         await interaction.response.send_message("❌ No control panel configured in this server.", ephemeral=True)
@@ -1843,17 +1883,18 @@ async def handle_refresh_panel(interaction: discord.Interaction):
         timestamp=datetime.now()
     )
     embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
-    embed.add_field(name="👑 Owner Role", value=owner_role_mention(), inline=True)
+    embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
     embed.add_field(name="📊 Commands", value=f"{len(bot.tree.get_commands())} total", inline=True)
-    embed.set_footer(text="Control Panel • Owner Role Only")
+    embed.set_footer(text="Control Panel • Owner Only")
     
-    view = ControlPanelView(bot)
+    view = ControlPanelView(bot, OWNER_ID)
     new_message = await channel.send(embed=embed, view=view)
     
     await save_control_panel(interaction.guild_id, channel.id, new_message.id)
     await interaction.response.send_message("✅ Control panel refreshed!", ephemeral=True)
 
 async def handle_clear_cache(interaction: discord.Interaction):
+    """Handle clear cache command."""
     await db.execute("DELETE FROM message_cache")
     await db.execute("DELETE FROM snipe_cache")
     await db.execute("DELETE FROM edit_snipe_cache")
@@ -1862,6 +1903,7 @@ async def handle_clear_cache(interaction: discord.Interaction):
     await interaction.response.send_message("🗑️ All caches cleared successfully!", ephemeral=True)
 
 async def handle_show_stats(interaction: discord.Interaction):
+    """Handle show stats command."""
     embed = discord.Embed(
         title="📊 Bot Statistics",
         color=discord.Color.blue(),
@@ -1875,6 +1917,7 @@ async def handle_show_stats(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def handle_db_status(interaction: discord.Interaction):
+    """Handle database status command."""
     try:
         result = await db.fetchone("SELECT sqlite_version()")
         version = result[0] if result else "Unknown"
@@ -1907,6 +1950,7 @@ async def handle_db_status(interaction: discord.Interaction):
 # =========================
 
 class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
+    """Modal for moderation actions that require input."""
     def __init__(self, action_type: str, target: Any = None):
         super().__init__()
         self.action_type = action_type
@@ -2054,6 +2098,7 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
             await interaction.response.send_message(f"❌ Error: {str(e)[:100]}", ephemeral=True)
 
 class ModerationMemberSelectView(discord.ui.View):
+    """View with a select menu for choosing a member."""
     def __init__(self, action_type: str, guild: discord.Guild, callback_func):
         super().__init__(timeout=60)
         self.action_type = action_type
@@ -2113,6 +2158,7 @@ class ModerationMemberSelectView(discord.ui.View):
         self.add_item(cancel_button)
 
 class ModerationChannelSelectView(discord.ui.View):
+    """View with a select menu for choosing a channel."""
     def __init__(self, action_type: str, guild: discord.Guild, callback_func, destructive: bool = False):
         super().__init__(timeout=60)
         self.action_type = action_type
@@ -2178,6 +2224,7 @@ class ModerationChannelSelectView(discord.ui.View):
         self.add_item(cancel_button)
     
     async def _show_confirmation(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Show a confirmation prompt for destructive actions."""
         action_name = self.action_type.replace('_', ' ').title()
         embed = discord.Embed(
             title=f"⚠️ Confirm {action_name}",
@@ -2215,6 +2262,7 @@ class ModerationChannelSelectView(discord.ui.View):
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
     
     async def _execute_action(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Execute the action after confirmation."""
         if self.action_type in ["thanos_snap", "clear"]:
             modal = ModerationActionModal(self.action_type, channel)
             await interaction.response.send_modal(modal)
@@ -2222,6 +2270,8 @@ class ModerationChannelSelectView(discord.ui.View):
             await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
 
 class ModerationPanelView(discord.ui.View):
+    """The complete moderation panel view with all moderation commands."""
+
     def __init__(self, bot_instance, guild: discord.Guild, return_to_main_callback):
         super().__init__(timeout=None)
         self.bot = bot_instance
@@ -2318,9 +2368,10 @@ class ModerationPanelView(discord.ui.View):
         ))
 
     async def button_callback(self, interaction: discord.Interaction, action: str):
-        if not has_owner_role(interaction.user):
+        """Handle button callbacks for moderation actions."""
+        if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message(
-                f"❌ This control panel is restricted to {owner_role_mention()} only.",
+                "❌ This control panel is owner-only.",
                 ephemeral=True
             )
         
@@ -2417,14 +2468,17 @@ class ModerationPanelView(discord.ui.View):
         await interaction.response.send_message(f"❌ Unknown action: {action}", ephemeral=True)
 
     async def _channel_action_callback(self, interaction: discord.Interaction, channel: discord.TextChannel, action: str):
+        """Callback for channel actions."""
         modal = ModerationActionModal(action, channel)
         await interaction.response.send_modal(modal)
 
     async def _member_action_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        """Callback for member actions."""
         modal = ModerationActionModal(action, member)
         await interaction.response.send_modal(modal)
 
     async def _view_warnings_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        """Callback for viewing warnings."""
         warnings = await get_warnings(member.id, self.guild.id)
         if not warnings:
             embed = discord.Embed(
@@ -2450,6 +2504,7 @@ class ModerationPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _clear_warnings_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        """Callback for clearing warnings."""
         warnings = await get_warnings(member.id, self.guild.id)
         if not warnings:
             return await interaction.response.send_message(f"⚠️ {member.mention} has no warnings to clear.", ephemeral=True)
@@ -2466,6 +2521,7 @@ class ModerationPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _history_callback(self, interaction: discord.Interaction, member: discord.Member, action: str):
+        """Callback for viewing history."""
         history = await get_user_history(member.id, self.guild.id, limit=15)
         if not history:
             embed = discord.Embed(
@@ -2488,14 +2544,17 @@ class ModerationPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _handle_remove_warning(self, interaction: discord.Interaction):
+        """Handle remove warning with a modal."""
         modal = RemoveWarningModal()
         await interaction.response.send_modal(modal)
 
     async def _handle_unban(self, interaction: discord.Interaction):
+        """Handle unban with a modal."""
         modal = UnbanModal(self.bot, self.guild)
         await interaction.response.send_modal(modal)
 
     async def _handle_snipe(self, interaction: discord.Interaction):
+        """Handle snipe command."""
         result = await get_snipe(self.guild.id, interaction.channel.id)
         if not result:
             return await interaction.response.send_message("❌ No deleted messages to snipe.", ephemeral=True)
@@ -2525,6 +2584,7 @@ class ModerationPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     async def _handle_edit_snipe(self, interaction: discord.Interaction):
+        """Handle edit snipe command."""
         result = await get_edit_snipe(self.guild.id, interaction.channel.id)
         if not result:
             return await interaction.response.send_message("❌ No edited messages to snipe.", ephemeral=True)
@@ -2545,6 +2605,7 @@ class ModerationPanelView(discord.ui.View):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 class RemoveWarningModal(discord.ui.Modal, title="Remove Warning"):
+    """Modal for removing a warning by ID."""
     def __init__(self):
         super().__init__()
         
@@ -2591,6 +2652,7 @@ class RemoveWarningModal(discord.ui.Modal, title="Remove Warning"):
             await interaction.response.send_message("❌ Invalid warning ID. Please enter a number.", ephemeral=True)
 
 class UnbanModal(discord.ui.Modal, title="Unban User"):
+    """Modal for unbanning a user."""
     def __init__(self, bot_instance, guild: discord.Guild):
         super().__init__()
         self.bot = bot_instance
@@ -2640,6 +2702,8 @@ class UnbanModal(discord.ui.Modal, title="Unban User"):
             await interaction.response.send_message(f"❌ Error: {str(e)[:100]}", ephemeral=True)
 
 class ModerationPanelButton(discord.ui.Button):
+    """Button for the moderation panel."""
+    
     def __init__(self, label: str, action: str, style: discord.ButtonStyle, row: int = 0):
         super().__init__(
             label=label,
@@ -2658,6 +2722,8 @@ class ModerationPanelButton(discord.ui.Button):
 # =========================
 
 class ControlPanelButton(discord.ui.Button):
+    """A button for the control panel with proper callback handling."""
+    
     def __init__(
         self,
         label: str,
@@ -2675,9 +2741,10 @@ class ControlPanelButton(discord.ui.Button):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        if not has_owner_role(interaction.user):
+        """Handle button press with proper owner check and command routing."""
+        if interaction.user.id != OWNER_ID:
             return await interaction.response.send_message(
-                f"❌ This control panel is restricted to {owner_role_mention()} only.",
+                "❌ This control panel is owner-only.",
                 ephemeral=True
             )
 
@@ -2692,7 +2759,7 @@ class ControlPanelButton(discord.ui.Button):
                 color=discord.Color.red(),
                 timestamp=datetime.now()
             )
-            embed.set_footer(text="Moderation Panel • Owner Role Only • All actions are logged")
+            embed.set_footer(text="Moderation Panel • Owner Only • All actions are logged")
             
             view = ModerationPanelView(
                 self.view.bot,
@@ -2724,6 +2791,7 @@ class ControlPanelButton(discord.ui.Button):
             )
 
 async def handle_db_optimize(interaction: discord.Interaction):
+    """Handle database optimize command."""
     await interaction.response.send_message("🔄 Optimizing database...", ephemeral=True)
     
     try:
@@ -2736,6 +2804,7 @@ async def handle_db_optimize(interaction: discord.Interaction):
         await interaction.edit_original_response(content=f"❌ Optimization failed: {str(e)}")
 
 async def handle_db_stats(interaction: discord.Interaction):
+    """Handle database statistics command."""
     try:
         size = os.path.getsize("moderation.db")
         size_mb = size / (1024 * 1024)
@@ -2753,6 +2822,7 @@ async def handle_db_stats(interaction: discord.Interaction):
         await interaction.response.send_message(f"❌ Error getting stats: {str(e)}", ephemeral=True)
 
 async def handle_toggle_modules(interaction: discord.Interaction):
+    """Handle toggle modules command."""
     cogs = list(bot.cogs.keys())
     
     embed = discord.Embed(
@@ -2771,6 +2841,7 @@ async def handle_toggle_modules(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def handle_maintenance(interaction: discord.Interaction):
+    """Handle maintenance mode command."""
     await interaction.response.send_message(
         "🔧 Maintenance mode is not implemented yet.\n"
         "To restart the bot, use the Restart Bot button or redeploy on Railway.",
@@ -2778,6 +2849,7 @@ async def handle_maintenance(interaction: discord.Interaction):
     )
 
 async def handle_restart_bot(interaction: discord.Interaction):
+    """Handle restart bot command."""
     embed = discord.Embed(
         title="🔄 Restarting Bot",
         description="The bot is restarting... This may take a few seconds.",
@@ -2804,9 +2876,12 @@ async def handle_restart_bot(interaction: discord.Interaction):
     os._exit(0)
 
 class ControlPanelView(discord.ui.View):
-    def __init__(self, bot_instance):
+    """The main control panel view with properly organized buttons."""
+    
+    def __init__(self, bot_instance, owner_id: int):
         super().__init__(timeout=None)
         self.bot = bot_instance
+        self.owner_id = owner_id
         
         self.add_item(ControlPanelButton(
             "📊 Stats",
@@ -2880,6 +2955,7 @@ class ControlPanelView(discord.ui.View):
         ))
 
     async def return_to_main_panel(self, interaction: discord.Interaction):
+        """Return to the main control panel."""
         embed = discord.Embed(
             title="🎛️ Bot Control Panel",
             description="Welcome to the bot control panel! Use the buttons below to manage the bot.",
@@ -2887,9 +2963,9 @@ class ControlPanelView(discord.ui.View):
             timestamp=datetime.now()
         )
         embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
-        embed.add_field(name="👑 Owner Role", value=owner_role_mention(), inline=True)
+        embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
         embed.add_field(name="📊 Commands", value=f"{len(self.bot.tree.get_commands())} total", inline=True)
-        embed.set_footer(text="Control Panel • Owner Role Only")
+        embed.set_footer(text="Control Panel • Owner Only")
         
         await interaction.response.edit_original_response(embed=embed, view=self)
 
@@ -3135,9 +3211,11 @@ async def on_reaction_add(reaction, user):
         if reaction.message.guild:
             await track_reaction(reaction.message.guild.id, user.id, reaction.emoji, is_given=True)
             
+            # Track reactions received (by message author)
             if reaction.message.author.id != user.id:
                 await track_reaction(reaction.message.guild.id, reaction.message.author.id, reaction.emoji, is_given=False)
                 
+                # Update user stats for reactions received
                 result = await db.fetchone(
                     "SELECT reactions_received FROM user_stats WHERE user_id=? AND guild_id=?",
                     (reaction.message.author.id, reaction.message.guild.id)
@@ -3169,6 +3247,7 @@ async def on_message(message):
             await increment_message_count(message.author.id, message.guild.id)
             await automod.check_message(message)
             
+            # Update statistics
             await update_user_stats(message.author.id, message.guild.id, message)
             
             new_level = await add_xp(message.author.id, message.guild.id)
@@ -3199,21 +3278,23 @@ async def on_ready():
 
     _tasks_started = True
 
+    # Initialize bot state for statistics
     await initialize_bot_state()
     
     logger.info(f"🤖 Logged in as {bot.user}")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
-    logger.info(f"   Owner Role ID: {OWNER_ROLE_ID if OWNER_ROLE_ID else 'Not set'}")
 
 # =========================
 # 🛡️ MODERATION COG - ACTIONS
 # =========================
 class ModerationActions(commands.Cog, name="moderation_actions"):
+    """Moderation action commands (ban, kick, mute, warn, etc.)."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    mod_group = app_commands.Group(name="mod", description="Moderation actions - Owner Role Only")
+    mod_group = app_commands.Group(name="mod", description="Moderation actions - Owner Only")
     
     @mod_group.command(name="clear", description="Delete messages")
     @is_owner()
@@ -3273,7 +3354,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     async def mod_ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason"):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot ban this member (role hierarchy).", ephemeral=True)
             
             await member.ban(reason=reason)
@@ -3308,7 +3389,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     async def mod_softban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Softban"):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot softban this member (role hierarchy).", ephemeral=True)
             
             await member.ban(reason=reason)
@@ -3378,7 +3459,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     async def mod_mute(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "No reason"):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot mute this member (role hierarchy).", ephemeral=True)
             
             await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
@@ -3440,7 +3521,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     async def mod_kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot kick this member (role hierarchy).", ephemeral=True)
             
             await member.kick(reason=reason)
@@ -3473,7 +3554,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
     async def mod_warn(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
             
             await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
@@ -3791,10 +3872,12 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
 # 🎭 ROLE MANAGEMENT COG
 # =========================
 class RoleManagement(commands.Cog, name="role_management"):
+    """Role management commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    role_group = app_commands.Group(name="role", description="Role management - Owner Role Only")
+    role_group = app_commands.Group(name="role", description="Role management - Owner Only")
     
     @role_group.command(name="nick", description="Change a member's nickname")
     @is_owner()
@@ -3802,7 +3885,7 @@ class RoleManagement(commands.Cog, name="role_management"):
     async def role_nick(self, interaction: discord.Interaction, member: discord.Member, nickname: str):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot change this member's nickname (role hierarchy).", ephemeral=True)
             
             old_nick = member.nick or member.name
@@ -3827,7 +3910,7 @@ class RoleManagement(commands.Cog, name="role_management"):
     async def role_resetnick(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot reset this member's nickname (role hierarchy).", ephemeral=True)
             
             old_nick = member.nick or member.name
@@ -3851,7 +3934,7 @@ class RoleManagement(commands.Cog, name="role_management"):
     async def role_give(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
         try:
-            if role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot give this role (role hierarchy).", ephemeral=True)
             if role in member.roles:
                 return await interaction.followup.send(f"❌ {member.mention} already has the {role.name} role.", ephemeral=True)
@@ -3877,7 +3960,7 @@ class RoleManagement(commands.Cog, name="role_management"):
     async def role_remove(self, interaction: discord.Interaction, member: discord.Member, role: discord.Role):
         await interaction.response.defer(ephemeral=True)
         try:
-            if role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot remove this role (role hierarchy).", ephemeral=True)
             if role not in member.roles:
                 return await interaction.followup.send(f"❌ {member.mention} doesn't have the {role.name} role.", ephemeral=True)
@@ -3901,10 +3984,12 @@ class RoleManagement(commands.Cog, name="role_management"):
 # 🔊 VOICE MODERATION COG
 # =========================
 class VoiceModeration(commands.Cog, name="voice_moderation"):
+    """Voice moderation commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    voice_group = app_commands.Group(name="voice", description="Voice moderation - Owner Role Only")
+    voice_group = app_commands.Group(name="voice", description="Voice moderation - Owner Only")
     
     @voice_group.command(name="kick", description="Disconnect a member from voice")
     @is_owner()
@@ -3912,7 +3997,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     async def voice_kick(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot voice kick this member (role hierarchy).", ephemeral=True)
             if not member.voice or not member.voice.channel:
                 return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
@@ -3938,7 +4023,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     async def voice_move(self, interaction: discord.Interaction, member: discord.Member, channel: discord.VoiceChannel):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot move this member (role hierarchy).", ephemeral=True)
             if not member.voice or not member.voice.channel:
                 return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
@@ -3965,7 +4050,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     async def voice_deafen(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot deafen this member (role hierarchy).", ephemeral=True)
             if not member.voice or not member.voice.channel:
                 return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
@@ -3988,7 +4073,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     async def voice_undeafen(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot undeafen this member (role hierarchy).", ephemeral=True)
             if not member.voice or not member.voice.channel:
                 return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
@@ -4011,7 +4096,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     async def voice_mute(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot mute this member in voice (role hierarchy).", ephemeral=True)
             if not member.voice or not member.voice.channel:
                 return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
@@ -4034,7 +4119,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
     async def voice_unmute(self, interaction: discord.Interaction, member: discord.Member):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot unmute this member in voice (role hierarchy).", ephemeral=True)
             if not member.voice or not member.voice.channel:
                 return await interaction.followup.send(f"❌ {member.display_name} is not in a voice channel.", ephemeral=True)
@@ -4052,13 +4137,15 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 # =========================
-# 🧹 CHANNEL MANAGEMENT COG
+# 🧹 CHANNEL MANAGEMENT COG (Purge Commands)
 # =========================
 class ChannelManagement(commands.Cog, name="channel_management"):
+    """Channel management and purge commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    purge_group = app_commands.Group(name="purge", description="Message purging - Owner Role Only")
+    purge_group = app_commands.Group(name="purge", description="Message purging - Owner Only")
     
     @purge_group.command(name="user", description="Delete messages from a specific user")
     @is_owner()
@@ -4222,10 +4309,12 @@ class ChannelManagement(commands.Cog, name="channel_management"):
 # 📊 INFORMATION COG
 # =========================
 class Information(commands.Cog, name="information"):
+    """Information and utility commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    info_group = app_commands.Group(name="info", description="Server information - Owner Role Only")
+    info_group = app_commands.Group(name="info", description="Server information - Owner Only")
     
     @info_group.command(name="server", description="Display detailed server information")
     @is_owner()
@@ -4333,10 +4422,12 @@ class Information(commands.Cog, name="information"):
 # 💬 MESSAGE COMMANDS COG
 # =========================
 class MessageCommands(commands.Cog, name="message_commands"):
+    """Message-related commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    msg_group = app_commands.Group(name="msg", description="Message commands - Owner Role Only")
+    msg_group = app_commands.Group(name="msg", description="Message commands - Owner Only")
     
     @msg_group.command(name="announce", description="Send an announcement embed")
     @is_owner()
@@ -4430,10 +4521,12 @@ class MessageCommands(commands.Cog, name="message_commands"):
 # 📋 LOGS CONFIGURATION COG
 # =========================
 class LogsConfig(commands.Cog, name="logs_config"):
+    """Logs configuration commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    logs_group = app_commands.Group(name="logs", description="Mod logs configuration - Owner Role Only")
+    logs_group = app_commands.Group(name="logs", description="Mod logs configuration - Owner Only")
     
     @logs_group.command(name="set", description="Set the mod logs channel")
     @is_owner()
@@ -4521,10 +4614,12 @@ class LogsConfig(commands.Cog, name="logs_config"):
 # 🛡️ AUTOMOD CONFIGURATION COG
 # =========================
 class AutoModConfig(commands.Cog, name="automod_config"):
+    """AutoMod configuration commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    automod_group = app_commands.Group(name="automod", description="AutoModeration configuration - Owner Role Only")
+    automod_group = app_commands.Group(name="automod", description="AutoModeration configuration - Owner Only")
     
     @automod_group.command(name="antispam", description="Configure anti-spam protection")
     @is_owner()
@@ -4658,10 +4753,12 @@ class AutoModConfig(commands.Cog, name="automod_config"):
 # ⚠️ WARNING MANAGEMENT COG
 # =========================
 class WarningManagement(commands.Cog, name="warning_management"):
+    """Warning management commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    warn_group = app_commands.Group(name="warn", description="Warning management - Owner Role Only")
+    warn_group = app_commands.Group(name="warn", description="Warning management - Owner Only")
     
     @warn_group.command(name="add", description="Warn a member")
     @is_owner()
@@ -4669,7 +4766,7 @@ class WarningManagement(commands.Cog, name="warning_management"):
     async def warn_add(self, interaction: discord.Interaction, member: discord.Member, reason: str = "No reason provided"):
         await interaction.response.defer(ephemeral=True)
         try:
-            if member.top_role >= interaction.user.top_role and not has_owner_role(interaction.user):
+            if member.top_role >= interaction.user.top_role and interaction.user.id != interaction.guild.owner.id:
                 return await interaction.followup.send("❌ You cannot warn this member (role hierarchy).", ephemeral=True)
             
             await add_warning(member.id, interaction.guild.id, reason, str(interaction.user))
@@ -4787,7 +4884,7 @@ class WarningManagement(commands.Cog, name="warning_management"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
 # =========================
-# 🎮 FUN COG (PUBLIC - NO OWNER CHECK)
+# 🎮 FUN COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class Fun(commands.Cog, name="fun"):
     fun_group = app_commands.Group(name="fun", description="Fun commands")
@@ -4864,7 +4961,7 @@ class Fun(commands.Cog, name="fun"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 💰 ECONOMY COG (PUBLIC - NO OWNER CHECK)
+# 💰 ECONOMY COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class Economy(commands.Cog, name="economy"):
     economy_group = app_commands.Group(name="economy", description="Economy commands")
@@ -4966,7 +5063,7 @@ class Economy(commands.Cog, name="economy"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 🎉 GIVEAWAY COG (PUBLIC - NO OWNER CHECK)
+# 🎉 GIVEAWAY COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class Giveaway(commands.Cog, name="giveaway"):
     giveaway_group = app_commands.Group(name="giveaway", description="Giveaway commands")
@@ -5030,7 +5127,7 @@ class Giveaway(commands.Cog, name="giveaway"):
         await interaction.response.send_message("❌ Could not find that giveaway or it hasn't ended yet.", ephemeral=True)
 
 # =========================
-# 🎫 TICKET COG (PUBLIC - NO OWNER CHECK)
+# 🎫 TICKET COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class Ticket(commands.Cog, name="ticket"):
     ticket_group = app_commands.Group(name="ticket", description="Ticket commands")
@@ -5071,7 +5168,7 @@ class Ticket(commands.Cog, name="ticket"):
             await interaction.response.send_message(f"❌ Error: {e}")
 
 # =========================
-# 📊 LEVELING COG (PUBLIC - NO OWNER CHECK)
+# 📊 LEVELING COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class Leveling(commands.Cog, name="leveling"):
     leveling_group = app_commands.Group(name="leveling", description="Leveling commands")
@@ -5128,7 +5225,7 @@ class Leveling(commands.Cog, name="leveling"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 🤖 AI COG (PUBLIC - NO OWNER CHECK)
+# 🤖 AI COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class AI(commands.Cog, name="ai"):
     ai_group = app_commands.Group(name="ai", description="AI commands")
@@ -5187,13 +5284,15 @@ class AI(commands.Cog, name="ai"):
             await interaction.followup.send(f"❌ AI Error: {str(e)}")
 
 # =========================
-# 📊 STATISTICS COG (OWNER ROLE ONLY)
+# 📊 STATISTICS COG (OWNER ONLY)
 # =========================
 class Statistics(commands.Cog, name="statistics"):
+    """Advanced statistics commands - Owner Only."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
-    stats_group = app_commands.Group(name="stats", description="Advanced statistics - Owner Role Only")
+    stats_group = app_commands.Group(name="stats", description="Advanced statistics - Owner Only")
     
     @stats_group.command(name="user", description="View detailed statistics for a user")
     @is_owner()
@@ -5207,14 +5306,17 @@ class Statistics(commands.Cog, name="statistics"):
         
         guild = interaction.guild
         
+        # Get favorite channel
         fav_channel = None
         if stats["favorite_channel_id"]:
             fav_channel = guild.get_channel(stats["favorite_channel_id"])
         
+        # Calculate average message length
         avg_length = 0
         if stats["message_count_with_content"] > 0:
             avg_length = stats["total_message_length"] / stats["message_count_with_content"]
         
+        # Get titles
         titles = await get_fun_titles(stats, guild, member)
         
         embed = discord.Embed(
@@ -5225,6 +5327,7 @@ class Statistics(commands.Cog, name="statistics"):
         if member.avatar:
             embed.set_thumbnail(url=member.avatar.url)
         
+        # General stats
         embed.add_field(
             name="💬 Messages",
             value=f"Total: **{stats['total_messages']:,}**\n"
@@ -5291,6 +5394,7 @@ class Statistics(commands.Cog, name="statistics"):
             inline=True
         )
         
+        # Favorite stats
         fav_channel_name = fav_channel.mention if fav_channel else "None"
         embed.add_field(
             name="⭐ Favorites",
@@ -5299,6 +5403,7 @@ class Statistics(commands.Cog, name="statistics"):
             inline=True
         )
         
+        # Titles
         if titles:
             embed.add_field(
                 name="🏅 Titles",
@@ -5560,7 +5665,7 @@ class Statistics(commands.Cog, name="statistics"):
         
         await interaction.followup.send(embed=embed)
     
-    @stats_group.command(name="reset", description="Reset statistics for a user (Owner Role Only)")
+    @stats_group.command(name="reset", description="Reset statistics for a user (Owner Only)")
     @is_owner()
     @app_commands.describe(
         member="Member to reset statistics for",
@@ -5602,6 +5707,7 @@ class Statistics(commands.Cog, name="statistics"):
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
     
     def _format_duration(self, seconds: int) -> str:
+        """Format duration in seconds to a readable string."""
         if seconds <= 0:
             return "0s"
         
@@ -5617,7 +5723,7 @@ class Statistics(commands.Cog, name="statistics"):
             return f"{seconds}s"
 
 # =========================
-# 📋 UTILITY COMMANDS (PUBLIC - NO OWNER CHECK)
+# 📋 UTILITY COMMANDS (NO OWNER CHECK - PUBLIC)
 # =========================
 class Utility(commands.Cog, name="utility"):
     def __init__(self, bot: commands.Bot):
@@ -5658,7 +5764,7 @@ class Utility(commands.Cog, name="utility"):
         await interaction.response.send_message(embed=embed)
 
 # =========================
-# 📋 VOICE COMMANDS (PUBLIC - NO OWNER CHECK)
+# 📋 VOICE COMMANDS (NO OWNER CHECK - PUBLIC)
 # =========================
 class VoiceCommands(commands.Cog, name="voice_commands"):
     def __init__(self, bot: commands.Bot):
@@ -5687,7 +5793,7 @@ class VoiceCommands(commands.Cog, name="voice_commands"):
         await interaction.response.send_message("👋 Disconnected from voice channel.")
 
 # =========================
-# 📋 HELP COG (PUBLIC - NO OWNER CHECK)
+# 📋 HELP COG (NO OWNER CHECK - PUBLIC)
 # =========================
 class Help(commands.Cog, name="help"):
     def __init__(self, bot: commands.Bot):
@@ -5701,7 +5807,7 @@ class Help(commands.Cog, name="help"):
             color=discord.Color.blue()
         )
         embed.add_field(
-            name="🛡️ Moderation (Owner Role Only)",
+            name="🛡️ Moderation (Owner Only)",
             value="`/mod clear`, `/mod thanos_snap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
                   "`/role nick`, `/role resetnick`, `/role give`, `/role remove`\n"
                   "`/voice kick`, `/voice move`, `/voice deafen`, `/voice undeafen`, `/voice mute`, `/voice unmute`\n"
@@ -5714,7 +5820,7 @@ class Help(commands.Cog, name="help"):
             inline=False
         )
         embed.add_field(
-            name="📊 Statistics (Owner Role Only)",
+            name="📊 Statistics (Owner Only)",
             value="`/stats user`, `/stats server`, `/stats channel`, `/stats leaderboard`, `/stats titles`, `/stats reset`",
             inline=False
         )
@@ -5823,12 +5929,15 @@ class HistoryCommands(commands.Cog, name="history"):
 # CONTROL PANEL SLASH COMMAND
 # =========================
 class ControlPanelCommands(commands.Cog, name="control_panel"):
+    """Control panel management commands."""
+    
     def __init__(self, bot: commands.Bot):
         self.bot = bot
     
     @app_commands.command(name="controlpanelset", description="Set up the control panel in the current channel")
     @is_owner()
     async def controlpanelset(self, interaction: discord.Interaction):
+        """Set up the control panel in the current channel."""
         await interaction.response.defer(ephemeral=True)
         
         try:
@@ -5851,11 +5960,11 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
                 timestamp=datetime.now()
             )
             embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
-            embed.add_field(name="👑 Owner Role", value=owner_role_mention(), inline=True)
+            embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
             embed.add_field(name="📊 Commands", value=f"{len(self.bot.tree.get_commands())} total", inline=True)
-            embed.set_footer(text="Control Panel • Owner Role Only")
+            embed.set_footer(text="Control Panel • Owner Only")
             
-            view = ControlPanelView(self.bot)
+            view = ControlPanelView(self.bot, OWNER_ID)
             message = await interaction.channel.send(embed=embed, view=view)
             
             await save_control_panel(interaction.guild_id, interaction.channel_id, message.id)
@@ -5872,12 +5981,14 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
     @app_commands.command(name="controlpanelrefresh", description="Refresh the control panel")
     @is_owner()
     async def controlpanelrefresh(self, interaction: discord.Interaction):
+        """Refresh the control panel."""
         await interaction.response.defer(ephemeral=True)
         await handle_refresh_panel(interaction)
     
     @app_commands.command(name="controlpanelremove", description="Remove the control panel")
     @is_owner()
     async def controlpanelremove(self, interaction: discord.Interaction):
+        """Remove the control panel."""
         await interaction.response.defer(ephemeral=True)
         
         config = await get_control_panel(interaction.guild_id)
@@ -5905,6 +6016,7 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
     @is_owner()
     @app_commands.describe(channel="Channel to move the control panel to")
     async def controlpanelmove(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        """Move the control panel to another channel."""
         await interaction.response.defer(ephemeral=True)
         
         config = await get_control_panel(interaction.guild_id)
@@ -5929,11 +6041,11 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
                 timestamp=datetime.now()
             )
             embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
-            embed.add_field(name="👑 Owner Role", value=owner_role_mention(), inline=True)
+            embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
             embed.add_field(name="📊 Commands", value=f"{len(self.bot.tree.get_commands())} total", inline=True)
-            embed.set_footer(text="Control Panel • Owner Role Only")
+            embed.set_footer(text="Control Panel • Owner Only")
             
-            view = ControlPanelView(self.bot)
+            view = ControlPanelView(self.bot, OWNER_ID)
             message = await channel.send(embed=embed, view=view)
             
             await save_control_panel(interaction.guild_id, channel.id, message.id)
@@ -5951,6 +6063,7 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
 # AI RESPONSE FUNCTION
 # =========================
 async def get_ai_response(prompt: str) -> str:
+    """Get a response from Google Gemini."""
     try:
         if not client:
             return "⚠️ GEMINI_API_KEY is missing. Please set the GEMINI_API_KEY environment variable."
