@@ -38,6 +38,7 @@ logger = logging.getLogger("HackerBot")
 TOKEN = os.getenv("TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 OWNER_ROLE_ID = int(os.getenv("OWNER_ROLE_ID", "0"))  # Role ID for owner permissions
+OWNER_ROLE_NAME = os.getenv("OWNER_ROLE_NAME", "Owner")  # Fallback role name
 
 # Gemini client
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
@@ -81,7 +82,7 @@ class MyBot(commands.Bot):
                     timestamp=datetime.utcnow()
                 )
                 embed.add_field(name="🤖 Status", value="🟢 Online", inline=True)
-                embed.add_field(name="👑 Owner Role", value=f"<@&{OWNER_ROLE_ID}>" if OWNER_ROLE_ID else "Not set", inline=True)
+                embed.add_field(name="👑 Owner Role", value=owner_role_mention(), inline=True)
                 embed.add_field(name="📊 Commands", value=str(len(self.tree.get_commands())), inline=True)
                 embed.set_footer(text="Control Panel • Owner Role Only")
 
@@ -364,33 +365,50 @@ class AsyncDatabase:
 db = AsyncDatabase()
 
 # =========================
-# OWNER CHECK FUNCTIONS
+# OWNER CHECK FUNCTIONS - FIXED
 # =========================
+def has_owner_role(member: discord.Member) -> bool:
+    """Check if a member has the Owner role by ID or name."""
+    # First check by ID if set
+    if OWNER_ROLE_ID:
+        role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
+        if role:
+            logger.debug(f"User {member.id} has Owner role by ID: {OWNER_ROLE_ID}")
+            return True
+    
+    # Fallback to checking by name
+    role = discord.utils.get(member.roles, name=OWNER_ROLE_NAME)
+    if role:
+        logger.debug(f"User {member.id} has Owner role by name: {OWNER_ROLE_NAME}")
+        return True
+    
+    logger.debug(f"User {member.id} does not have Owner role. Roles: {[r.name for r in member.roles]}")
+    return False
+
 def is_owner():
     """Check if the user has the Owner role."""
     async def predicate(interaction: discord.Interaction):
-        if not OWNER_ROLE_ID:
-            logger.warning("OWNER_ROLE_ID not set! Allowing access for debugging.")
-            return True
+        if not interaction.guild:
+            logger.warning("is_owner check called outside a guild")
+            return False
+        
         member = interaction.guild.get_member(interaction.user.id)
         if not member:
+            logger.warning(f"Could not find member {interaction.user.id} in guild {interaction.guild.id}")
             return False
-        role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
-        return role is not None
+        
+        has_role = has_owner_role(member)
+        if not has_role:
+            logger.info(f"User {interaction.user} ({interaction.user.id}) does not have Owner role")
+        
+        return has_role
     return app_commands.check(predicate)
-
-def has_owner_role(member: discord.Member) -> bool:
-    """Check if a member has the Owner role."""
-    if not OWNER_ROLE_ID:
-        return False
-    role = discord.utils.get(member.roles, id=OWNER_ROLE_ID)
-    return role is not None
 
 def owner_role_mention() -> str:
     """Get the mention string for the owner role."""
     if OWNER_ROLE_ID:
         return f"<@&{OWNER_ROLE_ID}>"
-    return "Owner role not set"
+    return f"**{OWNER_ROLE_NAME}**"
 
 # =========================
 # STATISTICS HELPER FUNCTIONS
@@ -3204,7 +3222,7 @@ async def on_ready():
     logger.info(f"🤖 Logged in as {bot.user}")
     logger.info(f"   Servers: {len(bot.guilds)}")
     logger.info(f"   Commands: {len(bot.tree.get_commands())}")
-    logger.info(f"   Owner Role ID: {OWNER_ROLE_ID if OWNER_ROLE_ID else 'Not set'}")
+    logger.info(f"   Owner Role: {OWNER_ROLE_NAME} (ID: {OWNER_ROLE_ID if OWNER_ROLE_ID else 'Not set'}")
 
 # =========================
 # 🛡️ MODERATION COG - ACTIONS
@@ -5772,7 +5790,12 @@ class CommandErrorHandler(commands.Cog):
         elif isinstance(error, discord.app_commands.BotMissingPermissions):
             return await interaction.response.send_message("❌ I don't have the required permissions.", ephemeral=True)
         elif isinstance(error, discord.app_commands.CheckFailure):
-            return await interaction.response.send_message("❌ You don't have permission to use this command.", ephemeral=True)
+            # Give a more helpful message for owner role check failures
+            return await interaction.response.send_message(
+                f"❌ This command is restricted to {owner_role_mention()} only.\n"
+                f"Please make sure you have the '{OWNER_ROLE_NAME}' role.",
+                ephemeral=True
+            )
         else:
             error_details = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
             logger.error(f"App command error: {error}\n{error_details}")
