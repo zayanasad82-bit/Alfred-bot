@@ -248,6 +248,87 @@ class AsyncDatabase:
                 message_id INTEGER,
                 last_updated TEXT
             )""",
+            # =========================
+            # STATISTICS TABLES
+            # =========================
+            """CREATE TABLE IF NOT EXISTS user_stats (
+                user_id INTEGER,
+                guild_id INTEGER,
+                total_messages INTEGER DEFAULT 0,
+                messages_today INTEGER DEFAULT 0,
+                messages_week INTEGER DEFAULT 0,
+                messages_month INTEGER DEFAULT 0,
+                commands_used INTEGER DEFAULT 0,
+                attachments_sent INTEGER DEFAULT 0,
+                images_sent INTEGER DEFAULT 0,
+                gifs_sent INTEGER DEFAULT 0,
+                stickers_used INTEGER DEFAULT 0,
+                reactions_given INTEGER DEFAULT 0,
+                reactions_received INTEGER DEFAULT 0,
+                links_shared INTEGER DEFAULT 0,
+                mentions_sent INTEGER DEFAULT 0,
+                mentions_received INTEGER DEFAULT 0,
+                longest_message_length INTEGER DEFAULT 0,
+                total_message_length INTEGER DEFAULT 0,
+                message_count_with_content INTEGER DEFAULT 0,
+                favorite_channel_id INTEGER DEFAULT 0,
+                favorite_emoji TEXT DEFAULT '',
+                voice_hours REAL DEFAULT 0,
+                voice_join_count INTEGER DEFAULT 0,
+                longest_vc_session INTEGER DEFAULT 0,
+                current_vc_session_start INTEGER DEFAULT 0,
+                current_message_streak INTEGER DEFAULT 0,
+                longest_message_streak INTEGER DEFAULT 0,
+                last_message_time TEXT,
+                updated_at TEXT,
+                PRIMARY KEY (user_id, guild_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS server_stats (
+                guild_id INTEGER PRIMARY KEY,
+                total_messages INTEGER DEFAULT 0,
+                total_vc_hours REAL DEFAULT 0,
+                total_commands_executed INTEGER DEFAULT 0,
+                most_active_user_id INTEGER DEFAULT 0,
+                most_active_channel_id INTEGER DEFAULT 0,
+                total_files_uploaded INTEGER DEFAULT 0,
+                total_reactions_used INTEGER DEFAULT 0,
+                total_moderation_actions INTEGER DEFAULT 0,
+                updated_at TEXT
+            )""",
+            """CREATE TABLE IF NOT EXISTS channel_stats (
+                guild_id INTEGER,
+                channel_id INTEGER,
+                total_messages INTEGER DEFAULT 0,
+                most_active_user_id INTEGER DEFAULT 0,
+                total_days_tracked INTEGER DEFAULT 0,
+                total_message_length INTEGER DEFAULT 0,
+                peak_hour INTEGER DEFAULT 0,
+                peak_day TEXT DEFAULT '',
+                updated_at TEXT,
+                PRIMARY KEY (guild_id, channel_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS daily_channel_stats (
+                guild_id INTEGER,
+                channel_id INTEGER,
+                date TEXT,
+                message_count INTEGER DEFAULT 0,
+                unique_users INTEGER DEFAULT 0,
+                PRIMARY KEY (guild_id, channel_id, date)
+            )""",
+            """CREATE TABLE IF NOT EXISTS user_emoji_stats (
+                user_id INTEGER,
+                guild_id INTEGER,
+                emoji TEXT,
+                count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id, emoji)
+            )""",
+            """CREATE TABLE IF NOT EXISTS daily_user_stats (
+                user_id INTEGER,
+                guild_id INTEGER,
+                date TEXT,
+                message_count INTEGER DEFAULT 0,
+                PRIMARY KEY (user_id, guild_id, date)
+            )""",
         ]
         for query in queries:
             self._conn.execute(query)
@@ -281,7 +362,727 @@ class AsyncDatabase:
 db = AsyncDatabase()
 
 # =========================
-# DATABASE HELPER FUNCTIONS
+# STATISTICS HELPER FUNCTIONS
+# =========================
+
+async def update_user_stats(user_id: int, guild_id: int, message: discord.Message = None, is_command: bool = False):
+    """Update user statistics for a message or command."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    week_start = (datetime.now() - timedelta(days=datetime.now().weekday())).strftime("%Y-%m-%d")
+    month_start = datetime.now().replace(day=1).strftime("%Y-%m-%d")
+    
+    # Get current stats
+    result = await db.fetchone(
+        "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
+    
+    if not result:
+        # Initialize stats
+        await db.execute(
+            """INSERT INTO user_stats (
+                user_id, guild_id, total_messages, messages_today, messages_week, messages_month,
+                commands_used, updated_at, last_message_time
+            ) VALUES (?, ?, 0, 0, 0, 0, 0, ?, ?)""",
+            (user_id, guild_id, datetime.now().isoformat(), datetime.now().isoformat())
+        )
+        await db.commit()
+        result = await db.fetchone(
+            "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+            (user_id, guild_id)
+        )
+    
+    current_stats = {
+        "total_messages": result[2],
+        "messages_today": result[3],
+        "messages_week": result[4],
+        "messages_month": result[5],
+        "commands_used": result[6],
+        "attachments_sent": result[7],
+        "images_sent": result[8],
+        "gifs_sent": result[9],
+        "stickers_used": result[10],
+        "reactions_given": result[11],
+        "reactions_received": result[12],
+        "links_shared": result[13],
+        "mentions_sent": result[14],
+        "mentions_received": result[15],
+        "longest_message_length": result[16],
+        "total_message_length": result[17],
+        "message_count_with_content": result[18],
+        "favorite_channel_id": result[19],
+        "favorite_emoji": result[20],
+        "voice_hours": result[21],
+        "voice_join_count": result[22],
+        "longest_vc_session": result[23],
+        "current_vc_session_start": result[24],
+        "current_message_streak": result[25],
+        "longest_message_streak": result[26],
+        "last_message_time": result[27],
+    }
+    
+    # Determine if message streak continues
+    current_streak = current_stats["current_message_streak"]
+    if current_stats["last_message_time"]:
+        last_msg_time = datetime.fromisoformat(current_stats["last_message_time"])
+        time_diff = (datetime.now() - last_msg_time).total_seconds()
+        if time_diff < 3600:  # Within 1 hour
+            current_streak += 1
+        else:
+            current_streak = 1
+    else:
+        current_streak = 1
+    
+    if current_streak > current_stats["longest_message_streak"]:
+        longest_streak = current_streak
+    else:
+        longest_streak = current_stats["longest_message_streak"]
+    
+    updates = {
+        "total_messages": current_stats["total_messages"] + 1,
+        "messages_today": current_stats["messages_today"] + 1,
+        "messages_week": current_stats["messages_week"] + 1,
+        "messages_month": current_stats["messages_month"] + 1,
+        "current_message_streak": current_streak,
+        "longest_message_streak": longest_streak,
+        "last_message_time": datetime.now().isoformat(),
+        "updated_at": datetime.now().isoformat(),
+    }
+    
+    if is_command:
+        updates["commands_used"] = current_stats["commands_used"] + 1
+    
+    if message:
+        # Track attachments
+        if message.attachments:
+            updates["attachments_sent"] = current_stats["attachments_sent"] + len(message.attachments)
+            for att in message.attachments:
+                if att.content_type and att.content_type.startswith("image/"):
+                    updates["images_sent"] = current_stats["images_sent"] + 1
+                elif att.content_type and att.content_type == "image/gif":
+                    updates["gifs_sent"] = current_stats["gifs_sent"] + 1
+        
+        # Track stickers
+        if message.stickers:
+            updates["stickers_used"] = current_stats["stickers_used"] + len(message.stickers)
+        
+        # Track links
+        link_pattern = r'https?://[^\s]+|www\.[^\s]+'
+        if re.search(link_pattern, message.content):
+            updates["links_shared"] = current_stats["links_shared"] + 1
+        
+        # Track mentions sent
+        if message.mentions:
+            updates["mentions_sent"] = current_stats["mentions_sent"] + len(message.mentions)
+        
+        # Track message length
+        content_len = len(message.content)
+        updates["total_message_length"] = current_stats["total_message_length"] + content_len
+        updates["message_count_with_content"] = current_stats["message_count_with_content"] + 1
+        if content_len > current_stats["longest_message_length"]:
+            updates["longest_message_length"] = content_len
+        
+        # Track favorite channel
+        if message.channel.id != current_stats.get("favorite_channel_id", 0):
+            # Count messages per channel in the database
+            channel_count_result = await db.fetchone(
+                "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND user_id=? AND channel_id=?",
+                (guild_id, user_id, message.channel.id)
+            )
+            channel_count = channel_count_result[0] if channel_count_result else 0
+            
+            fav_channel_result = await db.fetchone(
+                "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND user_id=? AND channel_id=?",
+                (guild_id, user_id, current_stats.get("favorite_channel_id", 0))
+            )
+            fav_count = fav_channel_result[0] if fav_channel_result else 0
+            
+            if channel_count > fav_count:
+                updates["favorite_channel_id"] = message.channel.id
+    
+    # Update daily user stats
+    await db.execute(
+        """INSERT INTO daily_user_stats (user_id, guild_id, date, message_count)
+           VALUES (?, ?, ?, 1)
+           ON CONFLICT(user_id, guild_id, date)
+           DO UPDATE SET message_count = message_count + 1""",
+        (user_id, guild_id, today)
+    )
+    
+    # Build update query
+    set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+    values = list(updates.values())
+    values.extend([user_id, guild_id])
+    
+    await db.execute(
+        f"UPDATE user_stats SET {set_clause} WHERE user_id=? AND guild_id=?",
+        tuple(values)
+    )
+    await db.commit()
+    
+    # Update server stats
+    await update_server_stats(guild_id, message, is_command)
+    
+    # Update channel stats
+    if message:
+        await update_channel_stats(guild_id, message.channel.id, user_id, message.content)
+
+async def update_server_stats(guild_id: int, message: discord.Message = None, is_command: bool = False):
+    """Update server-wide statistics."""
+    result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
+    
+    if not result:
+        await db.execute(
+            """INSERT INTO server_stats (
+                guild_id, total_messages, total_vc_hours, total_commands_executed,
+                total_files_uploaded, total_reactions_used, total_moderation_actions,
+                updated_at
+            ) VALUES (?, 0, 0, 0, 0, 0, 0, ?)""",
+            (guild_id, datetime.now().isoformat())
+        )
+        await db.commit()
+        result = await db.fetchone("SELECT * FROM server_stats WHERE guild_id=?", (guild_id,))
+    
+    updates = {}
+    if message:
+        updates["total_messages"] = result[1] + 1
+        if message.attachments:
+            updates["total_files_uploaded"] = result[5] + len(message.attachments)
+        if message.reactions:
+            updates["total_reactions_used"] = result[6] + len(message.reactions)
+    
+    if is_command:
+        updates["total_commands_executed"] = result[3] + 1
+    
+    if updates:
+        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+        values = list(updates.values())
+        values.append(datetime.now().isoformat())
+        values.append(guild_id)
+        await db.execute(
+            f"UPDATE server_stats SET {set_clause}, updated_at=? WHERE guild_id=?",
+            tuple(values)
+        )
+        await db.commit()
+    
+    # Update most active user and channel periodically
+    await update_most_active(guild_id)
+
+async def update_channel_stats(guild_id: int, channel_id: int, user_id: int, content: str):
+    """Update channel statistics."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    
+    result = await db.fetchone(
+        "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
+        (guild_id, channel_id)
+    )
+    
+    if not result:
+        await db.execute(
+            """INSERT INTO channel_stats (
+                guild_id, channel_id, total_messages, most_active_user_id,
+                total_days_tracked, total_message_length, updated_at
+            ) VALUES (?, ?, 0, 0, 0, 0, ?)""",
+            (guild_id, channel_id, datetime.now().isoformat())
+        )
+        await db.commit()
+        result = await db.fetchone(
+            "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
+            (guild_id, channel_id)
+        )
+    
+    updates = {
+        "total_messages": result[2] + 1,
+        "total_message_length": result[5] + len(content),
+        "updated_at": datetime.now().isoformat()
+    }
+    
+    # Update daily channel stats
+    await db.execute(
+        """INSERT INTO daily_channel_stats (guild_id, channel_id, date, message_count, unique_users)
+           VALUES (?, ?, ?, 1, 1)
+           ON CONFLICT(guild_id, channel_id, date)
+           DO UPDATE SET message_count = message_count + 1""",
+        (guild_id, channel_id, today)
+    )
+    
+    # Update most active user for channel
+    user_count = await db.fetchone(
+        "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=?",
+        (guild_id, channel_id, user_id)
+    )
+    current_most = result[3]
+    if current_most:
+        current_count = await db.fetchone(
+            "SELECT COUNT(*) FROM message_stats WHERE guild_id=? AND channel_id=? AND user_id=?",
+            (guild_id, channel_id, current_most)
+        )
+        current_count_val = current_count[0] if current_count else 0
+        new_count = user_count[0] if user_count else 0
+        if new_count > current_count_val:
+            updates["most_active_user_id"] = user_id
+    else:
+        updates["most_active_user_id"] = user_id
+    
+    # Update peak activity
+    hour = datetime.now().hour
+    current_peak_hour = result[6] or 0
+    if hour > current_peak_hour:
+        updates["peak_hour"] = hour
+    
+    day = datetime.now().strftime("%A")
+    current_peak_day = result[7] or ""
+    if day and not current_peak_day:
+        updates["peak_day"] = day
+    
+    # Update total days tracked
+    day_count = await db.fetchone(
+        "SELECT COUNT(DISTINCT date) FROM daily_channel_stats WHERE guild_id=? AND channel_id=?",
+        (guild_id, channel_id)
+    )
+    if day_count and day_count[0] > 0:
+        updates["total_days_tracked"] = day_count[0]
+    
+    set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+    values = list(updates.values())
+    values.extend([guild_id, channel_id])
+    
+    await db.execute(
+        f"UPDATE channel_stats SET {set_clause} WHERE guild_id=? AND channel_id=?",
+        tuple(values)
+    )
+    await db.commit()
+
+async def update_most_active(guild_id: int):
+    """Update the most active user and channel in server stats."""
+    # Most active user
+    user_result = await db.fetchone(
+        """SELECT user_id, SUM(message_count) as total
+           FROM member_message_counts
+           WHERE guild_id=?
+           GROUP BY user_id
+           ORDER BY total DESC
+           LIMIT 1""",
+        (guild_id,)
+    )
+    
+    if user_result:
+        await db.execute(
+            "UPDATE server_stats SET most_active_user_id=? WHERE guild_id=?",
+            (user_result[0], guild_id)
+        )
+        await db.commit()
+    
+    # Most active channel
+    channel_result = await db.fetchone(
+        """SELECT channel_id, COUNT(*) as total
+           FROM message_stats
+           WHERE guild_id=?
+           GROUP BY channel_id
+           ORDER BY total DESC
+           LIMIT 1""",
+        (guild_id,)
+    )
+    
+    if channel_result:
+        await db.execute(
+            "UPDATE server_stats SET most_active_channel_id=? WHERE guild_id=?",
+            (channel_result[0], guild_id)
+        )
+        await db.commit()
+
+async def update_voice_stats(user_id: int, guild_id: int, is_join: bool = True, duration: float = 0):
+    """Update voice statistics for a user."""
+    result = await db.fetchone(
+        "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
+    
+    if not result:
+        await db.execute(
+            """INSERT INTO user_stats (
+                user_id, guild_id, voice_hours, voice_join_count, updated_at
+            ) VALUES (?, ?, 0, 0, ?)""",
+            (user_id, guild_id, datetime.now().isoformat())
+        )
+        await db.commit()
+        result = await db.fetchone(
+            "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+            (user_id, guild_id)
+        )
+    
+    if is_join:
+        # User joined voice
+        updates = {
+            "voice_join_count": result[22] + 1,
+            "current_vc_session_start": int(time.time()),
+            "updated_at": datetime.now().isoformat()
+        }
+        
+        set_clause = ", ".join([f"{key} = ?" for key in updates.keys()])
+        values = list(updates.values())
+        values.extend([user_id, guild_id])
+        
+        await db.execute(
+            f"UPDATE user_stats SET {set_clause} WHERE user_id=? AND guild_id=?",
+            tuple(values)
+        )
+        await db.commit()
+    else:
+        # User left voice - update total hours
+        session_start = result[24]
+        if session_start > 0:
+            session_duration = int(time.time()) - session_start
+            if session_duration > 0:
+                hours = session_duration / 3600.0
+                new_total_hours = result[21] + hours
+                
+                # Update longest session
+                longest = result[23]
+                if session_duration > longest:
+                    longest = session_duration
+                
+                await db.execute(
+                    """UPDATE user_stats
+                       SET voice_hours = ?, longest_vc_session = ?, current_vc_session_start = 0, updated_at = ?
+                       WHERE user_id = ? AND guild_id = ?""",
+                    (new_total_hours, longest, datetime.now().isoformat(), user_id, guild_id)
+                )
+                await db.commit()
+                
+                # Update server total VC hours
+                server_result = await db.fetchone(
+                    "SELECT total_vc_hours FROM server_stats WHERE guild_id=?",
+                    (guild_id,)
+                )
+                if server_result:
+                    await db.execute(
+                        "UPDATE server_stats SET total_vc_hours = ? WHERE guild_id=?",
+                        (server_result[0] + hours, guild_id)
+                    )
+                    await db.commit()
+
+async def track_reaction(guild_id: int, user_id: int, emoji: str, is_given: bool = True):
+    """Track reaction usage."""
+    if is_given:
+        # Track reactions given
+        await db.execute(
+            """INSERT INTO user_stats (user_id, guild_id, reactions_given, updated_at)
+               VALUES (?, ?, 1, ?)
+               ON CONFLICT(user_id, guild_id)
+               DO UPDATE SET reactions_given = reactions_given + 1, updated_at = excluded.updated_at""",
+            (user_id, guild_id, datetime.now().isoformat())
+        )
+        await db.commit()
+        
+        # Track favorite emoji
+        emoji_result = await db.fetchone(
+            "SELECT count FROM user_emoji_stats WHERE user_id=? AND guild_id=? AND emoji=?",
+            (user_id, guild_id, str(emoji))
+        )
+        if emoji_result:
+            await db.execute(
+                "UPDATE user_emoji_stats SET count = count + 1 WHERE user_id=? AND guild_id=? AND emoji=?",
+                (user_id, guild_id, str(emoji))
+            )
+        else:
+            await db.execute(
+                "INSERT INTO user_emoji_stats (user_id, guild_id, emoji, count) VALUES (?, ?, ?, 1)",
+                (user_id, guild_id, str(emoji))
+            )
+        await db.commit()
+        
+        # Update favorite emoji
+        fav_emoji_result = await db.fetchone(
+            """SELECT emoji FROM user_emoji_stats
+               WHERE user_id=? AND guild_id=?
+               ORDER BY count DESC LIMIT 1""",
+            (user_id, guild_id)
+        )
+        if fav_emoji_result:
+            await db.execute(
+                "UPDATE user_stats SET favorite_emoji = ? WHERE user_id=? AND guild_id=?",
+                (fav_emoji_result[0], user_id, guild_id)
+            )
+            await db.commit()
+    
+    # Track server total reactions
+    server_result = await db.fetchone(
+        "SELECT total_reactions_used FROM server_stats WHERE guild_id=?",
+        (guild_id,)
+    )
+    if server_result:
+        await db.execute(
+            "UPDATE server_stats SET total_reactions_used = ? WHERE guild_id=?",
+            (server_result[0] + 1, guild_id)
+        )
+        await db.commit()
+
+async def track_moderation_action(guild_id: int, action: str):
+    """Track moderation actions."""
+    await db.execute(
+        """INSERT INTO server_stats (guild_id, total_moderation_actions)
+           VALUES (?, 1)
+           ON CONFLICT(guild_id)
+           DO UPDATE SET total_moderation_actions = total_moderation_actions + 1""",
+        (guild_id,)
+    )
+    await db.commit()
+
+async def get_user_stats(user_id: int, guild_id: int) -> Dict:
+    """Get comprehensive user statistics."""
+    result = await db.fetchone(
+        "SELECT * FROM user_stats WHERE user_id=? AND guild_id=?",
+        (user_id, guild_id)
+    )
+    
+    if not result:
+        return None
+    
+    return {
+        "user_id": result[0],
+        "guild_id": result[1],
+        "total_messages": result[2],
+        "messages_today": result[3],
+        "messages_week": result[4],
+        "messages_month": result[5],
+        "commands_used": result[6],
+        "attachments_sent": result[7],
+        "images_sent": result[8],
+        "gifs_sent": result[9],
+        "stickers_used": result[10],
+        "reactions_given": result[11],
+        "reactions_received": result[12],
+        "links_shared": result[13],
+        "mentions_sent": result[14],
+        "mentions_received": result[15],
+        "longest_message_length": result[16],
+        "total_message_length": result[17],
+        "message_count_with_content": result[18],
+        "favorite_channel_id": result[19],
+        "favorite_emoji": result[20],
+        "voice_hours": result[21],
+        "voice_join_count": result[22],
+        "longest_vc_session": result[23],
+        "current_vc_session_start": result[24],
+        "current_message_streak": result[25],
+        "longest_message_streak": result[26],
+        "last_message_time": result[27],
+        "updated_at": result[28],
+    }
+
+async def get_server_stats(guild_id: int) -> Dict:
+    """Get server-wide statistics."""
+    result = await db.fetchone(
+        "SELECT * FROM server_stats WHERE guild_id=?",
+        (guild_id,)
+    )
+    
+    if not result:
+        return None
+    
+    return {
+        "guild_id": result[0],
+        "total_messages": result[1],
+        "total_vc_hours": result[2],
+        "total_commands_executed": result[3],
+        "most_active_user_id": result[4],
+        "most_active_channel_id": result[5],
+        "total_files_uploaded": result[6],
+        "total_reactions_used": result[7],
+        "total_moderation_actions": result[8],
+        "updated_at": result[9],
+    }
+
+async def get_channel_stats(guild_id: int, channel_id: int) -> Dict:
+    """Get channel statistics."""
+    result = await db.fetchone(
+        "SELECT * FROM channel_stats WHERE guild_id=? AND channel_id=?",
+        (guild_id, channel_id)
+    )
+    
+    if not result:
+        return None
+    
+    return {
+        "guild_id": result[0],
+        "channel_id": result[1],
+        "total_messages": result[2],
+        "most_active_user_id": result[3],
+        "total_days_tracked": result[4],
+        "total_message_length": result[5],
+        "peak_hour": result[6],
+        "peak_day": result[7],
+        "updated_at": result[8],
+    }
+
+async def get_leaderboard(guild_id: int, stat_type: str, limit: int = 10) -> List:
+    """Get leaderboard for a specific stat type."""
+    query = ""
+    
+    if stat_type == "messages":
+        query = """
+            SELECT user_id, total_messages
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY total_messages DESC
+            LIMIT ?
+        """
+    elif stat_type == "vc_hours":
+        query = """
+            SELECT user_id, voice_hours
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY voice_hours DESC
+            LIMIT ?
+        """
+    elif stat_type == "commands":
+        query = """
+            SELECT user_id, commands_used
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY commands_used DESC
+            LIMIT ?
+        """
+    elif stat_type == "reactions":
+        query = """
+            SELECT user_id, reactions_given
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY reactions_given DESC
+            LIMIT ?
+        """
+    elif stat_type == "attachments":
+        query = """
+            SELECT user_id, attachments_sent
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY attachments_sent DESC
+            LIMIT ?
+        """
+    elif stat_type == "mentions":
+        query = """
+            SELECT user_id, mentions_sent
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY mentions_sent DESC
+            LIMIT ?
+        """
+    elif stat_type == "streak":
+        query = """
+            SELECT user_id, longest_message_streak
+            FROM user_stats
+            WHERE guild_id=?
+            ORDER BY longest_message_streak DESC
+            LIMIT ?
+        """
+    elif stat_type == "channels":
+        query = """
+            SELECT channel_id, total_messages
+            FROM channel_stats
+            WHERE guild_id=?
+            ORDER BY total_messages DESC
+            LIMIT ?
+        """
+    else:
+        return []
+    
+    return await db.fetchall(query, (guild_id, limit))
+
+async def get_fun_titles(user_stats: Dict, guild: discord.Guild, member: discord.Member) -> List[str]:
+    """Get fun titles for a user based on their statistics."""
+    titles = []
+    
+    if user_stats["total_messages"] > 1000:
+        titles.append("💬 Biggest Yapper")
+    elif user_stats["total_messages"] > 500:
+        titles.append("🗣️ Professional Chatter")
+    elif user_stats["total_messages"] > 100:
+        titles.append("📢 Talkative")
+    
+    if user_stats["voice_hours"] > 100:
+        titles.append("🎧 VC Addict")
+    elif user_stats["voice_hours"] > 50:
+        titles.append("🎙️ VC Enthusiast")
+    elif user_stats["voice_hours"] > 10:
+        titles.append("🔊 VC Regular")
+    
+    if user_stats["longest_message_streak"] > 100:
+        titles.append("🔥 Streak God")
+    elif user_stats["longest_message_streak"] > 50:
+        titles.append("⚡ Streak Master")
+    elif user_stats["longest_message_streak"] > 20:
+        titles.append("📈 Streaker")
+    
+    if user_stats["attachments_sent"] > 100:
+        titles.append("📎 Attachment Dealer")
+    elif user_stats["attachments_sent"] > 50:
+        titles.append("📦 Attachment Enthusiast")
+    
+    if user_stats["reactions_given"] > 500:
+        titles.append("🎭 Emoji Criminal")
+    elif user_stats["reactions_given"] > 200:
+        titles.append("😄 Emoji Addict")
+    elif user_stats["reactions_given"] > 50:
+        titles.append("👍 Reaction Giver")
+    
+    if user_stats["links_shared"] > 50:
+        titles.append("🔗 Link Lord")
+    elif user_stats["links_shared"] > 20:
+        titles.append("📎 Linker")
+    
+    if user_stats["commands_used"] > 100:
+        titles.append("🎮 Command Master")
+    elif user_stats["commands_used"] > 50:
+        titles.append("⌨️ Command User")
+    
+    if user_stats["images_sent"] > 100:
+        titles.append("🖼️ Image Lord")
+    elif user_stats["images_sent"] > 50:
+        titles.append("📸 Image Sharer")
+    
+    if user_stats["gifs_sent"] > 50:
+        titles.append("🎬 GIF Master")
+    elif user_stats["gifs_sent"] > 20:
+        titles.append("🎞️ GIF Sharer")
+    
+    if user_stats["stickers_used"] > 50:
+        titles.append("🎨 Sticker Lord")
+    elif user_stats["stickers_used"] > 20:
+        titles.append("🎭 Sticker User")
+    
+    # Midnight Goblin - check messages between midnight and 6 AM
+    # This is tracked via last_message_time
+    if user_stats["last_message_time"]:
+        try:
+            last_msg = datetime.fromisoformat(user_stats["last_message_time"])
+            if 0 <= last_msg.hour < 6:
+                titles.append("🦉 Midnight Goblin")
+        except:
+            pass
+    
+    # Check if user is in the top 10 for any stat
+    top_messages = await db.fetchone(
+        "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND total_messages > ?",
+        (user_stats["guild_id"], user_stats["total_messages"])
+    )
+    if top_messages and top_messages[0] < 10:
+        titles.append("👑 Top Chatter")
+    
+    top_vc = await db.fetchone(
+        "SELECT COUNT(*) FROM user_stats WHERE guild_id=? AND voice_hours > ?",
+        (user_stats["guild_id"], user_stats["voice_hours"])
+    )
+    if top_vc and top_vc[0] < 10 and user_stats["voice_hours"] > 0:
+        titles.append("🎵 VC Royalty")
+    
+    if not titles:
+        titles.append("🌱 Newbie")
+    
+    return titles
+
+# =========================
+# DATABASE HELPER FUNCTIONS (EXISTING)
 # =========================
 
 async def add_warning(user_id, guild_id, reason, moderator=None):
@@ -290,6 +1091,7 @@ async def add_warning(user_id, guild_id, reason, moderator=None):
         (user_id, guild_id, reason, moderator, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     )
     await db.commit()
+    await track_moderation_action(guild_id, "warn")
 
 async def get_warnings(user_id, guild_id):
     return await db.fetchall(
@@ -1016,16 +1818,19 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
             if self.action_type in ["warn", "add_warning"]:
                 await add_warning(self.target.id, guild.id, reason, str(interaction.user))
                 await add_history(guild.id, self.target.id, str(self.target), "WARN", reason)
+                await track_moderation_action(guild.id, "warn")
                 await interaction.response.send_message(f"✅ Warned {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "ban":
                 await self.target.ban(reason=reason)
                 await add_history(guild.id, self.target.id, str(self.target), "BAN", f"Banned by {interaction.user}: {reason}")
+                await track_moderation_action(guild.id, "ban")
                 await interaction.response.send_message(f"✅ Banned {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type == "kick":
                 await self.target.kick(reason=reason)
                 await add_history(guild.id, self.target.id, str(self.target), "KICK", reason)
+                await track_moderation_action(guild.id, "kick")
                 await interaction.response.send_message(f"✅ Kicked {self.target.mention} | Reason: {reason}", ephemeral=True)
                 
             elif self.action_type in ["timeout", "mute"]:
@@ -1036,6 +1841,7 @@ class ModerationActionModal(discord.ui.Modal, title="Moderation Action"):
                         return
                     await self.target.timeout(utcnow() + timedelta(minutes=duration_minutes), reason=reason)
                     await add_history(guild.id, self.target.id, str(self.target), "TIMEOUT", f"Timed out for {duration_minutes}min by {interaction.user}: {reason}")
+                    await track_moderation_action(guild.id, "timeout")
                     await interaction.response.send_message(f"✅ Timed out {self.target.mention} for {duration_minutes} minutes | Reason: {reason}", ephemeral=True)
                 except ValueError:
                     await interaction.response.send_message("❌ Invalid duration. Please enter a number.", ephemeral=True)
@@ -1214,7 +2020,6 @@ class ModerationChannelSelectView(discord.ui.View):
             if channel:
                 self.selected_channel = channel
                 if self.destructive:
-                    # Show confirmation for destructive actions
                     await self._show_confirmation(select_interaction, channel)
                 else:
                     await callback_func(select_interaction, channel, self.action_type)
@@ -1248,7 +2053,6 @@ class ModerationChannelSelectView(discord.ui.View):
         
         view = discord.ui.View()
         
-        # Confirm button
         confirm_button = discord.ui.Button(
             label="✅ Confirm",
             style=discord.ButtonStyle.danger,
@@ -1256,14 +2060,11 @@ class ModerationChannelSelectView(discord.ui.View):
         )
         
         async def confirm_callback(button_interaction: discord.Interaction):
-            # Call the original callback with the channel
-            # We need to get the original callback from the parent
             await self._execute_action(button_interaction, channel)
         
         confirm_button.callback = confirm_callback
         view.add_item(confirm_button)
         
-        # Cancel button
         cancel_button = discord.ui.Button(
             label="❌ Cancel",
             style=discord.ButtonStyle.secondary,
@@ -1280,18 +2081,10 @@ class ModerationChannelSelectView(discord.ui.View):
     
     async def _execute_action(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """Execute the action after confirmation."""
-        # We need to get the callback from the parent view
-        # This is a workaround - we'll get the callback from the original view
-        # Since we can't easily pass it through, we'll use the stored callback
-        # For destructive actions, we'll open the modal directly
-        
         if self.action_type in ["thanos_snap", "clear"]:
-            # For destructive actions, open the modal
             modal = ModerationActionModal(self.action_type, channel)
             await interaction.response.send_modal(modal)
         else:
-            # For non-destructive actions, just execute
-            # This shouldn't happen for destructive actions, but just in case
             await interaction.response.send_message("❌ Unknown action.", ephemeral=True)
 
 class ModerationPanelView(discord.ui.View):
@@ -1303,7 +2096,6 @@ class ModerationPanelView(discord.ui.View):
         self.guild = guild
         self.return_to_main_callback = return_to_main_callback
 
-        # ===== ROW 0 - User Moderation Actions =====
         self.add_item(ModerationPanelButton(
             "⚠️ Warn", "warn",
             discord.ButtonStyle.danger, row=0
@@ -1321,7 +2113,6 @@ class ModerationPanelView(discord.ui.View):
             discord.ButtonStyle.danger, row=0
         ))
 
-        # ===== ROW 1 - More User Actions =====
         self.add_item(ModerationPanelButton(
             "🔊 Unmute", "unmute",
             discord.ButtonStyle.success, row=1
@@ -1339,7 +2130,6 @@ class ModerationPanelView(discord.ui.View):
             discord.ButtonStyle.secondary, row=1
         ))
 
-        # ===== ROW 2 - Channel Actions =====
         self.add_item(ModerationPanelButton(
             "🧹 Clear", "clear",
             discord.ButtonStyle.secondary, row=2
@@ -1357,7 +2147,6 @@ class ModerationPanelView(discord.ui.View):
             discord.ButtonStyle.success, row=2
         ))
 
-        # ===== ROW 3 - Channel Settings =====
         self.add_item(ModerationPanelButton(
             "⏱️ Slowmode", "slowmode",
             discord.ButtonStyle.primary, row=3
@@ -1379,7 +2168,6 @@ class ModerationPanelView(discord.ui.View):
             discord.ButtonStyle.secondary, row=3
         ))
 
-        # ===== ROW 4 - Warning Management =====
         self.add_item(ModerationPanelButton(
             "📋 View Warnings", "view_warnings",
             discord.ButtonStyle.secondary, row=4
@@ -1405,17 +2193,14 @@ class ModerationPanelView(discord.ui.View):
                 ephemeral=True
             )
         
-        # Back to main panel
         if action == "back_to_main":
             await self.return_to_main_callback(interaction)
             return
         
-        # Channel actions that need channel selection
         channel_actions = ["lock", "unlock", "clear", "thanos_snap", "slowmode", "hide", "show"]
         destructive_actions = ["thanos_snap", "clear"]
         
         if action in channel_actions:
-            # Show channel selector
             embed = discord.Embed(
                 title=f"Select Target Channel for {action.replace('_', ' ').title()}",
                 description=f"Choose a channel from the dropdown below.",
@@ -1431,7 +2216,6 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        # Snipe and Edit Snipe - show last deleted/edited message
         if action == "snipe":
             await self._handle_snipe(interaction)
             return
@@ -1439,7 +2223,6 @@ class ModerationPanelView(discord.ui.View):
             await self._handle_edit_snipe(interaction)
             return
         
-        # View warnings - show member selector then warnings
         if action == "view_warnings":
             embed = discord.Embed(
                 title="📋 View Warnings",
@@ -1453,7 +2236,6 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        # Clear warnings - show member selector then clear
         if action == "clear_warnings":
             embed = discord.Embed(
                 title="🧹 Clear Warnings",
@@ -1467,12 +2249,10 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        # Remove warning - ask for warning ID
         if action == "remove_warning":
             await self._handle_remove_warning(interaction)
             return
         
-        # History - show member selector then history
         if action == "history":
             embed = discord.Embed(
                 title="📜 Moderation History",
@@ -1486,12 +2266,10 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        # Unban - special case (user may not be in server)
         if action == "unban":
             await self._handle_unban(interaction)
             return
         
-        # User actions that need member selection (warn, ban, kick, timeout, unmute, softban)
         if action in ["warn", "ban", "kick", "timeout", "unmute", "softban"]:
             embed = discord.Embed(
                 title=f"Select Target for {action.replace('_', ' ').title()}",
@@ -1505,7 +2283,6 @@ class ModerationPanelView(discord.ui.View):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
         
-        # Fallback
         await interaction.response.send_message(f"❌ Unknown action: {action}", ephemeral=True)
 
     async def _channel_action_callback(self, interaction: discord.Interaction, channel: discord.TextChannel, action: str):
@@ -1790,7 +2567,6 @@ class ControlPanelButton(discord.ui.Button):
             )
 
         if self.custom_id == "open_moderation":
-            # Open the moderation panel
             embed = discord.Embed(
                 title="🛡️ Moderation Control Panel",
                 description="Complete moderation dashboard with all moderation commands.\n\n"
@@ -1811,7 +2587,6 @@ class ControlPanelButton(discord.ui.Button):
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
 
-        # Route to existing handlers
         command_map = {
             "show_stats": handle_show_stats,
             "clear_cache": handle_clear_cache,
@@ -1926,7 +2701,6 @@ class ControlPanelView(discord.ui.View):
         self.bot = bot_instance
         self.owner_id = owner_id
         
-        # Row 0 - Main Functions
         self.add_item(ControlPanelButton(
             "📊 Stats",
             "show_stats",
@@ -1948,7 +2722,6 @@ class ControlPanelView(discord.ui.View):
             row=0
         ))
         
-        # Row 1 - Database
         self.add_item(ControlPanelButton(
             "💾 DB Status",
             "db_status",
@@ -1970,7 +2743,6 @@ class ControlPanelView(discord.ui.View):
             row=1
         ))
         
-        # Row 2 - System
         self.add_item(ControlPanelButton(
             "⚙️ Modules",
             "toggle_modules",
@@ -1992,7 +2764,6 @@ class ControlPanelView(discord.ui.View):
             row=2
         ))
         
-        # Row 3 - Moderation Panel
         self.add_item(ControlPanelButton(
             "🛡️ Moderation",
             "open_moderation",
@@ -2161,6 +2932,7 @@ async def on_voice_state_update(member, before, after):
         if before.channel != after.channel:
             if after.channel:
                 await add_history(member.guild.id, member.id, str(member), "VOICE_JOIN", f"Joined {after.channel.name}")
+                await update_voice_stats(member.id, member.guild.id, is_join=True)
                 
                 config = await get_mod_logs_config(member.guild.id)
                 if config and config["enabled"] and config["log_voice"]:
@@ -2176,6 +2948,7 @@ async def on_voice_state_update(member, before, after):
                     
             elif before.channel:
                 await add_history(member.guild.id, member.id, str(member), "VOICE_LEAVE", f"Left {before.channel.name}")
+                await update_voice_stats(member.id, member.guild.id, is_join=False)
                 
                 config = await get_mod_logs_config(member.guild.id)
                 if config and config["enabled"] and config["log_voice"]:
@@ -2248,6 +3021,31 @@ async def on_member_update(before, after):
         logger.error(f"on_member_update error: {e}")
 
 @bot.event
+async def on_reaction_add(reaction, user):
+    if user.bot:
+        return
+    
+    try:
+        if reaction.message.guild:
+            await track_reaction(reaction.message.guild.id, user.id, reaction.emoji, is_given=True)
+            
+            # Track reactions received (by message author)
+            if reaction.message.author.id != user.id:
+                await track_reaction(reaction.message.guild.id, reaction.message.author.id, reaction.emoji, is_given=False)
+                
+                # Update user stats for reactions received
+                await db.execute(
+                    """INSERT INTO user_stats (user_id, guild_id, reactions_received, updated_at)
+                       VALUES (?, ?, 1, ?)
+                       ON CONFLICT(user_id, guild_id)
+                       DO UPDATE SET reactions_received = reactions_received + 1, updated_at = excluded.updated_at""",
+                    (reaction.message.author.id, reaction.message.guild.id, datetime.now().isoformat())
+                )
+                await db.commit()
+    except Exception as e:
+        logger.error(f"on_reaction_add error: {e}")
+
+@bot.event
 async def on_message(message):
     if message.author.bot:
         return
@@ -2257,6 +3055,9 @@ async def on_message(message):
             await log_message(message.guild.id, message.channel.id, message.author.id, message.content)
             await increment_message_count(message.author.id, message.guild.id)
             await automod.check_message(message)
+            
+            # Update statistics
+            await update_user_stats(message.author.id, message.guild.id, message)
             
             new_level = await add_xp(message.author.id, message.guild.id)
             if new_level:
@@ -2310,6 +3111,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             deleted = await interaction.channel.purge(limit=amount)
             await interaction.followup.send(f"🧹 Deleted {len(deleted)} messages", ephemeral=True)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CLEAR", f"Cleared {len(deleted)} messages in #{interaction.channel.name}")
+            await track_moderation_action(interaction.guild.id, "clear")
             
             embed = discord.Embed(
                 title="🧹 Channel Cleared",
@@ -2337,6 +3139,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
                     break
             await interaction.followup.send(f"🧹 Cleared {total} messages", ephemeral=True)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "CLEARALL", f"Cleared {total} messages in #{interaction.channel.name}")
+            await track_moderation_action(interaction.guild.id, "clearall")
             
             embed = discord.Embed(
                 title="🧹 Channel Wiped",
@@ -2362,6 +3165,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             
             await member.ban(reason=reason)
             await add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "ban")
             
             embed = discord.Embed(title="🔨 User Banned", color=discord.Color.red())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -2398,6 +3202,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             await asyncio.sleep(1)
             await interaction.guild.unban(member, reason="Softban complete")
             await add_history(interaction.guild.id, member.id, str(member), "SOFTBAN", f"Softbanned by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "softban")
             
             embed = discord.Embed(title="🧹 User Softbanned", color=discord.Color.orange())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -2428,6 +3233,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             user = await self.bot.fetch_user(int(user_id))
             await interaction.guild.unban(user, reason=reason)
             await add_history(interaction.guild.id, int(user_id), str(user), "UNBAN", f"Unbanned by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "unban")
             
             embed = discord.Embed(title="🔓 User Unbanned", color=discord.Color.green())
             embed.add_field(name="User", value=user.mention if user else user_id, inline=True)
@@ -2464,6 +3270,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             
             await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
             await add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
+            await track_moderation_action(interaction.guild.id, "mute")
             
             embed = discord.Embed(title="🔇 User Muted", color=discord.Color.orange())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -2525,6 +3332,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             
             await member.kick(reason=reason)
             await add_history(interaction.guild.id, member.id, str(member), "KICK", reason)
+            await track_moderation_action(interaction.guild.id, "kick")
             
             embed = discord.Embed(title="👢 User Kicked", color=discord.Color.red())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -2639,6 +3447,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             overwrite.send_messages = False
             await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "LOCK", f"Locked #{channel.name}")
+            await track_moderation_action(interaction.guild.id, "lock")
             
             embed = discord.Embed(title="🔒 Channel Locked", color=discord.Color.red())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
@@ -2669,6 +3478,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             overwrite.send_messages = None
             await channel.set_permissions(interaction.guild.default_role, overwrite=overwrite)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "UNLOCK", f"Unlocked #{channel.name}")
+            await track_moderation_action(interaction.guild.id, "unlock")
             
             embed = discord.Embed(title="🔓 Channel Unlocked", color=discord.Color.green())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
@@ -2699,6 +3509,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
                 return await interaction.followup.send("❌ Slowmode must be between 0 and 21600 seconds.", ephemeral=True)
             await channel.edit(slowmode_delay=seconds)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "SLOWMODE", f"Set slowmode in #{channel.name} to {seconds}s")
+            await track_moderation_action(interaction.guild.id, "slowmode")
             
             embed = discord.Embed(title="⏱️ Slowmode Set", color=discord.Color.blue())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
@@ -2815,6 +3626,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
         try:
             channel = channel or interaction.channel
             await channel.set_permissions(interaction.guild.default_role, view_channel=False)
+            await track_moderation_action(interaction.guild.id, "hide")
             
             embed = discord.Embed(title="👁️ Channel Hidden", color=discord.Color.orange())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
@@ -2842,6 +3654,7 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
         try:
             channel = channel or interaction.channel
             await channel.set_permissions(interaction.guild.default_role, view_channel=None)
+            await track_moderation_action(interaction.guild.id, "show")
             
             embed = discord.Embed(title="👁️ Channel Shown", color=discord.Color.green())
             embed.add_field(name="Channel", value=channel.mention, inline=True)
@@ -2998,6 +3811,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             channel_name = member.voice.channel.name
             await member.move_to(None, reason=f"Voice kicked by {interaction.user}")
             await add_history(interaction.guild.id, member.id, str(member), "VOICE_KICK", f"Disconnected from voice by {interaction.user}")
+            await track_moderation_action(interaction.guild.id, "voice_kick")
             
             embed = discord.Embed(title="🔊 User Voice Kicked", color=discord.Color.orange())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -3023,6 +3837,7 @@ class VoiceModeration(commands.Cog, name="voice_moderation"):
             old_channel = member.voice.channel
             await member.move_to(channel, reason=f"Moved by {interaction.user}")
             await add_history(interaction.guild.id, member.id, str(member), "VOICE_MOVE", f"Moved from {old_channel.name} to {channel.name} by {interaction.user}")
+            await track_moderation_action(interaction.guild.id, "voice_move")
             
             embed = discord.Embed(title="🔊 User Moved", color=discord.Color.blue())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -3149,6 +3964,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return msg.author.id == member.id
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, member.id, str(member), "PURGE_USER", f"Purged {len(deleted)} messages by {interaction.user}")
+            await track_moderation_action(interaction.guild.id, "purge_user")
             
             embed = discord.Embed(title="🧹 User Messages Purged", color=discord.Color.orange())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -3171,6 +3987,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return msg.author.bot
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_BOTS", f"Purged {len(deleted)} bot messages")
+            await track_moderation_action(interaction.guild.id, "purge_bots")
             
             embed = discord.Embed(title="🤖 Bot Messages Purged", color=discord.Color.orange())
             embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
@@ -3192,6 +4009,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return any(a.content_type and a.content_type.startswith("image/") for a in msg.attachments)
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_IMAGES", f"Purged {len(deleted)} images")
+            await track_moderation_action(interaction.guild.id, "purge_images")
             
             embed = discord.Embed(title="🖼️ Images Purged", color=discord.Color.orange())
             embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
@@ -3213,6 +4031,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return len(msg.attachments) > 0
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_ATTACHMENTS", f"Purged {len(deleted)} attachments")
+            await track_moderation_action(interaction.guild.id, "purge_attachments")
             
             embed = discord.Embed(title="📎 Attachments Purged", color=discord.Color.orange())
             embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
@@ -3234,6 +4053,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return len(msg.embeds) > 0
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_EMBEDS", f"Purged {len(deleted)} embeds")
+            await track_moderation_action(interaction.guild.id, "purge_embeds")
             
             embed = discord.Embed(title="📦 Embeds Purged", color=discord.Color.orange())
             embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
@@ -3256,6 +4076,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return text.lower() in msg.content.lower()
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_CONTAINS", f"Purged {len(deleted)} messages containing '{text}'")
+            await track_moderation_action(interaction.guild.id, "purge_contains")
             
             embed = discord.Embed(title="🔍 Messages Purged", color=discord.Color.orange())
             embed.add_field(name="Contains", value=text, inline=True)
@@ -3279,6 +4100,7 @@ class ChannelManagement(commands.Cog, name="channel_management"):
                 return re.search(link_regex, msg.content.lower()) is not None
             deleted = await interaction.channel.purge(limit=amount, check=check)
             await add_history(interaction.guild.id, interaction.user.id, str(interaction.user), "PURGE_LINKS", f"Purged {len(deleted)} messages with links")
+            await track_moderation_action(interaction.guild.id, "purge_links")
             
             embed = discord.Embed(title="🔗 Links Purged", color=discord.Color.orange())
             embed.add_field(name="Messages Deleted", value=str(len(deleted)), inline=True)
@@ -4268,6 +5090,445 @@ class AI(commands.Cog, name="ai"):
             await interaction.followup.send(f"❌ AI Error: {str(e)}")
 
 # =========================
+# 📊 STATISTICS COG (OWNER ONLY)
+# =========================
+class Statistics(commands.Cog, name="statistics"):
+    """Advanced statistics commands - Owner Only."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    stats_group = app_commands.Group(name="stats", description="Advanced statistics - Owner Only")
+    
+    @stats_group.command(name="user", description="View detailed statistics for a user")
+    @is_owner()
+    @app_commands.describe(member="Member to view statistics for")
+    async def stats_user(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer()
+        
+        stats = await get_user_stats(member.id, interaction.guild.id)
+        if not stats:
+            return await interaction.followup.send(f"📊 No statistics recorded for {member.mention} yet. Stats begin tracking after the feature is added.")
+        
+        guild = interaction.guild
+        
+        # Get favorite channel
+        fav_channel = None
+        if stats["favorite_channel_id"]:
+            fav_channel = guild.get_channel(stats["favorite_channel_id"])
+        
+        # Calculate average message length
+        avg_length = 0
+        if stats["message_count_with_content"] > 0:
+            avg_length = stats["total_message_length"] / stats["message_count_with_content"]
+        
+        # Get titles
+        titles = await get_fun_titles(stats, guild, member)
+        
+        embed = discord.Embed(
+            title=f"📊 Statistics for {member.display_name}",
+            color=member.color or discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
+        
+        # General stats
+        embed.add_field(
+            name="💬 Messages",
+            value=f"Total: **{stats['total_messages']:,}**\n"
+                  f"Today: {stats['messages_today']:,}\n"
+                  f"This Week: {stats['messages_week']:,}\n"
+                  f"This Month: {stats['messages_month']:,}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📏 Message Length",
+            value=f"Longest: **{stats['longest_message_length']}** chars\n"
+                  f"Average: **{avg_length:.1f}** chars",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔥 Streaks",
+            value=f"Current: **{stats['current_message_streak']}**\n"
+                  f"Longest: **{stats['longest_message_streak']}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎭 Reactions",
+            value=f"Given: **{stats['reactions_given']:,}**\n"
+                  f"Received: **{stats['reactions_received']:,}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📎 Attachments",
+            value=f"Total: **{stats['attachments_sent']:,}**\n"
+                  f"Images: {stats['images_sent']:,}\n"
+                  f"GIFs: {stats['gifs_sent']:,}",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎨 Stickers & Links",
+            value=f"Stickers: **{stats['stickers_used']:,}**\n"
+                  f"Links Shared: **{stats['links_shared']:,}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🔗 Mentions",
+            value=f"Sent: **{stats['mentions_sent']:,}**\n"
+                  f"Received: **{stats['mentions_received']:,}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎙️ Voice",
+            value=f"Hours: **{stats['voice_hours']:.1f}**\n"
+                  f"Joins: {stats['voice_join_count']:,}\n"
+                  f"Longest Session: **{self._format_duration(stats['longest_vc_session'])}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⚙️ Commands",
+            value=f"**{stats['commands_used']:,}**",
+            inline=True
+        )
+        
+        # Favorite stats
+        fav_channel_name = fav_channel.mention if fav_channel else "None"
+        embed.add_field(
+            name="⭐ Favorites",
+            value=f"Channel: {fav_channel_name}\n"
+                  f"Emoji: {stats['favorite_emoji'] or 'None'}",
+            inline=True
+        )
+        
+        # Titles
+        if titles:
+            embed.add_field(
+                name="🏅 Titles",
+                value="\n".join(titles),
+                inline=False
+            )
+        
+        embed.set_footer(text=f"Updated: {stats['updated_at']}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="server", description="View server-wide statistics")
+    @is_owner()
+    async def stats_server(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        
+        stats = await get_server_stats(interaction.guild.id)
+        if not stats:
+            return await interaction.followup.send("📊 No server statistics available yet. Stats begin tracking after the feature is added.")
+        
+        guild = interaction.guild
+        
+        most_active_user = None
+        if stats["most_active_user_id"]:
+            most_active_user = guild.get_member(stats["most_active_user_id"])
+        
+        most_active_channel = None
+        if stats["most_active_channel_id"]:
+            most_active_channel = guild.get_channel(stats["most_active_channel_id"])
+        
+        embed = discord.Embed(
+            title=f"📊 Server Statistics - {guild.name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        
+        embed.add_field(
+            name="💬 Messages",
+            value=f"**{stats['total_messages']:,}** total messages",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎙️ Voice",
+            value=f"**{stats['total_vc_hours']:.1f}** total hours",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⚙️ Commands",
+            value=f"**{stats['total_commands_executed']:,}** executed",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📎 Files",
+            value=f"**{stats['total_files_uploaded']:,}** uploaded",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🎭 Reactions",
+            value=f"**{stats['total_reactions_used']:,}** used",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="🛡️ Moderation",
+            value=f"**{stats['total_moderation_actions']:,}** actions",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👑 Most Active User",
+            value=most_active_user.mention if most_active_user else "None",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📢 Most Active Channel",
+            value=most_active_channel.mention if most_active_channel else "None",
+            inline=True
+        )
+        
+        embed.set_footer(text=f"Updated: {stats['updated_at']}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="channel", description="View channel statistics")
+    @is_owner()
+    @app_commands.describe(channel="Channel to view statistics for")
+    async def stats_channel(self, interaction: discord.Interaction, channel: discord.TextChannel = None):
+        await interaction.response.defer()
+        
+        target = channel or interaction.channel
+        stats = await get_channel_stats(interaction.guild.id, target.id)
+        if not stats:
+            return await interaction.followup.send(f"📊 No statistics recorded for {target.mention} yet.")
+        
+        most_active_user = None
+        if stats["most_active_user_id"]:
+            most_active_user = interaction.guild.get_member(stats["most_active_user_id"])
+        
+        avg_daily = 0
+        if stats["total_days_tracked"] > 0:
+            avg_daily = stats["total_messages"] / stats["total_days_tracked"]
+        
+        avg_length = 0
+        if stats["total_messages"] > 0:
+            avg_length = stats["total_message_length"] / stats["total_messages"]
+        
+        embed = discord.Embed(
+            title=f"📊 Channel Statistics - #{target.name}",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(
+            name="💬 Total Messages",
+            value=f"**{stats['total_messages']:,}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📅 Days Tracked",
+            value=f"**{stats['total_days_tracked']}**",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📊 Average Daily",
+            value=f"**{avg_daily:.1f}** messages/day",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="📏 Average Length",
+            value=f"**{avg_length:.1f}** chars",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="👑 Most Active User",
+            value=most_active_user.mention if most_active_user else "None",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="⏰ Peak Hour",
+            value=f"**{stats['peak_hour']}:00**" if stats["peak_hour"] else "None",
+            inline=True
+        )
+        
+        if stats["peak_day"]:
+            embed.add_field(
+                name="📅 Peak Day",
+                value=f"**{stats['peak_day']}**",
+                inline=True
+            )
+        
+        embed.set_footer(text=f"Updated: {stats['updated_at']}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="leaderboard", description="View leaderboards for various stats")
+    @is_owner()
+    @app_commands.describe(
+        stat_type="Type of leaderboard to view",
+        limit="Number of entries to show (max 25)"
+    )
+    @app_commands.choices(stat_type=[
+        discord.app_commands.Choice(name="Messages", value="messages"),
+        discord.app_commands.Choice(name="Voice Hours", value="vc_hours"),
+        discord.app_commands.Choice(name="Commands", value="commands"),
+        discord.app_commands.Choice(name="Reactions", value="reactions"),
+        discord.app_commands.Choice(name="Attachments", value="attachments"),
+        discord.app_commands.Choice(name="Mentions", value="mentions"),
+        discord.app_commands.Choice(name="Streaks", value="streak"),
+        discord.app_commands.Choice(name="Channels", value="channels"),
+    ])
+    async def stats_leaderboard(self, interaction: discord.Interaction, stat_type: str, limit: int = 10):
+        await interaction.response.defer()
+        
+        limit = min(limit, 25)
+        results = await get_leaderboard(interaction.guild.id, stat_type, limit)
+        
+        if not results:
+            return await interaction.followup.send(f"📊 No data available for {stat_type} leaderboard yet.")
+        
+        stat_names = {
+            "messages": "Total Messages",
+            "vc_hours": "Voice Hours",
+            "commands": "Commands Used",
+            "reactions": "Reactions Given",
+            "attachments": "Attachments Sent",
+            "mentions": "Mentions Sent",
+            "streak": "Longest Streak",
+            "channels": "Channel Messages"
+        }
+        
+        stat_name = stat_names.get(stat_type, stat_type.title())
+        embed = discord.Embed(
+            title=f"🏆 {stat_name} Leaderboard",
+            color=discord.Color.gold(),
+            timestamp=datetime.now()
+        )
+        
+        medals = ["🥇", "🥈", "🥉"]
+        description = ""
+        
+        for i, result in enumerate(results):
+            user_id = result[0]
+            value = result[1]
+            
+            member = interaction.guild.get_member(user_id)
+            name = member.display_name if member else f"Unknown ({user_id})"
+            prefix = medals[i] if i < 3 else f"{i+1}."
+            
+            if stat_type == "vc_hours":
+                display_value = f"{value:.1f} hours"
+            elif stat_type == "channels":
+                channel = interaction.guild.get_channel(user_id)
+                name = f"#{channel.name}" if channel else f"Unknown ({user_id})"
+                display_value = f"{value:,} messages"
+            elif stat_type == "streak":
+                display_value = f"{value} messages"
+            else:
+                display_value = f"{value:,}"
+            
+            description += f"{prefix} **{name}** - {display_value}\n"
+        
+        embed.description = description
+        embed.set_footer(text=f"Showing top {len(results)} • {interaction.guild.name}")
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="titles", description="View fun titles for a user")
+    @is_owner()
+    @app_commands.describe(member="Member to view titles for")
+    async def stats_titles(self, interaction: discord.Interaction, member: discord.Member):
+        await interaction.response.defer()
+        
+        stats = await get_user_stats(member.id, interaction.guild.id)
+        if not stats:
+            return await interaction.followup.send(f"📊 No statistics recorded for {member.mention} yet.")
+        
+        titles = await get_fun_titles(stats, interaction.guild, member)
+        
+        embed = discord.Embed(
+            title=f"🏅 Titles for {member.display_name}",
+            color=member.color or discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        if member.avatar:
+            embed.set_thumbnail(url=member.avatar.url)
+        
+        if titles:
+            embed.description = "\n".join([f"• {title}" for title in titles])
+        else:
+            embed.description = "No titles earned yet. Keep chatting!"
+        
+        await interaction.followup.send(embed=embed)
+    
+    @stats_group.command(name="reset", description="Reset statistics for a user (Owner Only)")
+    @is_owner()
+    @app_commands.describe(
+        member="Member to reset statistics for",
+        confirm="Type 'CONFIRM' to confirm reset"
+    )
+    async def stats_reset(self, interaction: discord.Interaction, member: discord.Member, confirm: str):
+        if confirm != "CONFIRM":
+            return await interaction.response.send_message(
+                "⚠️ To confirm reset, type `CONFIRM` in the confirm parameter.",
+                ephemeral=True
+            )
+        
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            await db.execute(
+                "DELETE FROM user_stats WHERE user_id=? AND guild_id=?",
+                (member.id, interaction.guild.id)
+            )
+            await db.execute(
+                "DELETE FROM daily_user_stats WHERE user_id=? AND guild_id=?",
+                (member.id, interaction.guild.id)
+            )
+            await db.execute(
+                "DELETE FROM user_emoji_stats WHERE user_id=? AND guild_id=?",
+                (member.id, interaction.guild.id)
+            )
+            await db.commit()
+            
+            embed = discord.Embed(
+                title="✅ Statistics Reset",
+                description=f"All statistics for {member.mention} have been reset.",
+                color=discord.Color.green()
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            
+        except Exception as e:
+            logger.error(f"Stats reset error: {e}")
+            await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
+    
+    def _format_duration(self, seconds: int) -> str:
+        """Format duration in seconds to a readable string."""
+        if seconds <= 0:
+            return "0s"
+        
+        minutes = seconds // 60
+        hours = minutes // 60
+        
+        if hours > 0:
+            minutes = minutes % 60
+            return f"{hours}h {minutes}m"
+        elif minutes > 0:
+            return f"{minutes}m"
+        else:
+            return f"{seconds}s"
+
+# =========================
 # 📋 UTILITY COMMANDS (NO OWNER CHECK - PUBLIC)
 # =========================
 class Utility(commands.Cog, name="utility"):
@@ -4362,6 +5623,11 @@ class Help(commands.Cog, name="help"):
                   "`/logs set`, `/logs disable`, `/logs status`\n"
                   "`/automod antispam`, `/automod antiinvite`, `/automod antimentions`, `/automod badwords`, `/automod status`\n"
                   "`/warn add`, `/warn list`, `/warn clear`, `/warn remove`",
+            inline=False
+        )
+        embed.add_field(
+            name="📊 Statistics (Owner Only)",
+            value="`/stats user`, `/stats server`, `/stats channel`, `/stats leaderboard`, `/stats titles`, `/stats reset`",
             inline=False
         )
         embed.add_field(
@@ -4642,6 +5908,7 @@ async def main():
         await bot.add_cog(Ticket(bot))
         await bot.add_cog(Leveling(bot))
         await bot.add_cog(AI(bot))
+        await bot.add_cog(Statistics(bot))
         await bot.add_cog(Utility(bot))
         await bot.add_cog(VoiceCommands(bot))
         await bot.add_cog(Help(bot))
