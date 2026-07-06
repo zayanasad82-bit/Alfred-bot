@@ -329,6 +329,28 @@ class AsyncDatabase:
                 message_count INTEGER DEFAULT 0,
                 PRIMARY KEY (user_id, guild_id, date)
             )""",
+            # =========================
+            # SMART SEARCH TABLES
+            # =========================
+            """CREATE TABLE IF NOT EXISTS search_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER,
+                entry_type TEXT,
+                entry_id TEXT,
+                user_id INTEGER,
+                moderator_id INTEGER,
+                channel_id INTEGER,
+                role_id INTEGER,
+                timestamp TEXT,
+                content TEXT,
+                metadata TEXT,
+                UNIQUE(guild_id, entry_type, entry_id)
+            )""",
+            """CREATE TABLE IF NOT EXISTS search_cache (
+                query_hash TEXT PRIMARY KEY,
+                results TEXT,
+                timestamp TEXT
+            )""",
         ]
         for query in queries:
             self._conn.execute(query)
@@ -1274,6 +1296,9 @@ async def add_warning(user_id, guild_id, reason, moderator=None):
     )
     await db.commit()
     await track_moderation_action(guild_id, "warn")
+    
+    # Index for search
+    await index_for_search(guild_id, "warning", str(user_id), user_id, moderator, None, None, reason)
 
 async def get_warnings(user_id, guild_id):
     return await db.fetchall(
@@ -1297,6 +1322,9 @@ async def add_history(guild_id, user_id, username, event_type, details):
          datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     )
     await db.commit()
+    
+    # Index for search
+    await index_for_search(guild_id, event_type.lower(), str(user_id), user_id, None, None, None, details)
 
 async def get_user_history(user_id, guild_id, limit=20):
     return await db.fetchall(
@@ -1323,6 +1351,10 @@ async def log_message(guild_id, channel_id, user_id, content):
         (guild_id, channel_id, user_id, today)
     )
     await db.commit()
+    
+    # Index for search
+    if content:
+        await index_for_search(guild_id, "message", str(user_id), user_id, None, channel_id, None, content)
 
 async def cache_message(message):
     """Cache a message for snipe/delete logging."""
@@ -1334,6 +1366,10 @@ async def cache_message(message):
          message.channel.id, message.guild.id, datetime.now().isoformat(), attachments)
     )
     await db.commit()
+    
+    # Index for search
+    if message.content:
+        await index_for_search(message.guild.id, "message", str(message.id), message.author.id, None, message.channel.id, None, message.content)
 
 async def add_snipe(guild_id, channel_id, message_id, content, author_id, attachments=""):
     await db.execute(
@@ -1348,6 +1384,10 @@ async def add_snipe(guild_id, channel_id, message_id, content, author_id, attach
         (guild_id,)
     )
     await db.commit()
+    
+    # Index for search
+    if content:
+        await index_for_search(guild_id, "deleted_message", str(message_id), author_id, None, channel_id, None, content)
 
 async def add_edit_snipe(guild_id, channel_id, message_id, old_content, new_content, author_id):
     await db.execute(
@@ -1363,6 +1403,11 @@ async def add_edit_snipe(guild_id, channel_id, message_id, old_content, new_cont
         (guild_id,)
     )
     await db.commit()
+    
+    # Index for search
+    if old_content or new_content:
+        content = f"OLD: {old_content} | NEW: {new_content}" if old_content and new_content else (old_content or new_content)
+        await index_for_search(guild_id, "edited_message", str(message_id), author_id, None, channel_id, None, content)
 
 async def get_snipe(guild_id, channel_id):
     result = await db.fetchone(
@@ -1545,6 +1590,148 @@ async def count_events_for_date(guild_id: int, date: str, event_type: str) -> in
         (guild_id, event_type, f"{date}%")
     )
     return result[0] if result else 0
+
+# =========================
+# SMART SEARCH SYSTEM
+# =========================
+
+async def index_for_search(guild_id: int, entry_type: str, entry_id: str, user_id: int = None, 
+                           moderator_id: int = None, channel_id: int = None, role_id: int = None, 
+                           content: str = "", metadata: str = ""):
+    """Index an entry for the search system."""
+    try:
+        # Try to update existing index first
+        await db.execute(
+            """INSERT OR REPLACE INTO search_index 
+               (guild_id, entry_type, entry_id, user_id, moderator_id, channel_id, role_id, timestamp, content, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (guild_id, entry_type, entry_id, user_id, moderator_id, channel_id, role_id, 
+             datetime.now().isoformat(), content[:500] if content else "", metadata[:500] if metadata else "")
+        )
+        await db.commit()
+    except Exception as e:
+        logger.error(f"Error indexing for search: {e}")
+
+async def smart_search(guild_id: int, filters: Dict) -> List[Dict]:
+    """Perform a smart search across all indexed data."""
+    try:
+        query = "SELECT * FROM search_index WHERE guild_id = ?"
+        params = [guild_id]
+        
+        # Apply filters
+        if filters.get("user_id"):
+            query += " AND user_id = ?"
+            params.append(filters["user_id"])
+        
+        if filters.get("moderator_id"):
+            query += " AND moderator_id = ?"
+            params.append(filters["moderator_id"])
+        
+        if filters.get("channel_id"):
+            query += " AND channel_id = ?"
+            params.append(filters["channel_id"])
+        
+        if filters.get("role_id"):
+            query += " AND role_id = ?"
+            params.append(filters["role_id"])
+        
+        if filters.get("entry_type"):
+            query += " AND entry_type = ?"
+            params.append(filters["entry_type"])
+        
+        if filters.get("keyword"):
+            query += " AND content LIKE ?"
+            params.append(f"%{filters['keyword']}%")
+        
+        if filters.get("date_from"):
+            query += " AND timestamp >= ?"
+            params.append(filters["date_from"])
+        
+        if filters.get("date_to"):
+            query += " AND timestamp <= ?"
+            params.append(filters["date_to"])
+        
+        # Sorting
+        sort_order = filters.get("sort", "newest")
+        if sort_order == "newest":
+            query += " ORDER BY timestamp DESC"
+        elif sort_order == "oldest":
+            query += " ORDER BY timestamp ASC"
+        else:  # relevance - use keyword matching
+            if filters.get("keyword"):
+                query += " ORDER BY CASE WHEN content LIKE ? THEN 1 ELSE 0 END DESC, timestamp DESC"
+                params.append(f"%{filters['keyword']}%")
+            else:
+                query += " ORDER BY timestamp DESC"
+        
+        # Limit
+        limit = min(filters.get("limit", 50), 100)
+        query += " LIMIT ?"
+        params.append(limit)
+        
+        results = await db.fetchall(query, tuple(params))
+        
+        # Format results
+        formatted = []
+        for row in results:
+            formatted.append({
+                "id": row[0],
+                "guild_id": row[1],
+                "entry_type": row[2],
+                "entry_id": row[3],
+                "user_id": row[4],
+                "moderator_id": row[5],
+                "channel_id": row[6],
+                "role_id": row[7],
+                "timestamp": row[8],
+                "content": row[9],
+                "metadata": row[10]
+            })
+        
+        return formatted
+        
+    except Exception as e:
+        logger.error(f"Smart search error: {e}")
+        return []
+
+async def export_search_results(results: List[Dict], format: str = "txt") -> str:
+    """Export search results to a file."""
+    if format == "txt":
+        output = "=== SMART SEARCH RESULTS ===\n\n"
+        for i, result in enumerate(results, 1):
+            output += f"[{i}] Type: {result['entry_type']}\n"
+            output += f"    User ID: {result['user_id']}\n"
+            output += f"    Time: {result['timestamp']}\n"
+            output += f"    Content: {result['content']}\n"
+            output += f"    Metadata: {result['metadata']}\n"
+            output += "-" * 50 + "\n"
+        return output
+    
+    elif format == "csv":
+        import csv
+        import io
+        
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["ID", "Type", "Entry ID", "User ID", "Moderator ID", "Channel ID", "Role ID", "Timestamp", "Content", "Metadata"])
+        
+        for result in results:
+            writer.writerow([
+                result["id"],
+                result["entry_type"],
+                result["entry_id"],
+                result["user_id"],
+                result["moderator_id"],
+                result["channel_id"],
+                result["role_id"],
+                result["timestamp"],
+                result["content"],
+                result["metadata"]
+            ])
+        
+        return output.getvalue()
+    
+    return "Unsupported format"
 
 # =========================
 # OWNER CHECK
@@ -1944,6 +2131,447 @@ async def handle_db_status(interaction: discord.Interaction):
         await interaction.response.send_message(embed=embed, ephemeral=True)
     except Exception as e:
         await interaction.response.send_message(f"❌ Database error: {str(e)}", ephemeral=True)
+
+# =========================
+# SMART SEARCH CONTROL PANEL HANDLERS
+# =========================
+
+async def handle_search(interaction: discord.Interaction, search_data: Dict):
+    """Handle search command from control panel."""
+    try:
+        # Perform search
+        results = await smart_search(interaction.guild_id, search_data)
+        
+        if not results:
+            embed = discord.Embed(
+                title="🔍 Search Results",
+                description="No results found matching your criteria.",
+                color=discord.Color.orange()
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        
+        # Create paginated view
+        view = SearchResultsView(results, interaction.guild, search_data.get("format", "txt"))
+        
+        # Show first page
+        embed = view.create_embed(0)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        
+    except Exception as e:
+        logger.error(f"Search handler error: {e}")
+        await interaction.response.send_message(f"❌ Search error: {str(e)}", ephemeral=True)
+
+class SearchResultsView(discord.ui.View):
+    """View for paginated search results."""
+    
+    def __init__(self, results: List[Dict], guild: discord.Guild, format: str = "txt"):
+        super().__init__(timeout=300)
+        self.results = results
+        self.guild = guild
+        self.current_page = 0
+        self.page_size = 5
+        self.format = format
+        self.total_pages = (len(results) + self.page_size - 1) // self.page_size
+        
+        self.update_buttons()
+    
+    def update_buttons(self):
+        """Update button states based on current page."""
+        self.clear_items()
+        
+        # Previous button
+        prev_button = discord.ui.Button(
+            label="⬅️ Previous",
+            style=discord.ButtonStyle.secondary,
+            custom_id="prev_page",
+            disabled=self.current_page == 0
+        )
+        prev_button.callback = self.prev_callback
+        self.add_item(prev_button)
+        
+        # Page info
+        page_info = discord.ui.Button(
+            label=f"Page {self.current_page + 1}/{self.total_pages}",
+            style=discord.ButtonStyle.secondary,
+            custom_id="page_info",
+            disabled=True
+        )
+        self.add_item(page_info)
+        
+        # Next button
+        next_button = discord.ui.Button(
+            label="Next ➡️",
+            style=discord.ButtonStyle.secondary,
+            custom_id="next_page",
+            disabled=self.current_page >= self.total_pages - 1
+        )
+        next_button.callback = self.next_callback
+        self.add_item(next_button)
+        
+        # Export buttons
+        export_txt = discord.ui.Button(
+            label="📄 Export TXT",
+            style=discord.ButtonStyle.primary,
+            custom_id="export_txt"
+        )
+        export_txt.callback = self.export_callback
+        self.add_item(export_txt)
+        
+        export_csv = discord.ui.Button(
+            label="📊 Export CSV",
+            style=discord.ButtonStyle.primary,
+            custom_id="export_csv"
+        )
+        export_csv.callback = self.export_callback
+        self.add_item(export_csv)
+    
+    def create_embed(self, page: int) -> discord.Embed:
+        """Create an embed for the current page."""
+        start = page * self.page_size
+        end = min(start + self.page_size, len(self.results))
+        page_results = self.results[start:end]
+        
+        embed = discord.Embed(
+            title="🔍 Smart Search Results",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        
+        embed.set_footer(text=f"Showing {start+1}-{end} of {len(self.results)} results")
+        
+        for i, result in enumerate(page_results, start + 1):
+            entry_type = result['entry_type'].replace('_', ' ').title()
+            user = self.guild.get_member(result['user_id']) if result['user_id'] else None
+            moderator = self.guild.get_member(result['moderator_id']) if result['moderator_id'] else None
+            
+            content = result['content'][:200] if result['content'] else "No content"
+            if len(result['content']) > 200:
+                content += "..."
+            
+            value = f"**Type:** {entry_type}\n"
+            if user:
+                value += f"**User:** {user.mention}\n"
+            if moderator:
+                value += f"**Moderator:** {moderator.mention}\n"
+            value += f"**Time:** {result['timestamp']}\n"
+            value += f"**Content:** {content}\n"
+            
+            embed.add_field(
+                name=f"#{i} - {entry_type}",
+                value=value,
+                inline=False
+            )
+        
+        return embed
+    
+    async def prev_callback(self, interaction: discord.Interaction):
+        """Handle previous page button."""
+        if self.current_page > 0:
+            self.current_page -= 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def next_callback(self, interaction: discord.Interaction):
+        """Handle next page button."""
+        if self.current_page < self.total_pages - 1:
+            self.current_page += 1
+            self.update_buttons()
+            embed = self.create_embed(self.current_page)
+            await interaction.response.edit_message(embed=embed, view=self)
+    
+    async def export_callback(self, interaction: discord.Interaction):
+        """Handle export button."""
+        format_type = "csv" if interaction.data["custom_id"] == "export_csv" else "txt"
+        
+        try:
+            export_text = await export_search_results(self.results, format_type)
+            
+            filename = f"search_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.{format_type}"
+            file = discord.File(io.BytesIO(export_text.encode('utf-8')), filename=filename)
+            
+            await interaction.response.send_message(
+                f"✅ Exported {len(self.results)} results to {filename}",
+                file=file,
+                ephemeral=True
+            )
+            
+        except Exception as e:
+            logger.error(f"Export error: {e}")
+            await interaction.response.send_message(f"❌ Export error: {str(e)}", ephemeral=True)
+
+class SearchModal(discord.ui.Modal, title="🔍 Smart Search"):
+    """Modal for entering search filters."""
+    
+    def __init__(self):
+        super().__init__()
+        
+        self.keyword = discord.ui.TextInput(
+            label="Keyword",
+            placeholder="Enter a keyword to search for...",
+            required=False,
+            max_length=100
+        )
+        self.add_item(self.keyword)
+        
+        self.user_id = discord.ui.TextInput(
+            label="User ID",
+            placeholder="Enter a user ID...",
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.user_id)
+        
+        self.moderator_id = discord.ui.TextInput(
+            label="Moderator ID",
+            placeholder="Enter a moderator ID...",
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.moderator_id)
+        
+        self.channel_id = discord.ui.TextInput(
+            label="Channel ID",
+            placeholder="Enter a channel ID...",
+            required=False,
+            max_length=20
+        )
+        self.add_item(self.channel_id)
+        
+        self.date_from = discord.ui.TextInput(
+            label="Date From (YYYY-MM-DD)",
+            placeholder="e.g., 2024-01-01",
+            required=False,
+            max_length=10
+        )
+        self.add_item(self.date_from)
+        
+        self.date_to = discord.ui.TextInput(
+            label="Date To (YYYY-MM-DD)",
+            placeholder="e.g., 2024-12-31",
+            required=False,
+            max_length=10
+        )
+        self.add_item(self.date_to)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle modal submission."""
+        search_data = {
+            "keyword": self.keyword.value or "",
+            "user_id": int(self.user_id.value) if self.user_id.value else None,
+            "moderator_id": int(self.moderator_id.value) if self.moderator_id.value else None,
+            "channel_id": int(self.channel_id.value) if self.channel_id.value else None,
+            "date_from": self.date_from.value or None,
+            "date_to": self.date_to.value or None,
+            "sort": "newest",
+            "limit": 50
+        }
+        
+        await handle_search(interaction, search_data)
+
+class SearchTypeSelect(discord.ui.Select):
+    """Select menu for choosing search types."""
+    
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="All Types", value="all", description="Search across all entry types", emoji="🔍"),
+            discord.SelectOption(label="Warnings", value="warning", description="Search warnings only", emoji="⚠️"),
+            discord.SelectOption(label="Bans", value="ban", description="Search bans only", emoji="🔨"),
+            discord.SelectOption(label="Kicks", value="kick", description="Search kicks only", emoji="👢"),
+            discord.SelectOption(label="Timeouts", value="timeout", description="Search timeouts only", emoji="⏰"),
+            discord.SelectOption(label="Messages", value="message", description="Search messages only", emoji="💬"),
+            discord.SelectOption(label="Deleted Messages", value="deleted_message", description="Search deleted messages only", emoji="🗑️"),
+            discord.SelectOption(label="Edited Messages", value="edited_message", description="Search edited messages only", emoji="✏️"),
+            discord.SelectOption(label="Joins", value="join", description="Search join logs only", emoji="👋"),
+            discord.SelectOption(label="Leaves", value="leave", description="Search leave logs only", emoji="🚪"),
+            discord.SelectOption(label="Role Changes", value="role_add", description="Search role changes only", emoji="🎭"),
+            discord.SelectOption(label="Voice Events", value="voice_join", description="Search voice events only", emoji="🔊"),
+            discord.SelectOption(label="Nickname Changes", value="nick_change", description="Search nickname changes only", emoji="✏️"),
+        ]
+        super().__init__(
+            placeholder="Select entry type to search...",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_type = self.values[0]
+        await interaction.response.send_message(f"✅ Selected type: {self.values[0]}", ephemeral=True)
+
+class SearchSortSelect(discord.ui.Select):
+    """Select menu for choosing sort order."""
+    
+    def __init__(self):
+        options = [
+            discord.SelectOption(label="Newest First", value="newest", description="Sort by newest first", emoji="⬇️"),
+            discord.SelectOption(label="Oldest First", value="oldest", description="Sort by oldest first", emoji="⬆️"),
+            discord.SelectOption(label="Relevance", value="relevance", description="Sort by relevance", emoji="⭐"),
+        ]
+        super().__init__(
+            placeholder="Select sort order...",
+            options=options,
+            min_values=1,
+            max_values=1
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        self.view.selected_sort = self.values[0]
+        await interaction.response.send_message(f"✅ Selected sort: {self.values[0]}", ephemeral=True)
+
+class SearchPanelView(discord.ui.View):
+    """View for the search panel."""
+    
+    def __init__(self):
+        super().__init__(timeout=300)
+        self.selected_type = "all"
+        self.selected_sort = "newest"
+        
+        # Add type select
+        self.add_item(SearchTypeSelect())
+        
+        # Add sort select
+        self.add_item(SearchSortSelect())
+        
+        # Search button
+        search_button = discord.ui.Button(
+            label="🔍 Advanced Search",
+            style=discord.ButtonStyle.primary,
+            custom_id="advanced_search",
+            row=2
+        )
+        search_button.callback = self.advanced_search_callback
+        self.add_item(search_button)
+        
+        # Quick search button
+        quick_search = discord.ui.Button(
+            label="⚡ Quick Search",
+            style=discord.ButtonStyle.success,
+            custom_id="quick_search",
+            row=2
+        )
+        quick_search.callback = self.quick_search_callback
+        self.add_item(quick_search)
+        
+        # Clear filters
+        clear_filters = discord.ui.Button(
+            label="🧹 Clear Filters",
+            style=discord.ButtonStyle.secondary,
+            custom_id="clear_filters",
+            row=2
+        )
+        clear_filters.callback = self.clear_filters_callback
+        self.add_item(clear_filters)
+        
+        # Back button
+        back_button = discord.ui.Button(
+            label="🔙 Back to Main",
+            style=discord.ButtonStyle.secondary,
+            custom_id="back_to_main",
+            row=3
+        )
+        back_button.callback = self.back_callback
+        self.add_item(back_button)
+    
+    async def advanced_search_callback(self, interaction: discord.Interaction):
+        """Open advanced search modal."""
+        modal = SearchModal()
+        await interaction.response.send_modal(modal)
+    
+    async def quick_search_callback(self, interaction: discord.Interaction):
+        """Perform a quick search with current filters."""
+        # Create a quick search embed with instructions
+        embed = discord.Embed(
+            title="⚡ Quick Search",
+            description="Enter a keyword to search for:",
+            color=discord.Color.blue()
+        )
+        
+        # Create a modal for quick search
+        modal = QuickSearchModal(self.selected_type, self.selected_sort)
+        await interaction.response.send_modal(modal)
+    
+    async def clear_filters_callback(self, interaction: discord.Interaction):
+        """Clear all filters."""
+        self.selected_type = "all"
+        self.selected_sort = "newest"
+        
+        # Update the select menus
+        for item in self.children:
+            if isinstance(item, discord.ui.Select):
+                item.values = []
+        
+        embed = discord.Embed(
+            title="🧹 Filters Cleared",
+            description="All search filters have been reset.",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    async def back_callback(self, interaction: discord.Interaction):
+        """Return to main control panel."""
+        embed = discord.Embed(
+            title="🎛️ Bot Control Panel",
+            description="Welcome to the bot control panel! Use the buttons below to manage the bot.",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="🤖 Status", value="Bot is online and ready", inline=True)
+        embed.add_field(name="👑 Owner", value=f"<@{OWNER_ID}>", inline=True)
+        embed.add_field(name="📊 Commands", value=f"{len(bot.tree.get_commands())} total", inline=True)
+        embed.set_footer(text="Control Panel • Owner Only")
+        
+        view = ControlPanelView(bot, OWNER_ID)
+        await interaction.response.edit_original_response(embed=embed, view=view)
+
+class QuickSearchModal(discord.ui.Modal, title="⚡ Quick Search"):
+    """Modal for quick searches."""
+    
+    def __init__(self, entry_type: str, sort: str):
+        super().__init__()
+        self.entry_type = entry_type
+        self.sort = sort
+        
+        self.keyword = discord.ui.TextInput(
+            label="Keyword",
+            placeholder="Enter a keyword to search for...",
+            required=True,
+            max_length=100
+        )
+        self.add_item(self.keyword)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        """Handle quick search submission."""
+        search_data = {
+            "keyword": self.keyword.value,
+            "entry_type": self.entry_type if self.entry_type != "all" else None,
+            "sort": self.sort,
+            "limit": 50
+        }
+        
+        await handle_search(interaction, search_data)
+
+async def handle_open_search(interaction: discord.Interaction):
+    """Handle opening the search panel."""
+    embed = discord.Embed(
+        title="🔍 Smart Search Panel",
+        description="Use the controls below to search across all logs and databases.\n\n"
+                   "**Available Filters:**\n"
+                   "• Keywords\n"
+                   "• User ID\n"
+                   "• Moderator ID\n"
+                   "• Channel ID\n"
+                   "• Date Range\n"
+                   "• Entry Type\n"
+                   "• Sort Order",
+        color=discord.Color.blue(),
+        timestamp=datetime.now()
+    )
+    embed.set_footer(text="Search Panel • Owner Only")
+    
+    view = SearchPanelView()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 # =========================
 # COMPLETE MODERATION CONTROL PANEL VIEWS
@@ -2768,6 +3396,10 @@ class ControlPanelButton(discord.ui.Button):
             )
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
+        
+        if self.custom_id == "open_search":
+            await handle_open_search(interaction)
+            return
 
         command_map = {
             "show_stats": handle_show_stats,
@@ -2891,6 +3523,14 @@ class ControlPanelView(discord.ui.View):
         ))
         
         self.add_item(ControlPanelButton(
+            "🔍 Search",
+            "open_search",
+            discord.ButtonStyle.primary,
+            row=0,
+            emoji="🔍"
+        ))
+        
+        self.add_item(ControlPanelButton(
             "🧹 Cache",
             "clear_cache",
             discord.ButtonStyle.danger,
@@ -2978,6 +3618,7 @@ welcome_configs = {}
 async def on_member_join(member):
     try:
         await add_history(member.guild.id, member.id, str(member), "JOIN", "Joined the server")
+        await index_for_search(member.guild.id, "join", str(member.id), member.id, None, None, None, "User joined the server")
         
         embed = discord.Embed(
             title="👋 Member Joined",
@@ -3008,6 +3649,7 @@ async def on_member_join(member):
 async def on_member_remove(member):
     try:
         await add_history(member.guild.id, member.id, str(member), "LEAVE", "Left the server")
+        await index_for_search(member.guild.id, "leave", str(member.id), member.id, None, None, None, "User left the server")
         
         embed = discord.Embed(
             title="👋 Member Left",
@@ -3114,6 +3756,7 @@ async def on_voice_state_update(member, before, after):
         if before.channel != after.channel:
             if after.channel:
                 await add_history(member.guild.id, member.id, str(member), "VOICE_JOIN", f"Joined {after.channel.name}")
+                await index_for_search(member.guild.id, "voice_join", str(member.id), member.id, None, None, None, f"Joined voice channel: {after.channel.name}")
                 await update_voice_stats(member.id, member.guild.id, is_join=True)
                 
                 config = await get_mod_logs_config(member.guild.id)
@@ -3130,6 +3773,7 @@ async def on_voice_state_update(member, before, after):
                     
             elif before.channel:
                 await add_history(member.guild.id, member.id, str(member), "VOICE_LEAVE", f"Left {before.channel.name}")
+                await index_for_search(member.guild.id, "voice_leave", str(member.id), member.id, None, None, None, f"Left voice channel: {before.channel.name}")
                 await update_voice_stats(member.id, member.guild.id, is_join=False)
                 
                 config = await get_mod_logs_config(member.guild.id)
@@ -3154,6 +3798,8 @@ async def on_member_update(before, after):
                 after.guild.id, after.id, str(after), "NICK_CHANGE",
                 f"{before.nick or before.name} -> {after.nick or after.name}"
             )
+            await index_for_search(after.guild.id, "nick_change", str(after.id), after.id, None, None, None, 
+                                 f"Nickname changed from {before.nick or before.name} to {after.nick or after.name}")
             
             config = await get_mod_logs_config(after.guild.id)
             if config and config["enabled"] and config["log_roles"]:
@@ -3173,6 +3819,8 @@ async def on_member_update(before, after):
         for role in added_roles:
             if role.name != "@everyone":
                 await add_history(after.guild.id, after.id, str(after), "ROLE_ADD", f"Role added: {role.name}")
+                await index_for_search(after.guild.id, "role_add", str(after.id), after.id, None, None, role.id, 
+                                     f"Role added: {role.name}")
                 
                 config = await get_mod_logs_config(after.guild.id)
                 if config and config["enabled"] and config["log_roles"]:
@@ -3188,6 +3836,8 @@ async def on_member_update(before, after):
         for role in removed_roles:
             if role.name != "@everyone":
                 await add_history(after.guild.id, after.id, str(after), "ROLE_REMOVE", f"Role removed: {role.name}")
+                await index_for_search(after.guild.id, "role_remove", str(after.id), after.id, None, None, role.id,
+                                     f"Role removed: {role.name}")
                 
                 config = await get_mod_logs_config(after.guild.id)
                 if config and config["enabled"] and config["log_roles"]:
@@ -3359,6 +4009,8 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             
             await member.ban(reason=reason)
             await add_history(interaction.guild.id, member.id, str(member), "BAN", f"Banned by {interaction.user}: {reason}")
+            await index_for_search(interaction.guild.id, "ban", str(member.id), member.id, interaction.user.id, None, None, 
+                                 f"Banned by {interaction.user}: {reason}")
             await track_moderation_action(interaction.guild.id, "ban")
             
             embed = discord.Embed(title="🔨 User Banned", color=discord.Color.red())
@@ -3464,6 +4116,8 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             
             await member.timeout(utcnow() + timedelta(minutes=minutes), reason=reason)
             await add_history(interaction.guild.id, member.id, str(member), "MUTE", f"Muted for {minutes}min by {interaction.user}: {reason}")
+            await index_for_search(interaction.guild.id, "timeout", str(member.id), member.id, interaction.user.id, None, None,
+                                 f"Timed out for {minutes}min by {interaction.user}: {reason}")
             await track_moderation_action(interaction.guild.id, "mute")
             
             embed = discord.Embed(title="🔇 User Muted", color=discord.Color.orange())
@@ -3526,6 +4180,8 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             
             await member.kick(reason=reason)
             await add_history(interaction.guild.id, member.id, str(member), "KICK", reason)
+            await index_for_search(interaction.guild.id, "kick", str(member.id), member.id, interaction.user.id, None, None,
+                                 f"Kicked by {interaction.user}: {reason}")
             await track_moderation_action(interaction.guild.id, "kick")
             
             embed = discord.Embed(title="👢 User Kicked", color=discord.Color.red())
@@ -3868,6 +4524,79 @@ class ModerationActions(commands.Cog, name="moderation_actions"):
             logger.error(f"Show error: {e}")
             await interaction.followup.send(f"❌ Error: {e}", ephemeral=True)
 
+    # =========================
+    # SMART SEARCH COMMAND
+    # =========================
+    
+    @mod_group.command(name="search", description="Search across all logs and databases")
+    @is_owner()
+    @app_commands.describe(
+        keyword="Keyword to search for",
+        user_id="Filter by user ID",
+        moderator_id="Filter by moderator ID",
+        channel_id="Filter by channel ID",
+        entry_type="Filter by entry type",
+        sort="Sort order",
+        limit="Max results to return"
+    )
+    @app_commands.choices(entry_type=[
+        discord.app_commands.Choice(name="All Types", value="all"),
+        discord.app_commands.Choice(name="Warnings", value="warning"),
+        discord.app_commands.Choice(name="Bans", value="ban"),
+        discord.app_commands.Choice(name="Kicks", value="kick"),
+        discord.app_commands.Choice(name="Timeouts", value="timeout"),
+        discord.app_commands.Choice(name="Messages", value="message"),
+        discord.app_commands.Choice(name="Deleted Messages", value="deleted_message"),
+        discord.app_commands.Choice(name="Edited Messages", value="edited_message"),
+        discord.app_commands.Choice(name="Joins", value="join"),
+        discord.app_commands.Choice(name="Leaves", value="leave"),
+        discord.app_commands.Choice(name="Role Changes", value="role_add"),
+        discord.app_commands.Choice(name="Voice Events", value="voice_join"),
+        discord.app_commands.Choice(name="Nickname Changes", value="nick_change"),
+    ])
+    @app_commands.choices(sort=[
+        discord.app_commands.Choice(name="Newest First", value="newest"),
+        discord.app_commands.Choice(name="Oldest First", value="oldest"),
+        discord.app_commands.Choice(name="Relevance", value="relevance"),
+    ])
+    async def mod_search(self, interaction: discord.Interaction, keyword: str = None, user_id: str = None,
+                         moderator_id: str = None, channel_id: str = None, entry_type: str = "all",
+                         sort: str = "newest", limit: int = 20):
+        """Search across all logs and databases."""
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            search_data = {
+                "keyword": keyword or "",
+                "user_id": int(user_id) if user_id else None,
+                "moderator_id": int(moderator_id) if moderator_id else None,
+                "channel_id": int(channel_id) if channel_id else None,
+                "entry_type": entry_type if entry_type != "all" else None,
+                "sort": sort,
+                "limit": min(limit, 50)
+            }
+            
+            results = await smart_search(interaction.guild_id, search_data)
+            
+            if not results:
+                embed = discord.Embed(
+                    title="🔍 Search Results",
+                    description="No results found matching your criteria.",
+                    color=discord.Color.orange()
+                )
+                await interaction.followup.send(embed=embed, ephemeral=True)
+                return
+            
+            view = SearchResultsView(results, interaction.guild, "txt")
+            embed = view.create_embed(0)
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            
+        except ValueError:
+            await interaction.followup.send("❌ Invalid ID format. Please enter valid numbers.", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Search command error: {e}")
+            await interaction.followup.send(f"❌ Search error: {str(e)}", ephemeral=True)
+
 # =========================
 # 🎭 ROLE MANAGEMENT COG
 # =========================
@@ -3891,6 +4620,8 @@ class RoleManagement(commands.Cog, name="role_management"):
             old_nick = member.nick or member.name
             await member.edit(nick=nickname, reason=f"Changed by {interaction.user}")
             await add_history(interaction.guild.id, member.id, str(member), "NICK_CHANGE", f"{old_nick} -> {nickname} by {interaction.user}")
+            await index_for_search(interaction.guild.id, "nick_change", str(member.id), member.id, interaction.user.id, None, None,
+                                 f"Nickname changed from {old_nick} to {nickname} by {interaction.user}")
             
             embed = discord.Embed(title="✏️ Nickname Changed", color=discord.Color.blue())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -3941,6 +4672,8 @@ class RoleManagement(commands.Cog, name="role_management"):
             
             await member.add_roles(role, reason=f"Added by {interaction.user}")
             await add_history(interaction.guild.id, member.id, str(member), "ROLE_ADD", f"Role {role.name} added by {interaction.user}")
+            await index_for_search(interaction.guild.id, "role_add", str(member.id), member.id, interaction.user.id, None, role.id,
+                                 f"Role {role.name} added by {interaction.user}")
             
             embed = discord.Embed(title="🎭 Role Given", color=discord.Color.green())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -3967,6 +4700,8 @@ class RoleManagement(commands.Cog, name="role_management"):
             
             await member.remove_roles(role, reason=f"Removed by {interaction.user}")
             await add_history(interaction.guild.id, member.id, str(member), "ROLE_REMOVE", f"Role {role.name} removed by {interaction.user}")
+            await index_for_search(interaction.guild.id, "role_remove", str(member.id), member.id, interaction.user.id, None, role.id,
+                                 f"Role {role.name} removed by {interaction.user}")
             
             embed = discord.Embed(title="🎭 Role Removed", color=discord.Color.orange())
             embed.add_field(name="User", value=member.mention, inline=True)
@@ -5808,7 +6543,7 @@ class Help(commands.Cog, name="help"):
         )
         embed.add_field(
             name="🛡️ Moderation (Owner Only)",
-            value="`/mod clear`, `/mod thanos_snap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`\n"
+            value="`/mod clear`, `/mod thanos_snap`, `/mod ban`, `/mod softban`, `/mod unban`, `/mod kick`, `/mod mute`, `/mod unmute`, `/mod warn`, `/mod warnings`, `/mod clean`, `/mod lock`, `/mod unlock`, `/mod slowmode`, `/mod history`, `/mod hide`, `/mod show`, `/mod snipe`, `/mod editsnipe`, `/mod search`\n"
                   "`/role nick`, `/role resetnick`, `/role give`, `/role remove`\n"
                   "`/voice kick`, `/voice move`, `/voice deafen`, `/voice undeafen`, `/voice mute`, `/voice unmute`\n"
                   "`/purge user`, `/purge bots`, `/purge images`, `/purge attachments`, `/purge embeds`, `/purge contains`, `/purge links`\n"
@@ -5822,6 +6557,12 @@ class Help(commands.Cog, name="help"):
         embed.add_field(
             name="📊 Statistics (Owner Only)",
             value="`/stats user`, `/stats server`, `/stats channel`, `/stats leaderboard`, `/stats titles`, `/stats reset`",
+            inline=False
+        )
+        embed.add_field(
+            name="🔍 Smart Search (Owner Only)",
+            value="`/mod search` - Search across all logs and databases with filters\n"
+                  "`Control Panel → Search` - Advanced search interface with filters and export",
             inline=False
         )
         embed.add_field(
@@ -5955,7 +6696,8 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             embed = discord.Embed(
                 title="🎛️ Bot Control Panel",
                 description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.\n\n"
-                           "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.",
+                           "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.\n"
+                           "**🔍 Search Panel** - Click the Search button for advanced search.",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
@@ -6036,7 +6778,8 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
             embed = discord.Embed(
                 title="🎛️ Bot Control Panel",
                 description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.\n\n"
-                           "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.",
+                           "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.\n"
+                           "**🔍 Search Panel** - Click the Search button for advanced search.",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
