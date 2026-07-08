@@ -249,6 +249,16 @@ class AsyncDatabase:
                 last_updated TEXT
             )""",
             # =========================
+            # AFK SYSTEM TABLE - NEW
+            # =========================
+            """CREATE TABLE IF NOT EXISTS afk_status (
+                user_id INTEGER,
+                guild_id INTEGER,
+                reason TEXT,
+                started_at TEXT,
+                PRIMARY KEY (user_id, guild_id)
+            )""",
+            # =========================
             # STATISTICS TABLES - FIXED SCHEMA
             # =========================
             """CREATE TABLE IF NOT EXISTS user_stats (
@@ -382,6 +392,427 @@ class AsyncDatabase:
             self._conn.close()
 
 db = AsyncDatabase()
+
+# =========================
+# AFK SYSTEM - NEW
+# =========================
+
+# Cooldown for AFK notifications to prevent spam
+_afk_notification_cooldown = defaultdict(lambda: defaultdict(float))
+AFK_COOLDOWN_SECONDS = 60  # 1 minute cooldown
+
+async def set_afk_status(user_id: int, guild_id: int, reason: Optional[str] = None) -> None:
+    """Set a user as AFK with an optional reason."""
+    await db.execute(
+        """INSERT OR REPLACE INTO afk_status (user_id, guild_id, reason, started_at)
+           VALUES (?, ?, ?, ?)""",
+        (user_id, guild_id, reason, datetime.now().isoformat())
+    )
+    await db.commit()
+    logger.debug(f"User {user_id} set AFK in guild {guild_id}")
+
+
+async def remove_afk_status(user_id: int, guild_id: int) -> None:
+    """Remove a user's AFK status."""
+    await db.execute(
+        "DELETE FROM afk_status WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id)
+    )
+    await db.commit()
+    logger.debug(f"User {user_id} removed AFK in guild {guild_id}")
+
+
+async def get_afk_status(user_id: int, guild_id: int) -> Optional[Dict[str, Any]]:
+    """Get a user's AFK status."""
+    result = await db.fetchone(
+        "SELECT reason, started_at FROM afk_status WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id)
+    )
+    if result:
+        return {
+            "reason": result[0],
+            "started_at": result[1]
+        }
+    return None
+
+
+async def is_afk(user_id: int, guild_id: int) -> bool:
+    """Check if a user is AFK in a guild."""
+    result = await db.fetchone(
+        "SELECT 1 FROM afk_status WHERE user_id = ? AND guild_id = ?",
+        (user_id, guild_id)
+    )
+    return result is not None
+
+
+async def get_all_afk_users(guild_id: int) -> List[Tuple[int, str, str]]:
+    """Get all AFK users in a guild."""
+    results = await db.fetchall(
+        """SELECT user_id, reason, started_at
+           FROM afk_status
+           WHERE guild_id = ?
+           ORDER BY started_at DESC""",
+        (guild_id,)
+    )
+    return [(row[0], row[1], row[2]) for row in results]
+
+
+def format_afk_duration(started_at: str) -> str:
+    """Format the AFK duration as a human-readable string."""
+    try:
+        start_time = datetime.fromisoformat(started_at)
+        duration = datetime.now() - start_time
+        
+        seconds = int(duration.total_seconds())
+        
+        if seconds < 60:
+            return f"{seconds}s"
+        elif seconds < 3600:
+            minutes = seconds // 60
+            seconds = seconds % 60
+            return f"{minutes}m {seconds}s"
+        elif seconds < 86400:
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            return f"{hours}h {minutes}m"
+        else:
+            days = seconds // 86400
+            hours = (seconds % 86400) // 3600
+            return f"{days}d {hours}h"
+    except (ValueError, TypeError):
+        return "unknown"
+
+
+def should_send_notification(guild_id: int, user_id: int) -> bool:
+    """Check if a notification should be sent based on cooldown."""
+    last_notification = _afk_notification_cooldown[guild_id].get(user_id, 0)
+    current_time = time.time()
+    if current_time - last_notification < AFK_COOLDOWN_SECONDS:
+        return False
+    _afk_notification_cooldown[guild_id][user_id] = current_time
+    return True
+
+# =========================
+# AFK COG
+# =========================
+
+class AFKSystem(commands.Cog, name="afk"):
+    """AFK (Away From Keyboard) system."""
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    # =========================
+    # AFK COMMANDS
+    # =========================
+    
+    afk_group = app_commands.Group(name="afk", description="AFK (Away From Keyboard) system")
+    
+    @afk_group.command(name="set", description="Set yourself as AFK")
+    @app_commands.describe(reason="Reason for being AFK (optional)")
+    async def afk_set(self, interaction: discord.Interaction, reason: str = None):
+        """Set the user as AFK with an optional reason."""
+        await interaction.response.defer(ephemeral=False)
+        
+        guild_id = interaction.guild_id
+        user_id = interaction.user.id
+        
+        # Remove existing AFK status if any
+        if await is_afk(user_id, guild_id):
+            await remove_afk_status(user_id, guild_id)
+        
+        # Set AFK status
+        await set_afk_status(user_id, guild_id, reason)
+        
+        # Build response
+        if reason:
+            message = f"👋 {interaction.user.mention} is now AFK: **{reason}**"
+        else:
+            message = f"👋 {interaction.user.mention} is now AFK"
+        
+        await interaction.followup.send(message)
+    
+    @afk_group.command(name="remove", description="Remove your AFK status")
+    async def afk_remove(self, interaction: discord.Interaction):
+        """Remove the user's AFK status."""
+        await interaction.response.defer(ephemeral=True)
+        
+        guild_id = interaction.guild_id
+        user_id = interaction.user.id
+        
+        if not await is_afk(user_id, guild_id):
+            return await interaction.followup.send("❌ You are not currently AFK.", ephemeral=True)
+        
+        await remove_afk_status(user_id, guild_id)
+        
+        await interaction.followup.send(f"✅ Welcome back, {interaction.user.mention}! Your AFK status has been removed.", ephemeral=True)
+    
+    @afk_group.command(name="status", description="Check a user's AFK status")
+    @app_commands.describe(member="Member to check")
+    async def afk_status(self, interaction: discord.Interaction, member: discord.Member):
+        """Check a user's AFK status."""
+        await interaction.response.defer(ephemeral=True)
+        
+        status = await get_afk_status(member.id, interaction.guild_id)
+        
+        if not status:
+            return await interaction.followup.send(f"✅ {member.mention} is not AFK.", ephemeral=True)
+        
+        embed = discord.Embed(
+            title="🟠 AFK Status",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="User", value=member.mention, inline=True)
+        embed.add_field(name="AFK Since", value=f"<t:{int(datetime.fromisoformat(status['started_at']).timestamp())}:R>", inline=True)
+        embed.add_field(name="Duration", value=format_afk_duration(status['started_at']), inline=True)
+        if status['reason']:
+            embed.add_field(name="Reason", value=status['reason'], inline=False)
+        
+        embed.set_footer(text=f"User ID: {member.id}")
+        
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    
+    # =========================
+    # AFK EVENT HANDLERS
+    # =========================
+    
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Handle AFK notifications and removals."""
+        if message.author.bot:
+            return
+        
+        if not message.guild:
+            return
+        
+        guild_id = message.guild.id
+        author_id = message.author.id
+        
+        # =========================
+        # 1. REMOVE AFK STATUS WHEN USER SENDS A MESSAGE
+        # =========================
+        if await is_afk(author_id, guild_id):
+            await remove_afk_status(author_id, guild_id)
+            # Notify the user that they are no longer AFK
+            try:
+                await message.channel.send(
+                    f"👋 Welcome back, {message.author.mention}! I've removed your AFK status.",
+                    delete_after=10
+                )
+            except:
+                pass
+        
+        # =========================
+        # 2. CHECK FOR MENTIONS OF AFK USERS
+        # =========================
+        # Check both user mentions and role mentions
+        for mentioned_user in message.mentions:
+            # Don't notify if the mentioned user is the message author
+            if mentioned_user.id == author_id:
+                continue
+            
+            # Don't notify if the mentioned user is a bot
+            if mentioned_user.bot:
+                continue
+            
+            status = await get_afk_status(mentioned_user.id, guild_id)
+            if status and should_send_notification(guild_id, mentioned_user.id):
+                # Build the notification embed
+                embed = discord.Embed(
+                    title="🟠 AFK User Mentioned",
+                    description=f"{mentioned_user.mention} is currently AFK",
+                    color=discord.Color.orange()
+                )
+                
+                if status['reason']:
+                    embed.add_field(name="Reason", value=status['reason'], inline=False)
+                
+                embed.add_field(
+                    name="AFK Since",
+                    value=f"<t:{int(datetime.fromisoformat(status['started_at']).timestamp())}:R>",
+                    inline=True
+                )
+                embed.add_field(
+                    name="Duration",
+                    value=format_afk_duration(status['started_at']),
+                    inline=True
+                )
+                
+                # Send the notification
+                try:
+                    await message.channel.send(embed=embed, delete_after=30)
+                except:
+                    pass
+    
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        """Handle nickname changes while AFK."""
+        if before.nick != after.nick:
+            status = await get_afk_status(after.id, after.guild.id)
+            if status:
+                # AFK user changed their nickname - log it but AFK status remains
+                # The AFK status is tied to the user ID, not the nickname, so it continues working
+                logger.debug(f"AFK user {after.id} changed nickname from {before.nick} to {after.nick}")
+
+# =========================
+# AFK CONTROL PANEL INTEGRATION
+# =========================
+
+class AFKPanelView(discord.ui.View):
+    """View for the AFK management panel."""
+    
+    def __init__(self, guild: discord.Guild, return_to_main_callback):
+        super().__init__(timeout=None)
+        self.guild = guild
+        self.return_to_main_callback = return_to_main_callback
+        
+        self.add_item(AFKPanelButton(
+            "🔄 Refresh List",
+            "afk_refresh",
+            discord.ButtonStyle.primary,
+            row=0
+        ))
+        self.add_item(AFKPanelButton(
+            "🔙 Back",
+            "afk_back",
+            discord.ButtonStyle.secondary,
+            row=0
+        ))
+    
+    async def button_callback(self, interaction: discord.Interaction, action: str):
+        """Handle button callbacks for AFK panel."""
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+        
+        if action == "afk_back":
+            await self.return_to_main_callback(interaction)
+            return
+        
+        if action == "afk_refresh":
+            await self._refresh_afk_list(interaction)
+            return
+    
+    async def _refresh_afk_list(self, interaction: discord.Interaction):
+        """Refresh the AFK user list."""
+        afk_users = await get_all_afk_users(self.guild.id)
+        
+        embed = discord.Embed(
+            title="🟠 AFK Users",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        
+        if not afk_users:
+            embed.description = "No users are currently AFK."
+        else:
+            embed.description = f"**{len(afk_users)}** users currently AFK"
+            
+            for user_id, reason, started_at in afk_users:
+                member = self.guild.get_member(user_id)
+                name = member.display_name if member else f"Unknown ({user_id})"
+                duration = format_afk_duration(started_at)
+                
+                value = f"AFK Since: <t:{int(datetime.fromisoformat(started_at).timestamp())}:R>\n"
+                value += f"Duration: {duration}"
+                if reason:
+                    value += f"\nReason: {reason}"
+                if not member:
+                    value += "\n⚠️ User not in server"
+                
+                embed.add_field(
+                    name=f"👤 {name}",
+                    value=value,
+                    inline=False
+                )
+        
+        embed.set_footer(text="AFK users are automatically removed when they send a message.")
+        
+        # Create view with remove buttons for each user
+        view = discord.ui.View()
+        
+        # Add remove buttons for each AFK user
+        for user_id, _, _ in afk_users[:10]:  # Limit to 10 for UI
+            button = AFKRemoveButton(user_id, self.guild)
+            view.add_item(button)
+        
+        # Add refresh and back buttons
+        refresh_button = discord.ui.Button(
+            label="🔄 Refresh",
+            style=discord.ButtonStyle.primary,
+            custom_id="afk_refresh_panel"
+        )
+        refresh_button.callback = lambda i: self._refresh_afk_list(i)
+        view.add_item(refresh_button)
+        
+        back_button = discord.ui.Button(
+            label="🔙 Back",
+            style=discord.ButtonStyle.secondary,
+            custom_id="afk_back_panel"
+        )
+        back_button.callback = lambda i: self.return_to_main_callback(i)
+        view.add_item(back_button)
+        
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class AFKRemoveButton(discord.ui.Button):
+    """Button for removing a specific user's AFK status."""
+    
+    def __init__(self, user_id: int, guild: discord.Guild):
+        self.user_id = user_id
+        self.guild = guild
+        
+        member = guild.get_member(user_id)
+        label = member.display_name if member else f"User {user_id}"
+        super().__init__(
+            label=f"Remove {label[:20]}",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"afk_remove_{user_id}"
+        )
+    
+    async def callback(self, interaction: discord.Interaction):
+        """Handle AFK removal button press."""
+        if interaction.user.id != OWNER_ID:
+            return await interaction.response.send_message(
+                "❌ This control panel is owner-only.",
+                ephemeral=True
+            )
+        
+        await remove_afk_status(self.user_id, self.guild.id)
+        await interaction.response.send_message(
+            f"✅ Removed AFK status for <@{self.user_id}>",
+            ephemeral=True
+        )
+        
+        # Refresh the panel after removal
+        # This will be handled by the parent view if we access it
+        try:
+            # Try to refresh the panel
+            if hasattr(self.view, '_refresh_afk_list'):
+                await self.view._refresh_afk_list(interaction)
+        except:
+            pass
+
+
+class AFKPanelButton(discord.ui.Button):
+    """Button for the AFK panel."""
+    
+    def __init__(self, label: str, action: str, style: discord.ButtonStyle, row: int = 0):
+        super().__init__(
+            label=label,
+            custom_id=f"afk_{action}",
+            style=style,
+            row=row
+        )
+        self.action = action
+    
+    async def callback(self, interaction: discord.Interaction):
+        if hasattr(self.view, 'button_callback'):
+            await self.view.button_callback(interaction, self.action)
 
 # =========================
 # STATISTICS HELPER FUNCTIONS - FIXED
@@ -3401,6 +3832,10 @@ class ControlPanelButton(discord.ui.Button):
             await handle_open_search(interaction)
             return
 
+        if self.custom_id == "open_afk":
+            await self._open_afk_panel(interaction)
+            return
+
         command_map = {
             "show_stats": handle_show_stats,
             "clear_cache": handle_clear_cache,
@@ -3421,6 +3856,44 @@ class ControlPanelButton(discord.ui.Button):
                 f"✅ Executed: {self.label}",
                 ephemeral=True
             )
+    
+    async def _open_afk_panel(self, interaction: discord.Interaction):
+        """Open the AFK management panel."""
+        afk_users = await get_all_afk_users(interaction.guild_id)
+        
+        embed = discord.Embed(
+            title="🟠 AFK Users",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        
+        if not afk_users:
+            embed.description = "No users are currently AFK."
+        else:
+            embed.description = f"**{len(afk_users)}** users currently AFK"
+            
+            for user_id, reason, started_at in afk_users[:15]:
+                member = interaction.guild.get_member(user_id)
+                name = member.display_name if member else f"Unknown ({user_id})"
+                duration = format_afk_duration(started_at)
+                
+                value = f"AFK Since: <t:{int(datetime.fromisoformat(started_at).timestamp())}:R>\n"
+                value += f"Duration: {duration}"
+                if reason:
+                    value += f"\nReason: {reason}"
+                if not member:
+                    value += "\n⚠️ User not in server"
+                
+                embed.add_field(
+                    name=f"👤 {name}",
+                    value=value,
+                    inline=False
+                )
+        
+        embed.set_footer(text="AFK users are automatically removed when they send a message.")
+        
+        view = AFKPanelView(interaction.guild, self.view.return_to_main_panel)
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 async def handle_db_optimize(interaction: discord.Interaction):
     """Handle database optimize command."""
@@ -3592,6 +4065,14 @@ class ControlPanelView(discord.ui.View):
             discord.ButtonStyle.primary,
             row=3,
             emoji="🛡️"
+        ))
+        
+        self.add_item(ControlPanelButton(
+            "🟠 AFK",
+            "open_afk",
+            discord.ButtonStyle.primary,
+            row=3,
+            emoji="🟠"
         ))
 
     async def return_to_main_panel(self, interaction: discord.Interaction):
@@ -6566,6 +7047,14 @@ class Help(commands.Cog, name="help"):
             inline=False
         )
         embed.add_field(
+            name="🟠 AFK System",
+            value="`/afk set [reason]` - Set yourself as AFK\n"
+                  "`/afk remove` - Remove your AFK status\n"
+                  "`/afk status` - Check a user's AFK status\n"
+                  "`Control Panel → AFK` - View and manage all AFK users",
+            inline=False
+        )
+        embed.add_field(
             name="🎮 Fun",
             value="`/fun 8ball`, `/fun dice`, `/fun coinflip`, `/fun meme`, `/fun rps`",
             inline=False
@@ -6697,7 +7186,8 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
                 title="🎛️ Bot Control Panel",
                 description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.\n\n"
                            "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.\n"
-                           "**🔍 Search Panel** - Click the Search button for advanced search.",
+                           "**🔍 Search Panel** - Click the Search button for advanced search.\n"
+                           "**🟠 AFK Panel** - Click the AFK button to manage AFK users.",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
@@ -6779,7 +7269,8 @@ class ControlPanelCommands(commands.Cog, name="control_panel"):
                 title="🎛️ Bot Control Panel",
                 description="Welcome to the bot control panel! Use the buttons and dropdowns below to manage the bot.\n\n"
                            "**🛡️ Moderation Panel** - Click the Moderation button for moderation tools.\n"
-                           "**🔍 Search Panel** - Click the Search button for advanced search.",
+                           "**🔍 Search Panel** - Click the Search button for advanced search.\n"
+                           "**🟠 AFK Panel** - Click the AFK button to manage AFK users.",
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
@@ -6831,6 +7322,7 @@ async def main():
     async with bot:
         await db.connect()
         await initialize_bot_state()
+        await bot.add_cog(AFKSystem(bot))  # Add AFK cog
         await bot.add_cog(ModerationActions(bot))
         await bot.add_cog(RoleManagement(bot))
         await bot.add_cog(VoiceModeration(bot))
